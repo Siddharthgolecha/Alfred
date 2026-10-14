@@ -139,7 +139,7 @@ class ContinuationTests(unittest.TestCase):
     def test_side_effects_cannot_be_resumed_even_if_already_completed(self):
         for tool,args in [
             ("run_named_task",{"name":"safe"}),
-            ("control_service",{"name":"safe.service","action":"restart"})]:
+            ("control_service",{"name":"safe.service","action":"stop"})]:
             with self.subTest(tool=tool):
                 with self.assertRaises(PermissionError):
                     build_handoff(SID,TID,"Run a task then explain","incomplete",
@@ -274,7 +274,12 @@ class AppTraceTests(unittest.TestCase):
         app=self.app
         env=app._start_task("text",len("Run safe task"))
         session=env.session_id
-        app.store.create_reminder("must not duplicate",8)
+        reminder=app.store.create_reminder("must not duplicate",8)
+        # The action is pending but NOT authorized by Qwen. Its trusted
+        # one-time CLI approval survives restart without autoexecution.
+        staged=app.system2.direct([{"name":"cancel_reminder",
+                                   "arguments":{"reminder_id":reminder["id"]}}])
+        approval_id=staged["approval"]["approval_id"]
         dbpath=app.cfg["runtime"]["database"]
         app.close()
         cfg=load_config()
@@ -288,6 +293,15 @@ class AppTraceTests(unittest.TestCase):
             self.assertEqual(history[-1].reason,"shutdown")
             self.assertEqual(history[-1].outcome,"failed")
             self.assertEqual(len(new.store.list_reminders()),1)
+            self.assertEqual([x["id"] for x in new.system2.approvals.pending()],
+                             [approval_id])
+            # No wake/Qwen path may approve it. Explicit CLI-only claim runs
+            # the effect exactly once, including after process restart.
+            self.assertEqual(new.system2.approve(approval_id),
+                             [{"cancelled":True}])
+            self.assertEqual(new.store.list_reminders(),[])
+            with self.assertRaises(ValueError):
+                new.system2.approve(approval_id)
             fresh=new._start_task("text",len("second task"))
             self.assertEqual(fresh.session_id,session)
             self.assertNotEqual(fresh.task_id,env.task_id)
