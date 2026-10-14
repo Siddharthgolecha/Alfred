@@ -35,13 +35,16 @@ class StubHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
+        is_plan = "Return ONLY a JSON object" in str(request.get("messages", ""))
+        stub_answer = ('{"message":"Stub plan","steps":[{"tool":"get_gpu_status",'
+                       '"args":{}}],"save_as":null}' if is_plan else "PONG")
         chunks = [
             {"id": "chatcmpl-local", "object": "chat.completion.chunk",
              "created": 1, "model": request.get("model", "deepseek-v4-flash"),
              "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]},
             {"id": "chatcmpl-local", "object": "chat.completion.chunk",
              "created": 1, "model": request.get("model", "deepseek-v4-flash"),
-             "choices": [{"index": 0, "delta": {"content": "PONG"}, "finish_reason": None}]},
+             "choices": [{"index": 0, "delta": {"content": stub_answer}, "finish_reason": None}]},
             {"id": "chatcmpl-local", "object": "chat.completion.chunk",
              "created": 1, "model": request.get("model", "deepseek-v4-flash"),
              "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
@@ -78,7 +81,11 @@ class DeepSeekGenuineSdkSmoke(TestCase):
                 owned_process = client._sdk.client._proc
                 self.assertEqual(answer["message"], "PONG")
                 self.assertEqual(answer["results"], [])
-                self.assertGreaterEqual(StubHandler.counter, 1)
+                from alfred.runtime import TOOL_SCHEMAS
+                proposed = client.plan("get GPU status", "a" * 32,
+                                       tools=TOOL_SCHEMAS)
+                self.assertEqual(proposed["steps"][0]["tool"], "get_gpu_status")
+                self.assertGreaterEqual(StubHandler.counter, 2)
                 self.assertFalse(any(request.get("tools") for request in StubHandler.inputs),
                                  "Cordis unexpectedly enabled model-facing tools")
                 self.assertTrue(all("localhost" not in str(request.get("tools", "")) for request in StubHandler.inputs))
