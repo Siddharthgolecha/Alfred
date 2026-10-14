@@ -98,9 +98,9 @@ To supply measured calibration, append optional signed integer milliseconds and 
 
 The workflow writes under `<SSD>/alfred/meetings/<UTC-session-id>/`:
 
-- `Alice.wav`, `Bob.wav`, etc. — 16 kHz PCM, independent continuously captured microphone channels.
-- `capture_manifest.json` — capture clock estimates, WAV paths and calibration metadata.
-- `transcript.json`, `transcript.txt` — time-ordered speaker segments.
+- `USB_1.wav`, `USB_2.wav`, `Bluetooth_1.wav`, etc. in auto mode, or your explicit `Alice.wav`/`Bob.wav` speaker labels — separate 16 kHz PCM recordings.
+- `capture_manifest.json` — capture clock estimates and WAV paths; optional `calibration.json` records clap-estimated offset/drift and uncertainty.
+- `transcript.json` — Whistle word timestamps/confidence, raw channel events, overlap and possible cross-talk markers, calibration; `transcript.txt` — ordered speaker-channel events supplied to Qwen.
 - `minutes.json`, `minutes.pdf` — validated Qwen synthesis and PDF output.
 - `handoff.json`, `handoff-qr.png` — file checksum, device metadata and offline transfer instructions (no transcript content in QR).
 
