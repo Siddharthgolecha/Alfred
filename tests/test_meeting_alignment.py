@@ -178,6 +178,37 @@ class CalibrationTests(unittest.TestCase):
             self.assertIsNone(cal["USB_2"]["uncertainty_ms"])
 
 
+class LivePreviewTests(unittest.TestCase):
+    def test_live_preview_displays_channels_with_bounded_asr(self):
+        from alfred.jetson.live import LiveMeetingPreview
+        class FakeWhistle:
+            def transcribe(self,samples,**kwargs):
+                return {"text":"Meeting preview","words":[]}
+        screen=io.StringIO()
+        worker=LiveMeetingPreview(["USB_1","Bluetooth_1"],
+                                  whistle=FakeWhistle(),stream=screen,max_pending=4)
+        worker.start()
+        pcm=array("h",[5000]*32000).tobytes()
+        worker.submit("USB_1",pcm,0,1760000000.)
+        worker.submit("Bluetooth_1",pcm,32000,1760000000.)
+        report=worker.close()
+        self.assertEqual(report["processed"],2)
+        self.assertEqual(report["dropped"],0)
+        self.assertIn("[USB_1 @",screen.getvalue())
+        self.assertIn("[Bluetooth_1 @",screen.getvalue())
+
+    def test_live_preview_capture_callback_uses_no_native_model_if_disabled(self):
+        from alfred.jetson.live import LiveMeetingPreview
+        worker=LiveMeetingPreview(["USB_1"],whistle=Mock(),max_pending=1)
+        with self.assertRaises(ValueError):
+            LiveMeetingPreview(["USB_1"],max_pending=100)
+        # Nonblocking submit silently drops overflow. No unbounded audio RAM.
+        worker.submit("USB_1",b"1"*64000,0,1.)
+        worker.submit("USB_1",b"2"*64000,0,1.)
+        self.assertEqual(worker.dropped,1)
+        worker.queue.get_nowait()
+        worker.queue.task_done()
+
 class CLIViewTests(unittest.TestCase):
     def test_nonterminal_logs_each_confirmed_mic_segment_only(self):
         stream=io.StringIO()
