@@ -205,8 +205,13 @@ class System2:
         if not self.qwen.cfg.get("enabled", True):
             return {"status":"incomplete", "message":"Qwen is disabled; request remains incomplete.",
                     "results":completed, "partial":bool(completed)}
-        catalog = [s for s in TOOL_SCHEMAS
-                   if s["name"] not in ("delegate_to_reasoner","run_workflow")]
+        from .cognitive.escalation import READS
+        catalog = [
+            s for s in TOOL_SCHEMAS
+            if (s["name"] not in ("delegate_to_reasoner", "run_workflow")
+                and handoff.remaining_tools > 0
+                and (handoff.allow_actions or s["name"] in READS))
+        ]
         try:
             if harness is not None:
                 if supervisor is not None:
