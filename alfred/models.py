@@ -130,7 +130,7 @@ class Qwen:
         prompt = (
             "You are Alfred's local System 2 planner. Reply ONLY with JSON: "
             '{"message":"short explanation","steps":[{"tool":"tool_name","args":{}}]}. '
-            "Use zero steps for a question with no necessary tools. "
+             "Use zero steps for a question with no necessary tools. "
             "For actions use only exact tools from this list: " + ", ".join(tool_names) + ". "
             "Arguments must match the tool schemas implemented by Python. "
             "Never guess service names, task names, or reminder ids; ask for clarification in message. "
