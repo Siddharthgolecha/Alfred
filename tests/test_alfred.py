@@ -184,7 +184,7 @@ class ModelTests(unittest.TestCase):
                  patch("alfred.models.shutil.which",return_value="/fake/llama-server"), \
                  patch("alfred.models.subprocess.Popen",return_value=proc) as spawn:
                 self.assertTrue(sup.ensure_running())
-                self.assertEqual(sup.status if False else sup.process.pid,12345)
+                self.assertEqual(sup.process.pid,12345)
                 self.assertTrue(sup.started_here)
                 argv=spawn.call_args.args[0]
                 self.assertIn(str(model.resolve()),argv)
