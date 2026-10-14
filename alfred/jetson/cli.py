@@ -59,6 +59,13 @@ def process_session(ssd,folder,cfg,title,recipient=None,whistle=None,reasoner=No
     calibration_file=Path(folder)/"calibration.json"
     if calibrate:
         calibrations=calibrate_claps(channels,require_two=require_two_claps)
+        if require_two_claps and any(
+            record.get("method") not in ("reference","two_clap_offset_and_drift")
+            for record in calibrations.values()
+        ):
+            raise RuntimeError("Required two-clap calibration failed for at least one mic; "
+                               "record with distinct claps near start and end, "
+                               "or resume without --two-claps")
         calibration_file.write_text(json.dumps(calibrations,indent=2),encoding="utf-8")
         calibration_file.chmod(0o600)
     elif calibration_file.is_file() and not calibration_file.is_symlink():
