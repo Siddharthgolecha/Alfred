@@ -21,11 +21,14 @@ LOG = logging.getLogger(__name__)
 # These operations may still be rejected by the tool registry at execution time.
 VOICE_ALLOWED = frozenset({
     "get_system_status", "get_gpu_status", "list_services",
-    "list_reminders", "list_schedules", "list_workflows", "create_reminder"
+    "list_reminders", "list_schedules", "list_workflows", "list_automations",
+    "create_reminder", "create_reminder_at"
 })
 SENSITIVE = frozenset({
     "control_service", "run_named_task", "run_workflow",
-    "cancel_reminder", "schedule_every", "cancel_schedule"
+    "cancel_reminder", "schedule_every", "cancel_schedule",
+    "create_daily_reminder", "watch_gpu_temperature", "pause_automation",
+    "resume_automation", "cancel_automation"
 })
 
 
@@ -154,10 +157,13 @@ class System2:
     def execute_or_stage(self, steps, message="", save_as=None, allow_actions=True, force_approval=False):
         steps=preflight(steps,self.tools,self.cfg.get("max_plan_steps",5))
         if not allow_actions:
-            if any(s["tool"] not in VOICE_ALLOWED or s["tool"]=="create_reminder" for s in steps) or save_as:
+            if any(s["tool"] not in VOICE_ALLOWED or s["tool"] in
+                   ("create_reminder","create_reminder_at") for s in steps) or save_as:
                 # Never silently filter out dangerous steps and claim the command succeeded.
                 return {"message":"That request needs an explicit actionable command.", "steps":[]}
-        if save_as and any(s["tool"] in ("cancel_reminder","cancel_schedule") for s in steps):
+        if save_as and any(s["tool"] in ("cancel_reminder","cancel_schedule",
+                                      "cancel_automation","pause_automation",
+                                      "resume_automation") for s in steps):
             raise ValueError("Saved workflows cannot contain cancellation actions")
         if force_approval or needs_approval(steps,save_as):
             proposal=self.approvals.propose(steps,save_as)
