@@ -164,6 +164,26 @@ class CalibrationTests(unittest.TestCase):
             self.assertAlmostEqual(shifted,100002.0,places=2)
             self.assertIsNotNone(cal["USB_2"]["uncertainty_ms"])
 
+    def test_two_claps_estimate_relative_clock_drift(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            records={}
+            for name,second in (("USB_1",35*16000),("USB_2",35*16000+160)):
+                samples=array("h",[0])* (40*16000)
+                for i in (16000,second):
+                    for j in range(i,i+160):
+                        samples[j]=14000
+                path=root/(name+".wav")
+                wavfile(path,samples)
+                records[name]={"wav":str(path),"source":"alsa_input.usb-a",
+                               "first_sample_unix_estimate":100000.0}
+            cal=calibrate_claps(records,require_two=True)
+            self.assertEqual(cal["USB_2"]["method"],"two_clap_offset_and_drift")
+            self.assertLess(cal["USB_2"]["scale"],1.0)
+            self.assertAlmostEqual(
+                adjusted_time(100000.+35.01,cal["USB_2"]),100000.+35,
+                delta=.025)
+
     def test_calibration_fails_honestly_without_claps(self):
         with tempfile.TemporaryDirectory() as folder:
             folder=Path(folder)
