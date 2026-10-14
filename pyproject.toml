@@ -11,9 +11,11 @@ dependencies = ["cactus-needle>=0.1"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+jetson = ["reportlab>=4.0", "qrcode[pil]>=7.4", "tzdata>=2024.1"]
 
 [project.scripts]
 alfred = "alfred.app:main"
+alfred-jetson = "alfred.jetson.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["alfred*"]
