@@ -109,6 +109,23 @@ class SourceClassificationTests(unittest.TestCase):
         self.assertIn(chosen,(USB["name"],another["name"]))
         self.assertEqual(opener.call_count,2)
 
+    def test_repeated_pcm_failure_exits_instead_of_endless_restart(self):
+        self.manager.process=object()
+        self.manager.last_check=__import__("time").monotonic()
+        self.cfg["poll_seconds"]=10000
+        def recover():
+            self.manager.process=object()
+        def close():
+            self.manager.process=None
+            self.manager._prefetched=b""
+        with patch.object(self.manager,"_read_pcm",
+                          side_effect=AudioUnavailableError("stream timeout")), \
+             patch.object(self.manager,"ensure_input",side_effect=recover) as retry, \
+             patch.object(self.manager,"close",side_effect=close):
+            with self.assertRaisesRegex(AudioUnavailableError,"repeatedly stopped"):
+                next(self.manager.frames())
+        self.assertEqual(retry.call_count,2)
+
     def test_audio_server_down_reports_failure(self):
         with patch("alfred.audio.pactl_json",side_effect=OSError("socket unavailable")):
             with self.assertRaisesRegex(AudioUnavailableError,"Cannot enumerate"):
