@@ -12,6 +12,8 @@ import threading
 import time
 
 from .audio import AudioManager, AudioUnavailableError, UtteranceStream, pactl_json
+from .console import TranscriptDisplay
+from .routing import adjust_status_calls
 from .config import data_path, load_config
 from .models import Cactus, LlamaSupervisor, Qwen
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools
@@ -103,6 +105,14 @@ class Alfred:
                     "confidence": confidence, "call_count": len(calls)})
                 self.feedback.tell("Command uncertain. Please repeat or be more specific.")
                 return
+            corrected=adjust_status_calls(text,calls)
+            if corrected is not calls:
+                self.store.event("routing_adjustment",{
+                    "reason":"explicit_gpu_status",
+                    "original":[c.get("name") for c in calls],
+                    "selected":[c.get("name") for c in corrected]
+                })
+                calls=corrected
             self.store.event("route", {
                 "model":"needle3", "confidence":confidence,
                 "call_count":len(calls),
@@ -134,9 +144,12 @@ class Alfred:
             raise RuntimeError("Cactus models not loaded")
         LOG.info("Starting continuous English speech recognition")
         for chunks in UtteranceStream(self.audio.frames(),self.cfg["audio"]).utterances():
+            transcript_display=TranscriptDisplay()
             try:
-                # Only dispatch finalized transcription, never provisional pending text.
-                transcript=self.cactus.transcribe_stream(chunks)
+                # Show partial text immediately, but execute only finalized words.
+                transcript=self.cactus.transcribe_stream(
+                    chunks,on_partial=transcript_display.update)
+                transcript_display.finish(transcript)
                 if transcript:
                     LOG.info("Utterance received (%d characters)",len(transcript))
                     self.handle_text(transcript)
@@ -144,8 +157,10 @@ class Alfred:
                 if self.feedback.tts:
                     self.audio.close()
             except (KeyboardInterrupt, AudioUnavailableError):
+                transcript_display.abort()
                 raise
             except Exception:
+                transcript_display.abort()
                 LOG.exception("Audio/transcription error, recovering")
                 self.audio.close()
                 time.sleep(1)
