@@ -542,6 +542,8 @@ def doctor(cfg):
 def _main(argv=None):
     parser=argparse.ArgumentParser(description="Alfred Jetson voice automation agent")
     parser.add_argument("--config",default="config.json",help="Local JSON config")
+    parser.add_argument("--resume-session", metavar="SESSION_ID",
+                        help="Explicitly reuse a prior local session ID; never replay interrupted tools")
     parser.add_argument("command", nargs="?", choices=["close"],
                         help="Close running Alfred services and processes owned by Alfred")
     group=parser.add_mutually_exclusive_group()
@@ -593,6 +595,8 @@ def _main(argv=None):
     logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                         handlers=[logging.StreamHandler()])
     if args.command == "close":
+        if args.resume_session:
+            parser.error("'close' cannot resume a session")
         if any((args.doctor, args.text, args.ensure_backend, args.scheduler_only,
                 args.automations, args.automation_tick, args.reason,
                 args.pending, args.approve is not None, args.reject is not None)):
@@ -603,6 +607,8 @@ def _main(argv=None):
                 stopped.append(role)
         print("Alfred stopped: " + ", ".join(stopped) if stopped else "Alfred is not running")
         return 0
+    if args.resume_session and not (args.text or args.reason):
+        parser.error("--resume-session requires --text or --reason")
     if args.doctor:
         return 0 if doctor(cfg) else 2
     if args.ensure_backend:
@@ -699,6 +705,8 @@ def _main(argv=None):
     if args.reason:
         app=Alfred(cfg,load_models=False)
         try:
+            if args.resume_session:
+                app.resume_session(args.resume_session)
             task = app._start_task("reason", len(args.reason))
             app.sessions.append(task.task_id, Decision("local", "delegate", 0))
             app.sessions.append(task.task_id,
@@ -739,6 +747,8 @@ def _main(argv=None):
     with control:
         app=Alfred(cfg)
         try:
+            if args.resume_session:
+                app.resume_session(args.resume_session)
             app.start_services()
             if args.text:
                 app.handle_text(args.text)
