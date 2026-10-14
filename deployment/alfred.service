@@ -1,0 +1,17 @@
+[Unit]
+Description=Alfred local voice automation agent
+After=default.target
+
+[Service]
+Type=simple
+# Replace %h/Alfred with your checkout path if different.
+WorkingDirectory=%h/Alfred
+ExecStart=%h/Alfred/.venv/bin/alfred --config %h/Alfred/config.json
+Environment=PYTHONUNBUFFERED=1
+Environment=NEEDLE_TELEMETRY=0
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

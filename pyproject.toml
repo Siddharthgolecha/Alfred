@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alfred-jetson"
+version = "0.1.0"
+description = "Offline-first Jetson voice agent using Whistle, Needle 3 and Qwen 3.5"
+requires-python = ">=3.10"
+dependencies = ["cactus-needle>=0.1"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+alfred = "alfred.app:main"
+
+[tool.setuptools.packages.find]
+include = ["alfred*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
