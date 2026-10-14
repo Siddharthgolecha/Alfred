@@ -302,6 +302,7 @@ class AudioManager:
         nbytes=samples*2
         if self.process is None:
             self.ensure_input()
+        consecutive_failures=0
         while True:
             if time.monotonic()-self.last_check>float(self.cfg["poll_seconds"]):
                 current=self.choose_source()
@@ -318,12 +319,19 @@ class AudioManager:
                 if len(data)>nbytes:
                     self._prefetched=data[nbytes:]
                     data=data[:nbytes]
-            except AudioUnavailableError:
+            except AudioUnavailableError as exc:
+                consecutive_failures+=1
                 self.close()
+                if consecutive_failures>=3:
+                    raise AudioUnavailableError(
+                        "Microphone capture repeatedly stopped delivering audio "
+                        "after 3 recovery attempts; stopping Alfred."
+                    ) from exc
                 # Auto can recover by selecting a different healthy direct mic;
                 # if none exists this raises a fatal, actionable error.
                 self.ensure_input()
                 continue
+            consecutive_failures=0
             pcm=array("h")
             pcm.frombytes(data)
             yield [value/32768.0 for value in pcm]
