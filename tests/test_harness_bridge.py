@@ -24,7 +24,8 @@ class HarnessBoundaryTests(unittest.TestCase):
     def test_fake_roundtrip(self):
         bridge = HarnessBridge(HarnessConfig(enabled=True))
         result = bridge.send("task", {"session_id": "a" * 32, "task_id": "b" * 32,
-                                     "source": "text", "input_chars": 5},
+                                     "source": "text", "input_chars": 5,
+                                     "started_at": 123},
                              lambda request: encode_frame("observation",
                                                           {"tool": "status", "outcome": "returned"}))
         self.assertEqual(result["event"], "observation")
@@ -52,6 +53,20 @@ class HarnessBoundaryTests(unittest.TestCase):
                     frame({"tool": "status", "outcome": "returned", "nested": {"x": [1]}})):
             with self.subTest(raw=raw[:30]), self.assertRaises(HarnessProtocolError):
                 decode_frame(raw)
+
+    def test_canonical_projection_and_enum_validation(self):
+        from alfred.cognitive.contracts import TaskEnvelope, Decision
+        from alfred.cognitive.harness_bridge import frame_for_contract
+        task = TaskEnvelope("a" * 32, "b" * 32, "voice", 3, 123)
+        self.assertEqual(decode_frame(frame_for_contract(task))["event"], "task")
+        self.assertEqual(decode_frame(frame_for_contract(Decision(
+            "needle3", "direct", 1, .8)))["event"], "decision")
+        with self.assertRaises(HarnessProtocolError):
+            frame_for_contract({"tool":"arbitrary-shell", "args":{}})
+        for invalid in ({"engine": "evil", "route": "direct", "call_count": 1, "confidence": 0.3},
+                        {"engine": "needle3", "route": "direct", "call_count": True, "confidence": None}):
+            with self.subTest(invalid=invalid), self.assertRaises(HarnessProtocolError):
+                encode_frame("decision", invalid)
 
     def test_invalid_task_ids(self):
         with self.assertRaises(HarnessProtocolError):
