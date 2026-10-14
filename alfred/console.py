@@ -68,6 +68,14 @@ class TranscriptDisplay:
         self.last=""
         self.live=False
 
+    def discard(self):
+        """Erase an unconfirmed wake hypothesis without printing bystander text."""
+        if self.live and self._tty():
+            self.stream.write("\r\x1b[K")
+            self.stream.flush()
+        self.last=""
+        self.live=False
+
     def abort(self):
         if self.live and self._tty():
             self.stream.write("\n[Whistle interrupted]\n")

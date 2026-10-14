@@ -11,6 +11,7 @@ dependencies = ["cactus-needle>=0.1"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+wakeword = ["openwakeword>=0.6", "numpy>=1.24"]
 jetson = ["reportlab>=4.0", "qrcode[pil]>=7.4", "tzdata>=2024.1"]
 
 [project.scripts]

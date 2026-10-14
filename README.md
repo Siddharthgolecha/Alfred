@@ -2,8 +2,14 @@
 
 Offline-first, continuous English voice automation on **NVIDIA Jetson Orin Nano 8GB** (JetPack 7.2.1 / CUDA 13.2).
 
-**Microphone → Cactus Whistle streaming STT → Cactus Needle 3 tool router → validated Python tools.**
+**Microphone → wake-word activation → Cactus Whistle STT → Cactus Needle 3 tool router → validated Python tools.**
 Needle can delegate complex commands to a **Qwen 3.5 4B Bartowski Q4_K_M GGUF** model using **llama.cpp (`llama serve`)**, **llama-server**, **Ollama**, or **LM Studio**. Alfred adopts a compatible local server or starts the configured backend if absent.
+
+## Wake word — "Alfred"
+
+Voice commands now require an explicit wake phrase by default. Say **"Alfred, show GPU status"** or **"Hey Alfred"** followed within eight seconds by **"show GPU status"**. Unaddressed background speech is never sent to Needle, Qwen, or tool execution. A standalone wake permits only one follow-up command.
+
+Default `wake_word.mode="transcript"` uses Whistle to recognize the wake phrase without additional dependencies. For lower idle compute, optional `wake_word.mode="openwakeword"` uses a **user-supplied ONNX wake model** to detect the phrase before running Whistle. No pretrained "Alfred" acoustic model is bundled. Both modes are configurable in `config.example.json`; details and setup are in [Wake-word activation](docs/WAKE_WORD.md). CLI `--text` and scheduled tasks continue without a wake phrase.
 
 ## Phase 2 planning and approvals
 
@@ -29,7 +35,8 @@ The separate [`intrinsic_jetson` branch](https://github.com/Siddharthgolecha/Alf
 - `auto` / `bluetooth` / `direct` selection; auto prefers the Sony mic and falls back to a direct microphone.
 - BlueZ + PipeWire-Pulse/PulseAudio discovery, profile switching, explicit source capture with `parec`, reconnection attempts if a MAC address is configured.
 - Fail-fast microphone health check: reject unconfirmed Jetson "Built-in Audio" inputs, reject monitor sources and unavailable ports, require actual timed PCM delivery before loading the models.
-- 16 kHz mono PCM capture, tunable RMS VAD, incremental Whistle transcription; **only finalized utterances** can trigger tools.
+- 16 kHz mono PCM capture, tunable RMS VAD, incremental Whistle transcription; **only wake-authorized, finalized utterances** can trigger tools.
+- Default "Alfred" wake phrase, single bounded follow-up, and optional local openWakeWord ONNX pre-transcription detection.
 - Needle 3 structured calls; no direct execution by the model; Python validates each action and its arguments.
 - Strict allowlists for `systemctl --user` services and fixed named script argv; **no arbitrary shell**.
 - System diagnostics, SQLite reminders, recurring read-only status polls, Qwen multi-step plans, saved named workflows.
@@ -47,8 +54,8 @@ sudo apt update
 sudo apt install -y bluez pulseaudio-utils libasound2-dev python3-venv
 git clone https://github.com/Siddharthgolecha/Alfred.git
 cd Alfred
-# Until the PR merges, use:
-git switch feat/jetson-voice-agent
+# Use this branch for the Jetson-only meeting and SSD features:
+git switch intrinsic_jetson
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -e '.[test]'
@@ -176,6 +183,43 @@ Persistent: `create_reminder`, `cancel_reminder`, `schedule_every` (status check
 System 2: Qwen receives live tool schemas and returns JSON plans. Python validates the whole plan and requires local approval for sensitive actions; nested reasoning and recursive workflows are prohibited. Saving a named workflow requires an explicit "save/create workflow" voice request. Conditions may compare a **top-level field** from an earlier step, e.g. `gpu_temp_c > 80`. **Conditional recurring watches are not implemented**; recurring jobs currently run approved read-only diagnostic tools.
 
 For safety and privacy, raw audio is not saved and the database logs **transcript length**, not content. Do not run Alfred with root privileges. Continuous listening is enabled by user choice; only use in spaces where recording is appropriate.
+
+## Graceful shutdown
+
+An interactive **Ctrl+C** or systemd **SIGTERM** stops the audio capture subprocess,
+in-progress approved named-task/TTS subprocesses, reminder/workflow threads,
+model watchdog, and **only the inference process Alfred started**. Alfred kills its own llama.cpp/llama-server/Ollama process group if a
+graceful stop times out. A pre-existing server discovered at the same endpoint is
+**never terminated**. LM Studio is stopped via `lms server stop` only if Alfred
+started it, not if it was adopted.
+
+After the wake word is authorized, saying **"Alfred, close"** or **"Hey Alfred,
+stop listening"** shuts down the voice agent locally, without asking Needle or
+Qwen to execute a command. Background speech saying "close" alone is ignored
+when wake-word detection is enabled.
+
+To close an already-running Alfred voice instance (and an independently started
+`--scheduler-only` instance) from another terminal, run:
+
+```bash
+alfred --config config.json close
+# Or, with the default config path:
+alfred close
+```
+
+The command uses a **0600 Unix control socket inside a 0700 user-owned directory**
+under `runtime.logs/.control`, not a PID file, port scan, or `pkill`. It waits
+for shutdown and reports an error if cleanup doesn't finish within the timeout.
+A second instance of the same role refuses to start rather than commandeering
+the running instance. Re-running `alfred close` after shutdown is safe.
+
+**Scope:** User-requested `control_service` actions and externally managed local
+inference services are not undone. `--ensure-backend` is an explicit one-shot
+backend prewarm command; its server is intentionally persistent and is not owned
+by a subsequent Alfred listening session. For systemd, prefer
+`systemctl --user stop alfred` if you also want the service manager's state to
+be explicitly marked stopped. `alfred close` exits cleanly and will not trigger
+`Restart=on-failure`.
 
 ## Deployment as a service
 
