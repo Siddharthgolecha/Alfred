@@ -32,7 +32,7 @@ DENIED_ROWS = frozenset({
     "compaction-basic", "image-offload",
 })
 PATCH = Path(__file__).with_name("alfred_safe.patch.yml")
-MAX_PROMPT = 4000
+MAX_PROMPT = 8192
 MAX_RESPONSE = 2000
 
 
@@ -214,11 +214,9 @@ class LocalHarness:
                 continue
             spec = item.get("parameters") or {}
             props = spec.get("properties", {})
-            names.append({"name": item["name"], "args": {
-                k: {"type": v.get("type"), "enum": v.get("enum"),
-                    "minimum": v.get("minimum"), "maximum": v.get("maximum")}
-                for k, v in props.items()},
-                "required": spec.get("required", [])})
+            names.append({"name": item["name"],
+                          "args": {k: v.get("type") for k, v in props.items()},
+                          "required": spec.get("required", [])})
         compact = json.dumps(names, separators=(",", ":"), sort_keys=True)
         prompt = (
             "Return ONLY a JSON object (no Markdown) with exactly fields "
