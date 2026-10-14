@@ -25,6 +25,12 @@ Whistle now updates **one terminal line like typing** as new speech arrives. Cor
 
 Phase 4 introduces [approved, persistent workflow DAGs](docs/PHASE4.md), conditional branches, bounded read-only retries, safe cancellation and restart-aware execution. Use `--workflow-draft` and `--workflow-approve` locally to register approved graphs, `--workflow-start` to run them, and `--workflow-status` to inspect results. Read-only graphs can also run on recurring schedules. Voice requests to run these workflows still require Phase 2 local approval. The `intrinsic_jetson` branch remains separate.
 
+## Phase 5 — Maestaris orchestration and DeepSeek Harness roadmap
+
+Phase 5 is organized as [detailed, dependency-linked GitHub Issues](https://github.com/Siddharthgolecha/Alfred/issues/11), with Maestaris Worker A implementing one ready issue at a time and a separate reviewer assessing PR diffs and CI before merging. The workflow follows `AGENTS.md` and `coordination/maestaris.yaml`. See [Phase 5 Maestaris and main-to-Jetson sync](docs/PHASE5_MAESTARIS.md).
+
+Every new `main` commit triggers a **non-destructive tested merge** into `intrinsic_jetson`. Merge conflicts and failing tests create an issue rather than overwriting branch-specific code.
+
 ## What is implemented
 
 - Sony **WI-C100** Bluetooth microphone using HFP/HSP (A2DP alone does *not* provide headset mic capture).
