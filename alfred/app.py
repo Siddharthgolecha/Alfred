@@ -14,7 +14,8 @@ import time
 from .audio import AudioManager, AudioUnavailableError, UtteranceStream, pactl_json
 from .config import data_path, load_config
 from .models import Cactus, LlamaSupervisor, Qwen
-from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools, validate_plan
+from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools
+from .system2 import System2
 
 LOG = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ class Alfred:
         self.audio = AudioManager(cfg["audio"])
         self.supervisor = LlamaSupervisor(cfg["qwen"],runtime["logs"])
         self.qwen = Qwen(cfg["qwen"],self.supervisor)
+        self.system2 = System2(self.qwen,self.tools,self.store,runtime)
         if not runtime.get("telemetry",False):
             import os
             os.environ.setdefault("NEEDLE_TELEMETRY","0")
@@ -72,60 +74,57 @@ class Alfred:
                 target=watchdog, name="llama-supervisor", daemon=True)
             self._watchdog_thread.start()
 
-    def reason(self,text,allow_actions=True):
+    def reason(self, text, allow_actions=True):
         if not self.cfg["qwen"]["enabled"]:
-            return {"message":"Qwen System 2 is disabled","steps":[]}
-        plan = self.qwen.complete(text,list(SCHEMA_BY_NAME))
-        steps = validate_plan(plan["steps"],self.cfg["runtime"]["max_plan_steps"])
-        if not allow_actions:
-            steps=[s for s in steps if s["tool"] in
-                   ("get_system_status","get_gpu_status","list_services","list_reminders","list_schedules","list_workflows")]
-        save_as = plan.get("save_as")
-        if save_as:
-            if not (isinstance(save_as,str) and re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{1,40}",save_as)):
-                raise ValueError("Invalid workflow name")
-            if not re.search(r"\b(save|create|remember|store)\b.*\bworkflow\b",text,re.I):
-                raise ValueError("Cannot save workflow without explicit user request")
-            if not steps:
-                raise ValueError("Cannot save an empty workflow")
-            self.store.save_workflow(save_as,steps)
-            self.store.event("workflow_saved",{"name":save_as,"steps":steps})
-            return {"message":f"Saved workflow '{save_as}'","steps_saved":len(steps)}
-        message=str(plan.get("message") or "Completed")[:700]
-        results = self.tools.run_plan(steps)
-        return {"message":message,"steps":len(steps),"results":results}
+            return {"message":"Qwen System 2 is disabled","results":[]}
+        return self.system2.reason(text,allow_actions=allow_actions)
 
     def handle_text(self,text):
         text=text.strip()
         if not text:
             return
-        self.store.event("utterance",{"length":len(text)})  # Do not log transcript by default.
+        self.store.event("utterance",{"length":len(text)})  # No raw transcript stored.
         if self.cactus is None:
             raise RuntimeError("Cactus models were not initialized")
-        response=self.cactus.route(text)
-        calls=response.get("function_calls") or []
-        confidence=response.get("confidence")
-        if response.get("suppressed_calls") or response.get("validation",{}).get("ungrounded"):
-            self.feedback.tell("I couldn't safely determine that command. Please clarify.")
-            return
-        floor=float(self.cfg["runtime"]["needle_confidence_floor"])
-        if calls and confidence is not None and confidence < floor:
-            self.feedback.tell("Command uncertain. Please repeat or be more specific.")
-            return
         try:
-            if not calls:
-                # Unsupported direct request: reasoning may explain but cannot take action.
-                self.feedback.tell(json.dumps(self.reason(text,allow_actions=False)))
+            response=self.cactus.route(text)
+            calls=response.get("function_calls") or []
+            confidence=response.get("confidence")
+            validation = response.get("validation") or {}
+            if response.get("suppressed_calls") or (
+                isinstance(validation, dict) and validation.get("ungrounded")
+            ):
+                self.feedback.tell("I couldn't safely determine that command. Please clarify.")
                 return
-            for call in calls[:5]:
-                name=call["name"]
-                args=call.get("arguments") or {}
-                if name=="delegate_to_reasoner":
-                    request=args.get("request") or text
-                    result=self.reason(request)
-                else:
-                    result=self.tools.execute(name,args)
-                self.feedback.tell(json.dumps({"tool":name,"result":result},default=str)[:1400])
+            floor=float(self.cfg["runtime"]["needle_confidence_floor"])
+            if calls and (confidence is None or not isinstance(confidence,(float,int))
+                          or confidence < floor):
+                self.store.event("route_uncertain",{
+                    "confidence": confidence, "call_count": len(calls)})
+                self.feedback.tell("Command uncertain. Please repeat or be more specific.")
+                return
+            self.store.event("route", {
+                "model":"needle3", "confidence":confidence,
+                "call_count":len(calls),
+                "delegated":bool(not calls or (len(calls)==1 and
+                    calls[0].get("name")=="delegate_to_reasoner"))
+            })
+            if not calls:
+                # An unsupported Needle command may still be an ordinary Q&A question.
+                # Qwen here is strictly read-only, regardless of what it proposes.
+                result=self.reason(text,allow_actions=False)
+            elif len(calls)==1 and calls[0].get("name")=="delegate_to_reasoner":
+                # Use the actual transcript, never a possibly altered model argument.
+                result=self.reason(text,allow_actions=True)
+            else:
+                result=self.system2.direct(calls)
+            if "approval" in result:
+                approval=result["approval"]
+                message=(f"Local approval required for {approval['actions']}. "
+                         f"On the Jetson, run: alfred --approve {approval['approval_id']}")
+                self.feedback.tell(message)
+            else:
+                self.feedback.tell(json.dumps(result,default=str)[:1800])
         except Exception as exc:
             LOG.exception("Command failed")
             self.feedback.tell(f"Could not complete command: {exc}")
@@ -200,6 +199,10 @@ def main(argv=None):
     group.add_argument("--doctor",action="store_true",help="Show mic/server status without models")
     group.add_argument("--text",help="Execute one command using Needle and tools")
     group.add_argument("--ensure-llama",action="store_true",help="Start/verify llama-server then exit")
+    group.add_argument("--reason",help="Test Qwen planner on a text input; no Cactus engine required")
+    group.add_argument("--pending",action="store_true",help="List proposed tool actions awaiting approval")
+    group.add_argument("--approve",type=int,metavar="ID",help="Locally approve and execute a proposal once")
+    group.add_argument("--reject",type=int,metavar="ID",help="Locally reject a proposal")
     args=parser.parse_args(argv)
     path=Path(args.config)
     cfg=load_config(path if path.exists() else None)
@@ -213,6 +216,27 @@ def main(argv=None):
         s=LlamaSupervisor(cfg["qwen"],logs)
         s.ensure_running()
         print(json.dumps(s.status()))
+        return 0
+    # Administrative actions are intentionally CLI-only; they never appear in
+    # Needle's tool schemas. No model needs loading to approve or reject.
+    if args.pending or args.approve is not None or args.reject is not None:
+        app=Alfred(cfg,load_models=False)
+        try:
+            if args.pending:
+                print(json.dumps(app.system2.approvals.pending(),indent=2))
+            elif args.approve is not None:
+                print(json.dumps(app.system2.approve(args.approve),default=str,indent=2))
+            else:
+                print(json.dumps({"rejected":app.system2.approvals.reject(args.reject)}))
+        finally:
+            app.close()
+        return 0
+    if args.reason:
+        app=Alfred(cfg,load_models=False)
+        try:
+            print(json.dumps(app.reason(args.reason),default=str,indent=2))
+        finally:
+            app.close()
         return 0
     if not args.text:
         # Fail before loading native Whistle/Needle models or starting services.
