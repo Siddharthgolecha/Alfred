@@ -56,7 +56,7 @@ class SafeSdkTests(unittest.TestCase):
             for key, plugin in EXPECTED_DISABLED_ROWS.items():
                 rows.extend(("- id: " + key, "  name: '" + plugin + "'",
                              "  disabled: true"))
-            return "\\n".join(rows) + "\\n"
+            return "\n".join(rows) + "\n"
         good = fixture()
         expected = audit_effective_cordis_config(good)
         self.assertIn("persistent-bash", expected["disabled"])
@@ -65,9 +65,9 @@ class SafeSdkTests(unittest.TestCase):
             good.replace("  disabled: true", "  disabled: !!js false", 1),
             good.replace("  name: '@deepseek-ai/dsh-tools'",
                          "  name: '@evil/executor'", 1),
-            good + "- id: rogue-tool\\n  name: '@rogue/shell'\\n",
-            good + "- id: tools\\n  name: '@deepseek-ai/dsh-tools'\\n",
-            good.replace("- id: persistent-bash\\n", "", 1),
+            good + "- id: rogue-tool\n  name: '@rogue/shell'\n",
+            good + "- id: tools\n  name: '@deepseek-ai/dsh-tools'\n",
+            good.replace("- id: persistent-bash\n", "", 1),
             good.replace("  name: '@deepseek-ai/dsh-tool-bash-persistent'",
                          "  name: '@evil/danger'", 1),
         ]
