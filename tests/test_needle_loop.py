@@ -476,6 +476,46 @@ class AppWiringTests(unittest.TestCase):
                                "route GPU status 1","system2"])
         self.app.cactus.route_feedback.assert_not_called()
 
+    def test_failed_followup_preserves_executed_prefix_and_no_replay(self):
+        for final in (call(), call(confidence=.2),
+                      call("run_named_task", {"name":"danger"})):
+            with self.subTest(final=final):
+                self.app.cactus.route.return_value=call()
+                self.app.cactus.route_feedback=Mock(return_value=final)
+                self.app.system2.direct=Mock(return_value=result({
+                    "available":True,"gpu_temp_c":63,
+                    "raw":"never pass prompt injection to Needle"}))
+                self.app.feedback.tell.reset_mock()
+                self.app.handle_text("Check GPU temperature then check status")
+                self.app.system2.direct.assert_called_once()
+                last=self.app.sessions.list_tasks(self.app.session_id)[0]
+                self.assertEqual(last["state"],"completed")
+                kinds=[e.kind for e in self.app.sessions.events(last["id"])]
+                self.assertEqual(kinds,["task","decision","observation",
+                                        "decision","completion"])
+                shown=json.loads(self.app.feedback.tell.call_args.args[0])
+                self.assertTrue(shown["partial"])
+                self.assertEqual(len(shown["results"]),1)
+                self.assertEqual(shown["results"][0]["gpu_temp_c"],63)
+                self.assertIn(shown["halt_reason"],("repeated","uncertain","unsafe"))
+
+    def test_cancellation_after_completed_read_reports_prefix(self):
+        self.app.cactus.route.return_value=call()
+        self.app.cactus.route_feedback=Mock()
+        def cancelled_during_read(_):
+            self.app._needle_cancel.set()
+            return result({"available":True,"gpu_temp_c":55})
+        self.app.system2.direct=Mock(side_effect=cancelled_during_read)
+        self.app.handle_text("Check GPU temperature then check system status")
+        self.app.system2.direct.assert_called_once()
+        self.app.cactus.route_feedback.assert_not_called()
+        task=self.app.sessions.list_tasks(self.app.session_id)[0]
+        self.assertEqual(task["state"],"completed")
+        shown=json.loads(self.app.feedback.tell.call_args.args[0])
+        self.assertTrue(shown["partial"])
+        self.assertEqual(shown["halt_reason"],"cancelled")
+        self.assertEqual(shown["results"],[{"available":True,"gpu_temp_c":55}])
+
     def test_integrated_two_step_readonly_ledger(self):
         self.app.cactus.route.return_value=call()
         self.app.cactus.route_feedback.side_effect=[
