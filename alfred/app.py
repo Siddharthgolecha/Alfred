@@ -184,6 +184,13 @@ class Alfred:
                     continue
                 transcript_display.finish(transcript or wake_cfg["phrase"])
                 if command:
+                    # This is a deterministic local command AFTER wake-word
+                    # authorization; never send shutdown requests to Needle/Qwen.
+                    if re.fullmatch(r"(?:close|exit|quit|stop listening|shut down|shutdown)[.!?]*",
+                                    command.strip(), flags=re.IGNORECASE):
+                        LOG.info("Wake-authorized spoken shutdown")
+                        print("Stopping Alfred", flush=True)
+                        break
                     LOG.info("Wake-authorized command received (%d characters)",len(command))
                     # Never forward a wake phrase to Needle or Qwen.
                     self.handle_text(command)
