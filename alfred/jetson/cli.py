@@ -15,6 +15,7 @@ from .capture import Source,Recorder
 from .discovery import discover_mics,MAX_MICS
 from .calibration import calibrate_claps
 from .console import MeetingDisplay
+from .live import LiveMeetingPreview
 from .minutes import merge_channels,MinutesReasoner,save_meeting_pdf,pretty_transcript
 from .sharing import create_qr_handoff,send_bluetooth_opp
 
@@ -138,6 +139,9 @@ def build_parser():
                         help="Require start/end shared claps for drift calibration")
     record.add_argument("--no-channel-view",action="store_true",
                         help="Suppress per-microphone CLI transcript")
+    record.add_argument("--live-preview",action="store_true",
+                        help="Best-effort concurrent ASR subtitles while recording; "
+                             "bounded queue, uses extra RAM/CPU")
     record.add_argument("--seconds",type=int,required=True)
     record.add_argument("--title",default="Meeting Minutes")
     record.add_argument("--consent",action="store_true",
@@ -217,7 +221,17 @@ def main(argv=None):
             print("Meeting microphone count:",len(src),flush=True)
             for selected in src:
                 print(f"  {selected.speaker}: {selected.pulse_source}",flush=True)
-            folder,_=Recorder(ssd,src,args.seconds).record()
+            preview=None
+            if args.live_preview:
+                preview=LiveMeetingPreview([x.speaker for x in src])
+                preview.start()
+            try:
+                folder,_=Recorder(ssd,src,args.seconds,
+                    on_preview=preview.submit if preview else None).record()
+            finally:
+                if preview:
+                    preview_status=preview.close()
+                    print("Live preview statistics:",json.dumps(preview_status),flush=True)
             print("Recorded channels on SSD:",folder,flush=True)
         else:
             folder=Path(args.session)
