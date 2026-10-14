@@ -26,6 +26,7 @@ from .wakeword import WakeWordGate, AcousticWakeDetector
 from .cognitive import (SessionLedger, Decision, Observation, Escalation,
                         ApprovalReference, Completion, Diagnostic)
 from .cognitive.harness_sdk import LocalHarness, HarnessUnavailable
+from .cognitive.escalation import build_handoff
 from .cognitive.needle_loop import (NeedleAgentLoop, SessionSlots,
                                    ContextUnavailable, MULTISTEP)
 
@@ -138,6 +139,57 @@ class Alfred:
                 steps, message, save_as, allow_actions=True)
         return self.system2.reason(text,allow_actions=allow_actions)
 
+    def _handoff(self, task, original, reason, *, calls=(), results=(),
+                 allow_actions=False, used_decisions=1):
+        """Same authorized TaskEnvelope, no second user command or raw ledger data."""
+        envelope = build_handoff(
+            task.session_id, task.task_id, original, reason,
+            calls=calls, results=results, allow_actions=allow_actions,
+            max_tools=self.cfg["runtime"]["max_plan_steps"],
+            needle_budget=self.cfg["runtime"]["needle_max_decisions"],
+            used_decisions=used_decisions)
+        self.sessions.append(task.task_id, Escalation("needle3", "qwen", reason))
+        self.sessions.append(task.task_id, Decision(
+            "qwen", "delegate" if allow_actions else "readonly", 0))
+        return self.system2.continue_handoff(
+            envelope, harness=self.harness, supervisor=self.supervisor)
+
+    def _finish_handoff(self, task, result):
+        """Apply the existing approval state machine to the SAME task."""
+        if "approval" in result:
+            proposal=result["approval"]
+            self.sessions.append(task.task_id,
+                                 ApprovalReference(proposal["approval_id"]))
+            for name in result.get("proposed_tools", ()):
+                self.sessions.append(task.task_id, Observation(name, "staged"))
+            self.sessions.append(task.task_id,
+                                 Completion("pending_approval", "needs_approval"))
+            self.feedback.tell(
+                f"Local approval required for {proposal['actions']}. "
+                f"On the Jetson, run: alfred --approve {proposal['approval_id']}")
+        elif result.get("status") == "incomplete":
+            # An unavailable model does not transform a partial observation
+            # into success. Previously executed tools remain visible.
+            self.sessions.append(task.task_id, Completion("failed", "disabled"
+                if not self.cfg["qwen"]["enabled"] else "exception"))
+            self.feedback.tell(json.dumps(result,default=str)[:1800])
+        else:
+            for name in result.get("executed_tools", ()):
+                self.sessions.append(task.task_id, Observation(name, "returned"))
+            self.sessions.append(task.task_id, Completion(
+                "completed", "executed" if result.get("results") else "no_action"))
+            self.feedback.tell(json.dumps(result,default=str)[:1800])
+
+    def resume_session(self, session_id):
+        """Explicit local restart recovery; never restart an uncertain action."""
+        with self._needle_task_lock:
+            if self.session_id is not None:
+                raise ValueError("Cannot change sessions while active")
+            self.sessions.resume_session(session_id)
+            self.session_id = session_id
+            self.needle_slots.clear()
+            return session_id
+
     def _start_task(self, source, input_chars):
         """One durable ID per authorized request, reused for every decision."""
         envelope = self.sessions.begin_task(source, input_chars, self.session_id)
@@ -221,6 +273,10 @@ class Alfred:
                     "confidence": confidence, "call_count": len(calls)})
                 self.sessions.append(task.task_id, Decision("needle3", "uncertain",
                                      min(len(calls), 50)))
+                if self.cfg["runtime"]["escalation_enabled"]:
+                    outcome=self._handoff(task, text, "uncertain",allow_actions=False)
+                    self._finish_handoff(task, outcome)
+                    return
                 self.sessions.append(task.task_id, Completion("rejected", "low_confidence"))
                 self.feedback.tell("Command uncertain. Please repeat or be more specific.")
                 return
@@ -263,6 +319,18 @@ class Alfred:
                 loop_outcome = loop.run(
                     {**response, "function_calls":calls}, permit_feedback=True)
                 calls = list(loop_outcome.accepted_calls)
+                if (self.cfg["runtime"]["escalation_enabled"]
+                        and loop_outcome.stop in ("uncertain", "repeated", "partial", "budget")
+                        and "approval" not in loop_outcome.result):
+                    completed = loop_outcome.result.get("results") or []
+                    used_decisions=sum(1 for event in self.sessions.events(task.task_id)
+                                       if isinstance(event, Decision)
+                                       and event.engine == "needle3")
+                    outcome=self._handoff(
+                        task,text,"incomplete",calls=calls,results=completed,
+                        allow_actions=False,used_decisions=used_decisions)
+                    self._finish_handoff(task,outcome)
+                    return
                 if (loop_outcome.stop not in ("completed", "protected", "partial")
                         and not loop_outcome.result.get("partial", False)):
                     # No successful observations: reject without pretending
@@ -277,13 +345,18 @@ class Alfred:
             if loop_outcome is not None:
                 pass  # Already guarded by System2 and recorded within the loop.
             elif not calls:
+                if self.cfg["runtime"]["escalation_enabled"]:
+                    outcome=self._handoff(task,text,"unsupported",allow_actions=False)
+                    self._finish_handoff(task,outcome)
+                    return
                 self.sessions.append(task.task_id,
                                      Escalation("needle3", "qwen", "unsupported"))
-                # An unsupported Needle command may still be an ordinary Q&A question.
-                # Qwen here is strictly read-only, regardless of what it proposes.
                 result=self.reason(text,allow_actions=False)
             elif len(calls)==1 and calls[0].get("name")=="delegate_to_reasoner":
-                # Use the actual transcript, never a possibly altered model argument.
+                if self.cfg["runtime"]["escalation_enabled"]:
+                    outcome=self._handoff(task,text,"delegated",allow_actions=True)
+                    self._finish_handoff(task,outcome)
+                    return
                 self.sessions.append(task.task_id,
                                      Escalation("needle3", "qwen", "delegated"))
                 result=self.reason(text,allow_actions=True)
