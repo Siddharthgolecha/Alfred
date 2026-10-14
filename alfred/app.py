@@ -607,8 +607,19 @@ def _main(argv=None):
                 stopped.append(role)
         print("Alfred stopped: " + ", ".join(stopped) if stopped else "Alfred is not running")
         return 0
-    if args.resume_session and not (args.text or args.reason):
-        parser.error("--resume-session requires --text or --reason")
+    if args.resume_session and (
+            args.doctor or args.ensure_backend or args.scheduler_only
+            or args.automations or args.automation_tick or args.pending
+            or args.approve is not None or args.reject is not None
+            or args.workflow_draft or args.workflow_approve or args.workflow_list
+            or args.workflow_start or args.workflow_runs
+            or args.workflow_status is not None or args.workflow_cancel is not None
+            or args.workflow_tick or args.workflow_reconcile is not None
+            or args.workflow_schedule or args.workflow_triggers
+            or args.workflow_trigger_pause is not None
+            or args.workflow_trigger_resume is not None
+            or args.workflow_trigger_cancel is not None):
+        parser.error("--resume-session requires text, reason, or voice mode")
     if args.doctor:
         return 0 if doctor(cfg) else 2
     if args.ensure_backend:
