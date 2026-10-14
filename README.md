@@ -15,6 +15,10 @@ Phase 3 adds [persistent absolute/daily reminders and GPU-temperature watches](d
 
 Whistle now updates **one terminal line like typing** as new speech arrives. Corrections revise only the changed suffix. It does not print a new line for every partial phrase; the final transcript is committed and used for tool execution. Non-TTY logs only print the final transcript.
 
+## Jetson-specific SSD and meeting workflows
+
+The separate [`intrinsic_jetson` branch](https://github.com/Siddharthgolecha/Alfred/tree/intrinsic_jetson) adds guarded ext4 USB/SATA SSD model/cache storage, read-only swapfile health checks, and an offline multi-microphone Minutes of Meeting generator. It records independent PCM channels, runs Whistle sequentially, merges speaker/timing windows, asks Qwen 3.5 4B for structured minutes, saves a PDF, generates a QR handoff, and optionally pushes via paired-device Bluetooth OBEX. **Swap does not execute inference; QR alone does not initiate Bluetooth transfer.** See [Jetson-specific setup and safety](docs/INTRINSIC_JETSON.md).
+
 ## What is implemented
 
 - Sony **WI-C100** Bluetooth microphone using HFP/HSP (A2DP alone does *not* provide headset mic capture).
