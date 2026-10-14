@@ -22,7 +22,7 @@ METRICS = frozenset({
     "available", "gpu_temp_c", "uptime_seconds", "root_free_gib"
 })
 READONLY = frozenset({
-    "get_gpu_status", "get_system_status",
+    "get_gpu_status", "get_system_status", "list_services",
 })
 PRONOUN = re.compile(r"^\s*(?:check|show|read|get)\s+(?:it|that)(?:\s+again)?\s*[.!?]*\s*$", re.I)
 MULTISTEP = re.compile(r"\b(?:then|afterwards|after that|next|depending on|based on)\b", re.I)
@@ -68,6 +68,18 @@ def _bounded_metrics(value):
         elif type(item) in (int, float) and math.isfinite(item) and 0 <= item <= 10**9:
             safe[key] = item
     return safe
+
+
+def _feedback_metrics(tool, value):
+    if tool == "list_services":
+        # The local registry returns a mapping of service name -> status. The
+        # model only learns an integer count, never text from service responses.
+        if type(value) is not dict or len(value) > 32:
+            raise ValueError("Unsafe service list result")
+        return {"service_count": len(value)}
+    if tool not in ("get_gpu_status", "get_system_status"):
+        raise ValueError("Feedback not supported for this tool")
+    return _bounded_metrics(value)
 
 
 class SessionSlots:
@@ -254,9 +266,13 @@ class NeedleAgentLoop:
                 return self._stop("cancelled", accepted, observed, outputs)
             # Model sees ONLY bounded scalar telemetry; arbitrary result strings
             # (including adversarial JSON/prompt injection) are discarded.
-            feedback = {"observations": [
-                {"tool": call["name"], "metrics": _bounded_metrics(item)}
-                for call, item in zip(calls, batch)
-            ]}
+            try:
+                feedback = {"observations": [
+                    {"tool": call["name"],
+                     "metrics": _feedback_metrics(call["name"], item)}
+                    for call, item in zip(calls, batch)
+                ]}
+            except ValueError:
+                return self._stop("unsafe", accepted, observed, outputs)
             response = self.feedback(json.dumps(feedback, sort_keys=True,
                                                separators=(",", ":")))
