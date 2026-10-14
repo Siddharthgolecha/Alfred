@@ -23,7 +23,8 @@ DEFAULT = {
         "database": "~/.local/share/alfred/alfred.db",
         "logs": "~/.local/state/alfred",
         "allowed_services": [], "named_tasks": {},
-        "needle_confidence_floor": 0.25, "max_plan_steps": 5,
+        "needle_confidence_floor": 0.7, "max_plan_steps": 5,
+        "approval_ttl_seconds": 180,
         "tts": False, "voice_alerts": False, "telemetry": False
     }
 }
@@ -67,6 +68,10 @@ def load_config(path=None):
         raise ValueError("qwen.ctx_size invalid")
     if not 10 <= int(q["supervisor_poll_seconds"]) <= 3600:
         raise ValueError("qwen.supervisor_poll_seconds must be 10..3600")
+    if not 0.0 < float(cfg["runtime"]["needle_confidence_floor"]) <= 1.0:
+        raise ValueError("needle_confidence_floor must be in (0,1]")
+    if not 30 <= int(cfg["runtime"]["approval_ttl_seconds"]) <= 3600:
+        raise ValueError("approval_ttl_seconds must be 30..3600")
     if not 1 <= int(cfg["runtime"]["max_plan_steps"]) <= 10:
         raise ValueError("max_plan_steps must be 1..10")
     return cfg
