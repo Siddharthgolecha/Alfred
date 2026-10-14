@@ -135,6 +135,53 @@ class AlfredSdkIntegrationTests(unittest.TestCase):
                 app.close()
             fake.close.assert_called_once()
 
+    def test_actionable_needles_delegation_proposes_into_existing_system2(self):
+        with tempfile.TemporaryDirectory() as home:
+            app = self.make_app(home)
+            fake = Mock()
+            fake.plan.return_value = {
+                "message": "Ready for approval", "steps": [
+                    {"tool": "get_gpu_status", "args": {}}], "save_as": None}
+            app.harness = fake
+            app.supervisor.ensure_running = Mock()
+            app.cactus.route.return_value = {
+                "confidence": .98,
+                "function_calls": [{"name": "delegate_to_reasoner", "arguments": {}}]}
+            app.system2.execute_or_stage = Mock(return_value={
+                "message": "Completed", "results":[{"available": False}]})
+            try:
+                app.handle_text("Alfred explain GPU status")
+                fake.plan.assert_called_once()
+                self.assertEqual(fake.plan.call_args.args[1], app.session_id)
+                app.system2.execute_or_stage.assert_called_once_with(
+                    [{"tool":"get_gpu_status","args":{}}],
+                    "Ready for approval", None, allow_actions=True)
+            finally:
+                app.close()
+
+    def test_harness_tool_spoof_cannot_skip_system2_preflight(self):
+        with tempfile.TemporaryDirectory() as home:
+            app = self.make_app(home)
+            fake = Mock()
+            fake.plan.return_value = {
+                "message": "shell", "steps": [
+                    {"tool":"arbitrary_shell","args":{"command":"id"}}],
+                "save_as": None}
+            app.harness = fake
+            app.supervisor.ensure_running = Mock()
+            app.cactus.route.return_value = {
+                "confidence": .99,
+                "function_calls": [{"name": "delegate_to_reasoner", "arguments": {}}]}
+            app.system2.execute_or_stage = Mock()
+            app.system2.reason = Mock(return_value={"message":"Denied","results":[]})
+            try:
+                app.handle_text("Run shell")
+                app.system2.execute_or_stage.assert_not_called()
+                app.system2.reason.assert_called_once_with(
+                    "Run shell", allow_actions=True)
+            finally:
+                app.close()
+
     def test_actionable_needle_call_never_goes_through_harness(self):
         with tempfile.TemporaryDirectory() as home:
             app = self.make_app(home)
