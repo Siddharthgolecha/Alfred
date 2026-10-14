@@ -218,6 +218,14 @@ class AppWiringTests(unittest.TestCase):
         self.app.close()
         self.tmp.cleanup()
 
+    def test_nonfinite_or_boolean_needle_confidence_never_runs_tools(self):
+        for bad in (float("nan"), float("inf"), True, None):
+            with self.subTest(bad=bad):
+                self.app.cactus.route.return_value=call(confidence=bad)
+                self.app.system2.direct=Mock(return_value=result({"available":True}))
+                self.app.handle_text("Get system status")
+                self.app.system2.direct.assert_not_called()
+
     def test_fast_status_one_shot_no_feedback_or_qwen(self):
         self.app.cactus.route.return_value=call()
         self.app.system2.direct=Mock(return_value=result({"available":True,
