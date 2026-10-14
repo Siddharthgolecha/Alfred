@@ -56,7 +56,7 @@ class SafeSdkTests(unittest.TestCase):
         with self.assertRaises(HarnessUnavailable):
             client.run("hello", "not-an-id")
         with self.assertRaises(HarnessUnavailable):
-            client.run("x" * 5000, "a" * 32)
+            client.run("x" * 9000, "a" * 32)
         self.assertEqual(FakeSdk.created, [])
         client.close()
 
