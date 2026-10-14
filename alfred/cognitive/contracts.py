@@ -167,8 +167,29 @@ class Completion(Contract):
             raise ValueError("Invalid completion reason")
 
 
+
+@dataclass(frozen=True)
+class Diagnostic(Contract):
+    """Opt-in diagnostic. Whitelisted numeric/boolean fields remove all free text."""
+    kind = "diagnostic"
+    name: str
+    metrics: dict
+
+    def validate(self):
+        if self.name not in ("needle_route", "qwen_plan", "capture"):
+            raise ValueError("Unknown diagnostic name")
+        if not isinstance(self.metrics, dict) or len(self.metrics) > 5:
+            raise ValueError("Invalid diagnostic metrics")
+        limits = {"latency_ms": 300000, "input_chars": 100000,
+                  "output_chars": 100000, "retry_count": 100,
+                  "channels": 32}
+        for key, value in self.metrics.items():
+            if key not in limits or type(value) is not int or not 0 <= value <= limits[key]:
+                raise ValueError("Diagnostic contains unsupported or sensitive data")
+
+
 CONTRACT_TYPES = {cls.kind: cls for cls in
-                  (TaskEnvelope, Decision, Observation, Escalation, ApprovalReference, Completion)}
+                  (TaskEnvelope, Decision, Observation, Escalation, ApprovalReference, Completion, Diagnostic)}
 
 
 def decode_contract(raw):
