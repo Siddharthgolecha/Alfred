@@ -26,7 +26,7 @@ jobs:
       - name: Unit tests (native Cactus engine not required)
         run: python -m unittest discover -s tests -v
       - name: Needle fast-path P50/P95 (mock inference, paired baseline)
-        run: python tests/bench_needle_fastpath.py
+        run: PYTHONPATH=. python tests/bench_needle_fastpath.py
 
   harness-sdk-smoke:
     runs-on: ubuntu-latest
