@@ -271,9 +271,10 @@ def check_condition(predicate, results):
             "lt":lambda a,b:a<b,"lte":lambda a,b:a<=b}[op](actual,expected)
 
 class Tools:
-    def __init__(self,cfg,store):
+    def __init__(self,cfg,store,processes=None):
         self.cfg = cfg
         self.store = store
+        self.processes = processes
         self.services = set(cfg.get("allowed_services",[]))
         self.tasks = cfg.get("named_tasks",{})
         from .automations import Automations
@@ -301,7 +302,8 @@ class Tools:
             spec = self.tasks.get(n)
             if not isinstance(spec,list) or not spec or any(not isinstance(a,str) for a in spec):
                 raise PermissionError("Task not in runtime.named_tasks")
-            done = subprocess.run(spec,capture_output=True,text=True,timeout=60,check=False)
+            runner = self.processes.run if self.processes else subprocess.run
+            done = runner(spec,capture_output=True,text=True,timeout=60,check=False)
             out = {"returncode":done.returncode,"stdout":done.stdout[-1200:],"stderr":done.stderr[-600:]}
         elif name == "create_reminder":
             if not args["message"].strip():
@@ -344,8 +346,9 @@ class Tools:
     def _service(self,n,verb):
         if n not in self.services or not _valid_name(n):
             raise PermissionError("Service not approved")
-        done = subprocess.run(["systemctl","--user",verb,n], capture_output=True,text=True,
-                              timeout=10,check=False)
+        runner = self.processes.run if self.processes else subprocess.run
+        done = runner(["systemctl","--user",verb,n], capture_output=True,text=True,
+                      timeout=10,check=False)
         return {"exit_code":done.returncode,"message":(done.stdout or done.stderr).strip()[:300]}
 
     def run_plan(self,steps, allow_cancellations=False):
