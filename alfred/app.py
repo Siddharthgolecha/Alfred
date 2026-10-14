@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import json
 import logging
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -16,6 +18,7 @@ from .console import TranscriptDisplay
 from .routing import adjust_status_calls
 from .config import data_path, load_config
 from .models import Cactus, LlamaSupervisor, Qwen
+from .lifecycle import ShutdownSocket, request_close
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools
 from .system2 import System2
 
@@ -55,6 +58,7 @@ class Alfred:
         self.scheduler = Scheduler(self.store,self.tools,self._remind)
         self._watchdog_stop = threading.Event()
         self._watchdog_thread = None
+        self._closed = False
 
     def _remind(self,event):
         text=f"Reminder #{event['id']}: {event['message']}"
@@ -166,11 +170,29 @@ class Alfred:
                 time.sleep(1)
 
     def close(self):
+        """Idempotent teardown; never terminate an inference server we adopted."""
+        if self._closed:
+            return
+        self._closed = True
         self._watchdog_stop.set()
-        self.audio.close()
-        self.scheduler.stop()
-        # Managed inference services deliberately stay alive for subsequent runs.
-        # Existing external processes are never stopped or replaced.
+        # Stop startup/restart attempts before waiting for the watchdog.
+        for component, action in (
+            ("audio capture", self.audio.close),
+            ("inference backend", self.supervisor.close),
+            ("scheduler", self.scheduler.stop),
+        ):
+            try:
+                action()
+            except Exception:
+                LOG.exception("Could not fully stop %s", component)
+        if self._watchdog_thread and self._watchdog_thread.is_alive():
+            self._watchdog_thread.join(timeout=5)
+        threads = (self.scheduler.thread, self.scheduler.workflow_thread,
+                   self._watchdog_thread)
+        if any(t is not None and t.is_alive() for t in threads):
+            LOG.warning("Background workers did not all exit; leaving DB open until process exit")
+        else:
+            self.store.db.close()
 
 def doctor(cfg):
     """Make advertised devices and *verified live microphone* visibly distinct."""
@@ -207,9 +229,11 @@ def doctor(cfg):
     print("Backend executable:",s.executable_name())
     return healthy
 
-def main(argv=None):
+def _main(argv=None):
     parser=argparse.ArgumentParser(description="Alfred Jetson voice automation agent")
     parser.add_argument("--config",default="config.json",help="Local JSON config")
+    parser.add_argument("command", nargs="?", choices=["close"],
+                        help="Close running Alfred services and processes owned by Alfred")
     group=parser.add_mutually_exclusive_group()
     group.add_argument("--doctor",action="store_true",help="Show mic/server status without models")
     group.add_argument("--text",help="Execute one command using Needle and tools")
@@ -258,6 +282,17 @@ def main(argv=None):
     logs.mkdir(parents=True,exist_ok=True)
     logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                         handlers=[logging.StreamHandler()])
+    if args.command == "close":
+        if any((args.doctor, args.text, args.ensure_backend, args.scheduler_only,
+                args.automations, args.automation_tick, args.reason,
+                args.pending, args.approve is not None, args.reject is not None)):
+            parser.error("'close' cannot be combined with another operation")
+        stopped = []
+        for role in ("voice", "scheduler"):
+            if request_close(logs, role):
+                stopped.append(role)
+        print("Alfred stopped: " + ", ".join(stopped) if stopped else "Alfred is not running")
+        return 0
     if args.doctor:
         return 0 if doctor(cfg) else 2
     if args.ensure_backend:
@@ -327,12 +362,13 @@ def main(argv=None):
                 # Keep persistent timers and watches running independently of
                 # the microphone and Qwen. Do not start llama watchdog.
                 LOG.info("Starting headless Phase 3 scheduler")
-                app.scheduler.start()
-                try:
-                    while True:
-                        time.sleep(1)
-                except KeyboardInterrupt:
-                    LOG.info("Stopping headless scheduler")
+                with ShutdownSocket(logs, "scheduler"):
+                    app.scheduler.start()
+                    try:
+                        while True:
+                            time.sleep(1)
+                    except KeyboardInterrupt:
+                        LOG.info("Stopping headless scheduler")
         finally:
             app.close()
         return 0
@@ -369,21 +405,41 @@ def main(argv=None):
             return 2
         finally:
             mic.close()
-    app=Alfred(cfg)
+    # Only the persistent voice instance advertises 'alfred close'.
+    # One-shot text calls do not take over the voice control socket.
+    control = ShutdownSocket(logs, "voice") if not args.text else nullcontext()
+    with control:
+        app=Alfred(cfg)
+        try:
+            app.start_services()
+            if args.text:
+                app.handle_text(args.text)
+            else:
+                app.listen()
+        except KeyboardInterrupt:
+            LOG.info("Stopping Alfred")
+        except AudioUnavailableError as exc:
+            LOG.error("Microphone disconnected or capture failed: %s",exc)
+            return 2
+        finally:
+            app.close()
+    return 0
+
+
+def main(argv=None):
+    """Systemd SIGTERM and terminal Ctrl+C both unwind Python finally blocks."""
+    previous = signal.getsignal(signal.SIGTERM)
+    def on_term(signum, frame):
+        raise KeyboardInterrupt()
+    signal.signal(signal.SIGTERM, on_term)
     try:
-        app.start_services()
-        if args.text:
-            app.handle_text(args.text)
-        else:
-            app.listen()
+        return _main(argv)
     except KeyboardInterrupt:
         LOG.info("Stopping Alfred")
-    except AudioUnavailableError as exc:
-        LOG.error("Microphone disconnected or capture failed: %s",exc)
-        return 2
+        return 0
     finally:
-        app.close()
-    return 0
+        signal.signal(signal.SIGTERM, previous)
+
 
 if __name__=="__main__":
     raise SystemExit(main())
