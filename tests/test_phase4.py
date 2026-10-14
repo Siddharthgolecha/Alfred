@@ -207,6 +207,22 @@ class GraphTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.s2.approve(response["approval"]["approval_id"])
 
+    def test_draft_graph_blocks_same_named_legacy_workflow_fallback(self):
+        self.store.save_workflow("collision",[{"tool":"get_system_status","args":{}}])
+        self.eng.draft(graph("collision"))
+        with self.assertRaisesRegex(PermissionError,"requires local approval"):
+            self.s2.direct([{"name":"run_workflow",
+                             "arguments":{"name":"collision"}}])
+
+    def test_phase4_worker_thread_is_independent_of_reminders(self):
+        scheduler=Scheduler(self.store,self.tools,lambda _:None)
+        self.assertNotEqual(scheduler.thread.name,scheduler.workflow_thread.name)
+        self.assertEqual(scheduler.workflow_thread.name,"alfred-workflow-worker")
+        with patch.object(self.tools.workflow_engine,"tick",return_value=[]):
+            scheduler.start()
+            scheduler.stop()
+        self.assertTrue(scheduler.stop_flag.is_set())
+
     def test_voice_approval_rejects_changed_definition(self):
         self.eng.draft(graph());self.eng.approve("health")
         response=self.s2.direct([{"name":"run_workflow","arguments":{"name":"health"}}])
