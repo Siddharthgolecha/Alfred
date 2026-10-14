@@ -132,6 +132,43 @@ class System2Tests(unittest.TestCase):
             preflight([{"tool":"get_gpu_status","args":{},
                 "when":{"step":0,"field":"gpu_temp_c","op":"gt","value":75}}],self.tools)
 
+    def test_run_saved_workflow_is_snapshot_staged(self):
+        self.store.save_workflow("checks",[{"tool":"get_system_status","args":{}}])
+        out=self.sys.direct([{"name":"run_workflow","arguments":{"name":"checks"}}])
+        self.assertIn("approval",out)
+        # Subsequent edits must not change the already approved snapshot.
+        self.store.save_workflow("checks",[{"tool":"get_gpu_status","args":{}}])
+        result=self.sys.approve(out["approval"]["approval_id"])
+        self.assertIn("memory_mib",result[0])
+
+    def test_cancel_reminder_requires_approval_and_runs_once(self):
+        rid=self.store.create_reminder("verify",5)["id"]
+        out=self.sys.direct([{"name":"cancel_reminder","arguments":{"reminder_id":rid}}])
+        self.assertIn("approval",out)
+        self.assertEqual(len(self.store.list_reminders()),1)
+        result=self.sys.approve(out["approval"]["approval_id"])
+        self.assertEqual(result,[{"cancelled":True}])
+        self.assertEqual(self.store.list_reminders(),[])
+
+    def test_qwen_cancel_schedule_staged(self):
+        sid=self.store.create_schedule("get_system_status",10)["id"]
+        self.qwen.complete.return_value={"message":"Proposed cancellation",
+           "steps":[{"tool":"cancel_schedule","args":{"schedule_id":sid}}],"save_as":None}
+        out=self.sys.reason("Cancel schedule number "+str(sid))
+        self.assertIn("approval",out)
+        self.assertEqual(len(self.store.list_schedules()),1)
+        self.sys.approve(out["approval"]["approval_id"])
+        self.assertEqual(self.store.list_schedules(),[])
+
+    def test_workflow_save_rejects_cancellation(self):
+        rid=self.store.create_reminder("must survive",5)["id"]
+        self.qwen.complete.return_value={"message":"Save this",
+          "steps":[{"tool":"cancel_reminder","args":{"reminder_id":rid}}],
+          "save_as":"bad_workflow"}
+        with self.assertRaises(ValueError):
+            self.sys.reason("Create a workflow that cancels reminder "+str(rid))
+        self.assertEqual(len(self.store.list_reminders()),1)
+
     def test_atomic_claim_one_time(self):
         pid=self.sys.direct([{"name":"run_named_task","arguments":{"name":"safe_echo"}}])["approval"]["approval_id"]
         self.assertEqual(self.sys.approvals.claim(pid)["id"],pid)
