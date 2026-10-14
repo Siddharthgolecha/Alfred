@@ -41,8 +41,9 @@ steps are **never resumable or auto-replayable**.
 
 - **Needle direct result:** regular `System2.direct` path, no Qwen or Harness.
 - **Unsupported / ordinary explanation:** optional read-only Qwen continuation.
-- **Low Needle confidence:** optional read-only Qwen continuation, never convert
-  an uncertain action into an authorized action.
+- **Low Needle confidence / unknown Needle function:** optional read-only Qwen
+  clarification, never convert an uncertain or unrecognized action into an
+  authorized call. Unknown names are rejected before System2.direct.
 - **Explicit Needle `delegate_to_reasoner`:** Qwen may *propose* tool actions
   within existing concrete allowlists. Sensitive steps remain **pending** until
   a separate trusted `alfred --approve ID`; unchanged Phase 4 graph workflow
@@ -86,6 +87,8 @@ session using a validated existing hex ID:
 
 ```sh
 alfred --resume-session <32-hex-session-id> --text "Check GPU temperature"
+# Or, after native voice/microphone preflight succeeds:
+alfred --resume-session <32-hex-session-id>
 ```
 
 The existing SQLite cognitive session is reused, but any interrupted `running`
@@ -118,6 +121,14 @@ genuine SDK/Cordis process, but native Jetson/Needle weights are still untested.
 The paired `bench_handoff.py` compares clear direct status routing against
 Qwen-handoff routing on the **same CI host** with interleaved, deterministic
 fake model responses. It prints P50/P95 and Qwen/direct invocation counts.
+
+The verified prior GitHub Actions run #38625051862 (mock inference, 200
+measurements per condition) reported:
+| Runner | Direct P50/P95 | Handoff P50/P95 | Handoff minus direct |
+|---|---|---|---|
+| Python 3.10 | 1186.5 / 1729.8 μs | 1489.5 / 2338.5 μs | +303.0 / +608.7 μs |
+| Python 3.12 | 1562.3 / 2152.7 μs | 1941.7 / 2779.2 μs | +379.4 / +626.5 μs |
+
 This measures Python policy/ledger serialization overhead only; **it does not
 include actual Qwen inference, device throughput, power, RAM or audio capture.**
 Do not claim real-world performance improvement based on this benchmark.
