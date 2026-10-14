@@ -132,6 +132,19 @@ class WordAlignmentTests(unittest.TestCase):
         self.assertTrue(rows[1]["likely_crosstalk"])
         self.assertFalse(rows[1]["included_in_minutes"])
 
+    def test_identical_phrase_at_different_time_is_not_deleted(self):
+        rows=[
+            {"id":"A","speaker":"USB_1","start_seconds":10.0,"end_seconds":11.5,
+             "text":"We should release this","energy_rms":.3,"overlap_with":[],
+             "likely_crosstalk":False,"ambiguous_crosstalk":False},
+            {"id":"B","speaker":"USB_2","start_seconds":10.3,"end_seconds":11.7,
+             "text":"We should release this","energy_rms":.02,"overlap_with":[],
+             "likely_crosstalk":False,"ambiguous_crosstalk":False},
+        ]
+        annotate_overlap(rows)
+        self.assertTrue(all(r["included_in_minutes"] for r in rows))
+        self.assertTrue(all(r["ambiguous_crosstalk"] for r in rows))
+
     def test_short_acknowledgments_never_silently_suppressed(self):
         rows=[
             {"id":c,"speaker":c,"start_seconds":10,"end_seconds":10.3,
