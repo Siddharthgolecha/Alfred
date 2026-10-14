@@ -35,7 +35,7 @@ def needs_approval(steps, save_as=None):
 
 def preflight(steps, tools, max_steps=5):
     """Validate the full plan and concrete allowlists BEFORE any step executes."""
-    validated = validate_plan(steps, max_steps)
+    validated = validate_plan(steps, max_steps, allow_cancellations=True)
     for step in validated:
         tool, args = step["tool"], step.get("args", {})
         if tool == "control_service" and args["name"] not in tools.services:
@@ -151,13 +151,15 @@ class System2:
         self.cfg=cfg
         self.approvals=Approvals(store,cfg.get("approval_ttl_seconds",180))
 
-    def execute_or_stage(self, steps, message="", save_as=None, allow_actions=True):
+    def execute_or_stage(self, steps, message="", save_as=None, allow_actions=True, force_approval=False):
         steps=preflight(steps,self.tools,self.cfg.get("max_plan_steps",5))
         if not allow_actions:
             if any(s["tool"] not in VOICE_ALLOWED or s["tool"]=="create_reminder" for s in steps) or save_as:
                 # Never silently filter out dangerous steps and claim the command succeeded.
                 return {"message":"That request needs an explicit actionable command.", "steps":[]}
-        if needs_approval(steps,save_as):
+        if save_as and any(s["tool"] in ("cancel_reminder","cancel_schedule") for s in steps):
+            raise ValueError("Saved workflows cannot contain cancellation actions")
+        if force_approval or needs_approval(steps,save_as):
             proposal=self.approvals.propose(steps,save_as)
             self.store.event("approval_requested",{"id":proposal["approval_id"],
                          "actions":proposal["actions"]})
@@ -188,6 +190,13 @@ class System2:
             if len(calls)!=1:
                 raise ValueError("Reasoner delegation must be a standalone call")
             raise ValueError("Call reason() with the original utterance")
+        if len(calls)==1 and calls[0].get("name")=="run_workflow":
+            workflow_name=calls[0].get("arguments",{}).get("name","")
+            # Snapshot the saved workflow before approval; do not fetch a
+            # potentially changed definition after the user approves.
+            saved=self.store.get_workflow(workflow_name)
+            return self.execute_or_stage(saved, message=f"Run saved workflow {workflow_name}",
+                                         force_approval=True)
         steps=[{"tool":c["name"],"args":c.get("arguments") or {}} for c in calls]
         return self.execute_or_stage(steps)
 
@@ -201,7 +210,7 @@ class System2:
                 result=self.store.save_workflow(item["save_as"],steps)
                 self.store.event("workflow_saved",result)
             else:
-                result=self.tools.run_plan(steps)
+                result=self.tools.run_plan(steps,allow_cancellations=True)
             self.approvals.finish(approval_id,result=result)
             return result
         except Exception as exc:
