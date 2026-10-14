@@ -107,9 +107,10 @@ class Alfred:
             return
         task = self._start_task(self._command_source, len(text))
         self.store.event("utterance",{"length":len(text)})  # No raw transcript stored.
+        if self.cactus is None:
+            self.sessions.append(task.task_id, Completion("failed", "exception"))
+            raise RuntimeError("Cactus models were not initialized")
         try:
-            if self.cactus is None:
-                raise RuntimeError("Cactus models were not initialized")
             routed_at = time.monotonic()
             response=self.cactus.route(text)
             if self.cfg["runtime"].get("cognitive_diagnostics",False):
