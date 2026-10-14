@@ -68,11 +68,33 @@ class TranscriptConsoleTests(unittest.TestCase):
         display.update("GPU status")
         display.update("GPU status") # duplicate suppressed
         display.finish("GPU status")
-        self.assertEqual(target.getvalue().splitlines(),[
-            "Whistle (live): GPU",
-            "Whistle (live): GPU status",
-            "Whistle (final): GPU status",
-        ])
+        self.assertEqual(target.getvalue().splitlines(),["Whistle: GPU status"])
+
+    def test_interactive_terminal_types_deltas_not_full_redraws(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        target=Terminal()
+        display=TranscriptDisplay(target)
+        display.update("show")
+        display.update("show GPU")
+        display.update("show GPU status")
+        display.finish("show GPU status")
+        self.assertEqual(target.getvalue(),"Whistle: show GPU status\n")
+
+    def test_interactive_terminal_handles_revised_hypothesis(self):
+        class Terminal(io.StringIO):
+            def isatty(self):
+                return True
+        target=Terminal()
+        display=TranscriptDisplay(target)
+        display.update("show CPO")
+        display.update("show GPU")
+        display.finish("show GPU")
+        output=target.getvalue()
+        self.assertEqual(output.count("Whistle:"),1)
+        self.assertIn("\b",output)
+        self.assertEqual(output.count("\n"),1)
 
     def test_control_bytes_cannot_inject_terminal_escapes(self):
         target=io.StringIO()
@@ -81,7 +103,7 @@ class TranscriptConsoleTests(unittest.TestCase):
         display.finish("\x1b[31mGPU\x1b[0m")
         self.assertNotIn("\x1b",target.getvalue())
         self.assertNotIn("\x07",target.getvalue())
-        self.assertIn("Whistle (final): GPU",target.getvalue())
+        self.assertIn("Whistle: GPU",target.getvalue())
 
     def test_no_partial_execution(self):
         from alfred.app import Alfred
@@ -108,8 +130,8 @@ class TranscriptConsoleTests(unittest.TestCase):
                 with patch("alfred.app.UtteranceStream",OneUtterance),patch("sys.stdout",output):
                     app.listen()
                 self.assertEqual(called,["GPU status"])
-                self.assertIn("Whistle (live): GPU sta",output.getvalue())
-                self.assertIn("Whistle (final): GPU status",output.getvalue())
+                self.assertNotIn("unsafe service",output.getvalue())
+                self.assertEqual(output.getvalue(),"Whistle: GPU status\n")
             finally:
                 app.close()
                 app.store.db.close()
