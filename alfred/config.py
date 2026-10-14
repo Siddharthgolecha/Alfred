@@ -31,7 +31,9 @@ def _merge(base, update):
     for key, value in update.items():
         if key not in base:
             raise ValueError(f"Unknown configuration key: {key}")
-        if isinstance(base[key], dict) and isinstance(value, dict):
+        if key == "named_tasks" and isinstance(value, dict):
+            base[key] = value
+        elif isinstance(base[key], dict) and isinstance(value, dict):
             _merge(base[key], value)
         else:
             base[key] = value
