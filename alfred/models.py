@@ -211,6 +211,43 @@ class Qwen:
             raise ValueError("Qwen response missing required plan fields")
         return plan
 
+    def explain(self, user_request, observed_results):
+        """Second bounded pass: interpret observed tool output; never return executable calls."""
+        self.supervisor.ensure_running()
+        model = self.supervisor.model_id()
+        observations = json.dumps(observed_results,default=str,ensure_ascii=True)[:7000]
+        payload = {
+            "messages": [
+                {"role":"system","content":
+                    "You are Alfred, a concise local diagnostic assistant. "
+                    "Summarize actual tool observations for the user; distinguish measurements "
+                    "from possible causes. Do not claim facts absent from the provided tool results. "
+                    "Do not issue instructions to execute actions, claim an action has succeeded, "
+                    "or invent hardware readings. If measurements are insufficient, say so."},
+                {"role":"user","content":
+                    "User question: " + user_request[:1200] + "\nObserved read-only tool results:\n" + observations}
+            ],
+            "temperature":0,
+            "max_tokens":min(512,int(self.cfg["max_tokens"])),
+            "response_format":{"type":"json_schema","schema":{
+                "type":"object","properties":{"answer":{"type":"string","maxLength":1400}},
+                "required":["answer"],"additionalProperties":False
+            }},
+            "stream":False
+        }
+        if model:
+            payload["model"]=model
+        out=request_json(self.cfg["url"].rstrip("/") + "/v1/chat/completions",
+                         payload,timeout=90)
+        content=out["choices"][0]["message"].get("content") or ""
+        try:
+            answer=json.loads(content)["answer"]
+        except (ValueError,TypeError,KeyError) as exc:
+            raise ValueError("Qwen analysis did not return a valid answer") from exc
+        if not isinstance(answer,str) or not answer.strip():
+            raise ValueError("Qwen analysis answer is empty")
+        return answer[:1400]
+
 class Cactus:
     """One long-lived Needle instance; native inference kept on calling thread."""
     def __init__(self, schemas):
