@@ -112,6 +112,24 @@ class System2Tests(unittest.TestCase):
         self.assertIn("approval",result)
         self.assertEqual(len(self.sys.approvals.pending()),1)
 
+    def test_explanation_consumes_actual_tool_observations(self):
+        self.qwen.complete.return_value={"message":"Checking",
+             "steps":[{"tool":"get_system_status","args":{}}],"save_as":None}
+        self.qwen.explain.return_value="The Jetson memory reading is in the tool result."
+        result=self.sys.reason("Explain the current system memory")
+        self.assertIn("memory reading",result["message"])
+        self.qwen.explain.assert_called_once()
+        observations=self.qwen.explain.call_args.args[1]
+        self.assertIn("memory_mib",observations[0])
+
+    def test_explanation_never_runs_when_sensitive_plan_staged(self):
+        self.qwen.complete.return_value={"message":"Stopping would require approval",
+             "steps":[{"tool":"control_service","args":{
+                 "name":"alfred-monitor.service","action":"stop"}}],"save_as":None}
+        result=self.sys.reason("Explain why and stop the monitor")
+        self.assertIn("approval",result)
+        self.qwen.explain.assert_not_called()
+
     def test_saved_workflow_is_proposed_not_immediately_committed(self):
         self.qwen.complete.return_value={"message":"Create an example workflow",
              "steps":[{"tool":"get_gpu_status","args":{}}],
@@ -200,6 +218,19 @@ class QwenSchemaTests(unittest.TestCase):
         self.assertEqual(payload["response_format"]["schema"]["type"],"object")
         self.assertIn('"name":"get_system_status"',payload["messages"][0]["content"])
         self.assertIn("monitor.service",payload["messages"][0]["content"])
+
+    def test_explain_uses_readonly_schema_and_cites_observations(self):
+        cfg=load_config()["qwen"]
+        supervisor=Mock()
+        supervisor.model_id.return_value=""
+        qwen=Qwen(cfg,supervisor)
+        fake={"choices":[{"message":{"content":json.dumps({"answer":"Observed memory is low."})}}]}
+        with patch("alfred.models.request_json",return_value=fake) as send:
+            result=qwen.explain("Why is memory low?",[{"memory_mib":{"MemAvailable":128}}])
+        self.assertIn("Observed",result)
+        payload=send.call_args.args[1]
+        self.assertEqual(payload["response_format"]["schema"]["required"],["answer"])
+        self.assertIn("MemAvailable",payload["messages"][1]["content"])
 
     def test_malformed_model_reply_rejected(self):
         cfg=load_config()["qwen"]
