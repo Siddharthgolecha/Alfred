@@ -183,6 +183,29 @@ class Alfred:
             calls=response.get("function_calls") or []
             confidence=response.get("confidence")
             validation = response.get("validation") or {}
+            # A malformed explicit argument is never silently coerced to {}.
+            # Apply this to one-shot Needle calls too, not only loop feedback.
+            if (type(calls) is not list or any(
+                    type(call) is not dict
+                    or type(call.get("name")) is not str
+                    or ("arguments" in call and type(call["arguments"]) is not dict)
+                    for call in calls)):
+                self.sessions.append(task.task_id, Decision("needle3", "rejected", 0))
+                self.sessions.append(task.task_id, Completion("rejected", "unsafe_route"))
+                self.feedback.tell("Needle returned an invalid tool request. Please clarify.")
+                return
+            if self.cfg["runtime"]["needle_loop_enabled"] and len(calls) > 1:
+                # A one-shot request can be multi-call without entering the
+                # contextual loop. Reject duplicate side effects there too.
+                signatures = [json.dumps({"name":c["name"],
+                                          "arguments":c.get("arguments", {})},
+                                         sort_keys=True, separators=(",", ":"),
+                                         allow_nan=False) for c in calls]
+                if len(signatures) != len(set(signatures)):
+                    self.sessions.append(task.task_id, Decision("needle3", "rejected", 0))
+                    self.sessions.append(task.task_id, Completion("rejected", "unsafe_route"))
+                    self.feedback.tell("Repeated tool request rejected before execution.")
+                    return
             if response.get("suppressed_calls") or (
                 isinstance(validation, dict) and validation.get("ungrounded")
             ):
