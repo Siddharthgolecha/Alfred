@@ -16,7 +16,7 @@ DEFAULT = {
         "url": "http://127.0.0.1:8080", "binary": "llama-server",
         "model_path": "", "expected_model": "Qwen3.5-4B",
         "ctx_size": 4096, "gpu_layers": 99, "startup_timeout_seconds": 120,
-        "max_tokens": 500, "enabled": True
+        "max_tokens": 500, "enabled": True, "supervisor_poll_seconds": 30
     },
     "runtime": {
         "database": "~/.local/share/alfred/alfred.db",
@@ -60,6 +60,8 @@ def load_config(path=None):
         raise ValueError("audio.speech_rms out of range")
     if not (1 <= int(q["ctx_size"]) <= 131072):
         raise ValueError("qwen.ctx_size invalid")
+    if not 10 <= int(q["supervisor_poll_seconds"]) <= 3600:
+        raise ValueError("qwen.supervisor_poll_seconds must be 10..3600")
     if not 1 <= int(cfg["runtime"]["max_plan_steps"]) <= 10:
         raise ValueError("max_plan_steps must be 1..10")
     return cfg
