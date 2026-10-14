@@ -15,8 +15,7 @@ from .audio import AudioManager, AudioUnavailableError, UtteranceStream, pactl_j
 from .console import TranscriptDisplay
 from .routing import adjust_status_calls
 from .config import data_path, load_config
-from .models import Cactus, Qwen
-from .backends import ModelSupervisor
+from .models import Cactus, LlamaSupervisor, Qwen
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools
 from .system2 import System2
 
@@ -46,7 +45,7 @@ class Alfred:
         self.tools = Tools(runtime,self.store)
         self.feedback = Feedback(runtime["tts"])
         self.audio = AudioManager(cfg["audio"])
-        self.supervisor = ModelSupervisor(cfg["qwen"],runtime["logs"])
+        self.supervisor = LlamaSupervisor(cfg["qwen"],runtime["logs"])
         self.qwen = Qwen(cfg["qwen"],self.supervisor)
         self.system2 = System2(self.qwen,self.tools,self.store,runtime)
         if not runtime.get("telemetry",False):
@@ -202,7 +201,7 @@ def doctor(cfg):
                 print("Bluetooth card:",card.get("name"),"profile:",card.get("active_profile"))
     except (OSError,ValueError,RuntimeError) as exc:
         print("Bluetooth profile detection unavailable:",exc)
-    s=ModelSupervisor(cfg["qwen"],cfg["runtime"]["logs"])
+    s=LlamaSupervisor(cfg["qwen"],cfg["runtime"]["logs"])
     print("Inference backend:",json.dumps(s.status()))
     print("Model:",cfg["qwen"]["model"] or cfg["qwen"]["model_path"] or "(auto-select)")
     print("Backend executable:",s.executable_name())
@@ -236,7 +235,7 @@ def main(argv=None):
     if args.doctor:
         return 0 if doctor(cfg) else 2
     if args.ensure_backend:
-        s=ModelSupervisor(cfg["qwen"],logs)
+        s=LlamaSupervisor(cfg["qwen"],logs)
         s.ensure_running()
         print(json.dumps(s.status()))
         return 0

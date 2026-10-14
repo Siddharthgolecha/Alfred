@@ -16,7 +16,7 @@
   "qwen": {
     "backend": "auto",
     "url": "http://127.0.0.1:8080",
-    "binary": "llama",
+    "binary": "",
     "model": "bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M",
     "model_path": "",
     "expected_model": "Qwen3.5-4B",

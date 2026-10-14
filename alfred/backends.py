@@ -173,8 +173,11 @@ class ModelSupervisor:
             else:
                 raise ValueError("Set qwen.model (Hugging Face repo:quant) or qwen.model_path (GGUF)")
             cmd += ["--host", "127.0.0.1", "--port", port,
-                    "--ctx-size", str(self.cfg["ctx_size"]),
-                    "--n-gpu-layers", str(self.cfg["gpu_layers"]), "--parallel", "1"]
+                    "--ctx-size", str(self.cfg["ctx_size"])]
+            if Path(binary).name == "llama":
+                cmd += ["-ngl", str(self.cfg["gpu_layers"]), "-np", "1"]
+            else:
+                cmd += ["--n-gpu-layers", str(self.cfg["gpu_layers"]), "--parallel", "1"]
             return cmd
         if self.backend == "ollama":
             # OLLAMA_HOST is set by ensure_running; never pull a model implicitly.

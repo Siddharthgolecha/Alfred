@@ -74,6 +74,11 @@ class Qwen:
             return {"type": "json_schema", "json_schema": {"name": name, "schema": schema}}
         return {"type": "json_schema", "schema": schema}
 
+    def _endpoint(self):
+        # Older code/tests supply supervisors with no URL attribute.
+        url = getattr(self.supervisor, "url", None)
+        return url if isinstance(url, str) else self.cfg["url"].rstrip("/")
+
     def complete(self, transcript, tool_catalog, allowed_services=(), named_tasks=()):
         self.supervisor.ensure_running()
         model = self.supervisor.model_id()
@@ -114,7 +119,7 @@ class Qwen:
         }
         if model:
             payload["model"] = model
-        out = request_json(self.supervisor.url + "/v1/chat/completions",
+        out = request_json(self._endpoint() + "/v1/chat/completions",
                            payload, timeout=90)
         content = out["choices"][0]["message"].get("content") or ""
         try:
@@ -151,7 +156,7 @@ class Qwen:
         }
         if model:
             payload["model"]=model
-        out=request_json(self.supervisor.url + "/v1/chat/completions",
+        out=request_json(self._endpoint() + "/v1/chat/completions",
                          payload,timeout=90)
         content=out["choices"][0]["message"].get("content") or ""
         try:

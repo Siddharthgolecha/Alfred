@@ -65,7 +65,7 @@ class BackendSupervisorTests(unittest.TestCase):
         self.assertEqual(argv[:4], ["/usr/bin/llama", "serve", "-hf",
                                      "bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M"])
         self.assertIn("--ctx-size", argv)
-        self.assertIn("--n-gpu-layers", argv)
+        self.assertIn("-ngl", argv)
 
     def test_source_directory_can_find_llama_binary(self):
         base = Path(self.temp.name) / "llama.cpp"
