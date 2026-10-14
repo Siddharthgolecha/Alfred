@@ -53,7 +53,7 @@ class EnvelopeTests(unittest.TestCase):
             EscalationEnvelope(2,h.session_id,h.task_id,h.request,h.reason,
                                h.completed,h.observations,h.allow_actions,
                                h.remaining_tools,h.remaining_decisions)
-        with self.assertRaises(ValueError):
+        with self.assertRaises(PermissionError):
             build_handoff(SID,TID,"run task","incomplete",
                           calls=[{"name":"run_named_task",
                                   "arguments":{"name":"existing"}}],
