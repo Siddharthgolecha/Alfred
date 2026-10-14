@@ -77,6 +77,28 @@ class SessionLedger:
                 (started, sid))
         return item
 
+    def resume_session(self, session_id):
+        """Explicit restart recovery: correlate future tasks, NEVER rerun old ones.
+
+        A prior task with no terminal event is indeterminate: local processes
+        or service calls may have run before an abrupt power loss. Close that
+        trace as failed/shutdown in the immutable ledger. Approved pending
+        actions remain in the existing Approvals queue and can only be claimed
+        from the trusted local CLI; no new proposal is synthesized.
+        """
+        sid = valid_id(session_id)
+        with self.store.lock:
+            row = self.store.db.execute(
+                "SELECT id FROM cognitive_sessions WHERE id=?", (sid,)).fetchone()
+            if row is None:
+                raise ValueError("Unknown cognitive session")
+            running = [r["id"] for r in self.store.db.execute(
+                "SELECT id FROM cognitive_tasks WHERE session_id=? AND state='running'",
+                (sid,)).fetchall()]
+            for task_id in running:
+                self.append(task_id, Completion("failed","shutdown"))
+        return sid
+
     def _history(self, task_id, session_id):
         task_row = self.store.db.execute(
             "SELECT source,started_at FROM cognitive_tasks WHERE id=? AND session_id=?",
