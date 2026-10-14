@@ -289,6 +289,17 @@ class Alfred:
                     "selected":[c.get("name") for c in corrected]
                 })
                 calls=corrected
+            if (self.cfg["runtime"]["escalation_enabled"] and
+                    any(call["name"] not in SCHEMA_BY_NAME for call in calls)):
+                # An unknown name is not a tool grant. Never pass it to
+                # System2.direct(), and never silently reinterpret the name
+                # as a privileged service/command. Only read-only clarification
+                # is permitted with the original wake-authorized request.
+                self.sessions.append(task.task_id, Decision("needle3", "rejected",
+                                                             min(len(calls), 50)))
+                outcome=self._handoff(task, text, "unsupported", allow_actions=False)
+                self._finish_handoff(task, outcome)
+                return
             self.store.event("route", {
                 "model":"needle3", "confidence":confidence,
                 "call_count":len(calls),
