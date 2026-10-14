@@ -240,6 +240,18 @@ class AppWiringTests(unittest.TestCase):
         self.assertEqual(self.app.system2.direct.call_count,2)
         self.app.reason.assert_not_called()
 
+    def test_unrelated_command_invalidates_context(self):
+        self.app.cactus.route.return_value=call()
+        self.app.system2.direct=Mock(return_value=result({"available":True,
+                                                          "gpu_temp_c":65}))
+        self.app.handle_text("Check GPU temperature")
+        self.assertEqual(self.app.cactus.route.call_count,1)
+        self.app.handle_text("Get system status")
+        self.app.handle_text("Check it again")
+        # Ambiguous pronoun did not authorize a third call.
+        self.assertEqual(self.app.cactus.route.call_count,2)
+        self.assertEqual(self.app.system2.direct.call_count,2)
+
     def test_stale_or_missing_pronoun_does_not_reach_needle(self):
         self.app.handle_text("Check it again")
         self.app.cactus.route.assert_not_called()
