@@ -21,6 +21,7 @@ from .models import Cactus, LlamaSupervisor, Qwen
 from .lifecycle import ShutdownSocket, request_close
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools
 from .system2 import System2
+from .wakeword import WakeWordGate, AcousticWakeDetector
 
 LOG = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ class Alfred:
         self.tools = Tools(runtime,self.store)
         self.feedback = Feedback(runtime["tts"])
         self.audio = AudioManager(cfg["audio"])
+        self.wake_word = WakeWordGate(cfg["wake_word"])
         self.supervisor = LlamaSupervisor(cfg["qwen"],runtime["logs"])
         self.qwen = Qwen(cfg["qwen"],self.supervisor)
         self.system2 = System2(self.qwen,self.tools,self.store,runtime)
@@ -146,18 +148,46 @@ class Alfred:
     def listen(self):
         if self.cactus is None:
             raise RuntimeError("Cactus models not loaded")
-        LOG.info("Starting continuous English speech recognition")
+        wake_cfg = self.cfg["wake_word"]
+        detector = (AcousticWakeDetector(wake_cfg)
+                    if wake_cfg["enabled"] and wake_cfg["mode"] == "openwakeword"
+                    else None)
+        LOG.info("Starting voice capture; wake word %s (%s)",
+                 "enabled" if wake_cfg["enabled"] else "disabled", wake_cfg["mode"])
         for chunks in UtteranceStream(self.audio.frames(),self.cfg["audio"]).utterances():
             transcript_display=TranscriptDisplay()
             try:
-                # Show partial text immediately, but execute only finalized words.
-                transcript=self.cactus.transcribe_stream(
-                    chunks,on_partial=transcript_display.update)
-                transcript_display.finish(transcript)
-                if transcript:
-                    LOG.info("Utterance received (%d characters)",len(transcript))
-                    self.handle_text(transcript)
-                # Drain capture buffered during synchronous TTS to prevent self-trigger.
+                acoustically_activated=False
+                if detector is not None and not self.wake_word.is_armed():
+                    # No expensive ASR inference before a local acoustic wake hit.
+                    # A standalone wake also opens one short follow-up window.
+                    chunks=detector.capture_after_wake(chunks,self.cfg["audio"]["frame_ms"])
+                    if chunks is None:
+                        continue
+                    acoustically_activated=True
+
+                def show_partial(hypothesis):
+                    # Partial hypotheses are display-only, never executable.
+                    # Suppress unrelated bystander speech from the terminal.
+                    if self.wake_word.preview(
+                            hypothesis, acoustic_activation=acoustically_activated) is not None:
+                        transcript_display.update(hypothesis)
+
+                transcript=self.cactus.transcribe_stream(chunks,on_partial=show_partial)
+                command=self.wake_word.consume(
+                    transcript,acoustic_activation=acoustically_activated)
+                if command is None:
+                    transcript_display.discard()
+                    continue
+                transcript_display.finish(transcript or wake_cfg["phrase"])
+                if command:
+                    LOG.info("Wake-authorized command received (%d characters)",len(command))
+                    # Never forward a wake phrase to Needle or Qwen.
+                    self.handle_text(command)
+                else:
+                    LOG.info("Wake word detected; awaiting follow-up command")
+                # Discard speech buffered during synchronous TTS to prevent
+                # the assistant from triggering itself.
                 if self.feedback.tts:
                     self.audio.close()
             except (KeyboardInterrupt, AudioUnavailableError):
@@ -167,6 +197,8 @@ class Alfred:
                 transcript_display.abort()
                 LOG.exception("Audio/transcription error, recovering")
                 self.audio.close()
+                if detector is not None:
+                    detector.reset()
                 time.sleep(1)
 
     def close(self):

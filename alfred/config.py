@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -12,6 +13,10 @@ DEFAULT = {
         "speech_rms": 0.013, "end_silence_frames": 2, "max_utterance_seconds": 25,
         "auto_fallback": True, "probe_timeout_seconds": 5,
         "read_timeout_seconds": 5
+    },
+    "wake_word": {
+        "enabled": True, "phrase": "Alfred", "mode": "transcript",
+        "followup_seconds": 8, "model_path": "", "threshold": 0.75
     },
     "qwen": {
         "backend": "auto", "url": "", "binary": "",
@@ -82,6 +87,23 @@ def load_config(path=None):
         raise ValueError("audio.read_timeout_seconds must be 1..30")
     if not (0.001 <= float(cfg["audio"]["speech_rms"]) <= 0.2):
         raise ValueError("audio.speech_rms out of range")
+    wake = cfg["wake_word"]
+    if not isinstance(wake["enabled"], bool):
+        raise ValueError("wake_word.enabled must be a boolean")
+    if wake["mode"] not in ("transcript", "openwakeword"):
+        raise ValueError("wake_word.mode must be transcript or openwakeword")
+    if (not isinstance(wake["phrase"], str)
+            or not re.fullmatch(r"[A-Za-z][A-Za-z0-9 ]{0,39}", wake["phrase"])
+            or wake["phrase"] != wake["phrase"].strip()):
+        raise ValueError("wake_word.phrase must be a nonempty literal word/phrase")
+    if (not isinstance(wake["followup_seconds"], (int, float))
+            or not 0 <= wake["followup_seconds"] <= 30):
+        raise ValueError("wake_word.followup_seconds must be 0..30")
+    if (not isinstance(wake["threshold"], (int, float))
+            or not 0 < wake["threshold"] <= 1):
+        raise ValueError("wake_word.threshold must be in (0,1]")
+    if not isinstance(wake["model_path"], str):
+        raise ValueError("wake_word.model_path must be a local path string")
     if not isinstance(q["model"], str) or not isinstance(q["binary"], str):
         raise ValueError("qwen.model and qwen.binary must be strings")
     if not (1 <= int(q["ctx_size"]) <= 131072):
