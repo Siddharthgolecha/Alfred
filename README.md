@@ -40,8 +40,8 @@ cp config.example.json config.json
 
 ```bash
 # Populate the native model caches before going offline:
-python -m needle download needle3
-python -m needle download whistle
+needle download needle3
+needle download whistle
 
 # Unit tests (no mic, Jetson or GGUF required):
 python -m unittest discover -s tests -v
