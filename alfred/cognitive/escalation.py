@@ -93,6 +93,8 @@ class EscalationEnvelope:
         payload = {"version":self.version, "session_id":self.session_id,
                    "task_id":self.task_id, "handoff_reason":self.reason,
                    "allowed_actions":self.allow_actions,
+                   "approval_policy":"trusted_local_cli_only",
+                   "tool_policy":"System2_preflight_allowlist",
                    "remaining_tool_calls":self.remaining_tools,
                    "remaining_needle_decisions":self.remaining_decisions,
                    "completed_tools":[x["name"] for x in self.completed],
@@ -149,10 +151,14 @@ def build_handoff(session_id, task_id, request, reason, *,
             data = {}  # no raw lists or attacker-supplied names
         completed.append({"name":call["name"],"arguments":args})
         safe.append(data)
-    if type(max_tools) is not int or max_tools < len(completed):
-        raise ValueError("Invalid tool budget")
+    if (type(allow_actions) is not bool or type(max_tools) is not int
+            or not len(completed) <= max_tools <= 5
+            or type(needle_budget) is not int or not 1 <= needle_budget <= 3
+            or type(used_decisions) is not int
+            or not 0 <= used_decisions <= needle_budget):
+        raise ValueError("Invalid handoff policy or remaining budget")
     return EscalationEnvelope(
         VERSION, session_id, task_id, request, reason,
-        tuple(completed), tuple(safe), bool(allow_actions),
+        tuple(completed), tuple(safe), allow_actions,
         min(5,max_tools-len(completed)),
         max(0, min(3,needle_budget-used_decisions)))
