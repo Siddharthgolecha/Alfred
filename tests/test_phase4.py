@@ -232,6 +232,65 @@ class GraphTests(unittest.TestCase):
         schedule.tools.workflow_engine.tick()
         self.assertEqual(self.eng.details(rid)["state"],"completed")
 
+    def test_nonzero_allowlisted_task_stops_workflow(self):
+        self.eng.draft(graph(steps=[node("task","run_named_task",
+            {"name":"safe_echo"},timeout_seconds=75),node("later",depends_on=["task"])]))
+        self.eng.approve("health")
+        run=self.eng.start("health")["run_id"]
+        with patch.object(self.tools,"execute",return_value={
+                "returncode":127,"stdout":"","stderr":"not found"}) as execute:
+            self.eng.tick()
+            self.eng.tick()
+        self.assertEqual(execute.call_count,1)
+        self.assertEqual(self.eng.details(run)["state"],"failed")
+
+    def test_recurring_graph_must_be_approved_and_readonly(self):
+        with self.assertRaises(ValueError):
+            self.eng.schedule_readonly("missing",5)
+        self.eng.draft(graph());self.eng.approve("health")
+        trig=self.eng.schedule_readonly("health",5)
+        self.assertEqual(trig["interval_minutes"],5)
+        self.assertEqual(self.eng.list_triggers()[0]["name"],"health")
+        self.eng.draft(graph("unsafe",[
+            node("task","run_named_task",{"name":"safe_echo"},timeout_seconds=75)]))
+        self.eng.approve("unsafe")
+        with self.assertRaises(PermissionError):
+            self.eng.schedule_readonly("unsafe",5)
+
+    def test_recurring_trigger_enqueues_once_and_coalesces_missed_ticks(self):
+        self.eng.draft(graph());self.eng.approve("health")
+        tid=self.eng.schedule_readonly("health",1)["trigger_id"]
+        with self.store.lock,self.store.db:
+            self.store.db.execute(
+                "UPDATE workflow_triggers SET next_at=? WHERE id=?",
+                (int(time.time())-3600,tid))
+        self.eng.tick()
+        self.eng.tick()
+        self.assertEqual(len(self.eng.list_runs()),1)
+        self.assertEqual(self.eng.list_runs()[0]["state"],"completed")
+        self.assertGreater(self.eng.list_triggers()[0]["next_at"],int(time.time()))
+
+    def test_recurring_trigger_pauses_after_definition_revised(self):
+        self.eng.draft(graph());self.eng.approve("health")
+        tid=self.eng.schedule_readonly("health",1)["trigger_id"]
+        self.eng.draft(graph(steps=[node("changed")]))
+        with self.store.lock,self.store.db:
+            self.store.db.execute(
+                "UPDATE workflow_triggers SET next_at=? WHERE id=?",
+                (int(time.time())-1,tid))
+        self.eng.tick()
+        self.assertEqual(self.eng.list_runs(),[])
+        self.assertEqual(self.eng.list_triggers()[0]["state"],"paused")
+
+    def test_trigger_pause_resume_cancel(self):
+        self.eng.draft(graph());self.eng.approve("health")
+        tid=self.eng.schedule_readonly("health",1)["trigger_id"]
+        self.assertTrue(self.eng.change_trigger(tid,"pause")["changed"])
+        self.assertTrue(self.eng.change_trigger(tid,"resume")["changed"])
+        self.assertTrue(self.eng.change_trigger(tid,"cancel")["changed"])
+        self.assertFalse(self.eng.change_trigger(tid,"resume")["changed"])
+        self.assertEqual(self.eng.list_triggers()[0]["state"],"cancelled")
+
     def test_graph_json_does_not_allow_extra_fields(self):
         bad=graph()
         bad["python"]="print('unsafe')"
