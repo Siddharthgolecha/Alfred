@@ -278,6 +278,8 @@ class Tools:
         self.tasks = cfg.get("named_tasks",{})
         from .automations import Automations
         self.automations=Automations(store)
+        from .workflow_engine import WorkflowEngine
+        self.workflow_engine=WorkflowEngine(store,self)
 
     def execute(self,name,args,from_plan=False):
         validate(name,args,allow_delegate=not from_plan)
@@ -363,15 +365,22 @@ class Scheduler:
         self.store, self.tools, self.on_reminder = store,tools,on_reminder
         self.stop_flag=threading.Event()
         self.thread=threading.Thread(target=self._loop,name="alfred-scheduler",daemon=True)
+        self.workflow_thread=threading.Thread(
+            target=self._workflow_loop,name="alfred-workflow-worker",daemon=True)
         self.automations=tools.automations
 
     def start(self):
         self.thread.start()
+        self.workflow_thread.start()
 
     def stop(self):
         self.stop_flag.set()
         if self.thread.is_alive():
             self.thread.join(timeout=4)
+        if self.workflow_thread.is_alive():
+            # Active approved process calls have their own subprocess bounds.
+            # Do not unsafely terminate an action or assume rollback.
+            self.workflow_thread.join(timeout=4)
 
     def _loop(self):
         while not self.stop_flag.wait(2):
@@ -390,3 +399,13 @@ class Scheduler:
             except Exception as exc:
                 LOG.exception("Phase 3 scheduler iteration failed: %s",exc)
                 self.store.event("automation_tick_error",{"error":str(exc)})
+
+
+    def _workflow_loop(self):
+        """Separate worker: 60-second named tasks cannot delay timer delivery."""
+        while not self.stop_flag.wait(2):
+            try:
+                self.tools.workflow_engine.tick()
+            except Exception as exc:
+                LOG.exception("Phase 4 workflow worker failed: %s",exc)
+                self.store.event("workflow_tick_error",{"error":str(exc)})
