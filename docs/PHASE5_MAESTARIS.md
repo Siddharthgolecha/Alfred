@@ -44,7 +44,7 @@ The next ready coding task after CI #19 is #12. Never start work on blocked issu
 
 ## Safe sync from main to intrinsic_jetson
 
-[Workflow](../.github/workflows/sync-main-to-intrinsic-jetson.yml) triggers on **every push to main**, including merged PRs, and supports manual `workflow_dispatch`.
+[Workflow](../.github/workflows/sync-main-to-intrinsic-jetson.yml) triggers on **every push to main**, including merged PRs, supports manual `workflow_dispatch`, and has an hourly idempotent scheduled catch-up (minute 17) in case an API-created merge does not dispatch a push event.
 
 1. Checkout `intrinsic_jetson` at its exact tip with complete history.
 2. Fetch both branches. If main is already an ancestor, report no-op.

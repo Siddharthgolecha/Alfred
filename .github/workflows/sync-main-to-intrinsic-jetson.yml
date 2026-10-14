@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  # Catch up even if an API-created merge does not dispatch a push workflow.
+  # Scheduled GitHub Actions may run late; all runs are idempotent.
+  schedule:
+    - cron: '17 * * * *'
 
 permissions:
   contents: write
