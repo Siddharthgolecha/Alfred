@@ -111,7 +111,7 @@ class Alfred:
                 self.supervisor.ensure_running()  # existing backend; no second server
                 if self.session_id is not None:
                     return self.harness.run(text, self.session_id)
-            except (HarnessUnavailable, OSError, RuntimeError):
+            except Exception:
                 LOG.warning("Local Harness failed, falling back to System2 (no unsafe replay)")
         return self.system2.reason(text,allow_actions=allow_actions)
 
