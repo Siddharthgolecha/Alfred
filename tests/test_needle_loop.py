@@ -325,6 +325,67 @@ class AppWiringTests(unittest.TestCase):
         self.assertEqual(self.app.cactus.route.call_args_list[-1].args[0],
                          "Check it again")
 
+    def test_invalid_initial_one_shot_arguments_rejected_before_policy(self):
+        for bad in (None,False,[],1,""):
+            with self.subTest(bad=bad):
+                self.app.cactus.route.return_value={
+                    "function_calls":[{"name":"get_gpu_status","arguments":bad}],
+                    "confidence":.99}
+                self.app.system2.direct=Mock()
+                self.app.handle_text("Get GPU status")
+                self.app.system2.direct.assert_not_called()
+                self.assertEqual(
+                    self.app.sessions.list_tasks(self.app.session_id)[0]["state"],
+                    "rejected")
+
+    def test_duplicate_one_shot_side_effects_blocked_before_approval(self):
+        duplicate={"name":"create_reminder",
+                   "arguments":{"message":"test","delay_minutes":15}}
+        self.app.cactus.route.return_value={"function_calls":[duplicate,duplicate],
+                                            "confidence":.99}
+        self.app.system2.direct=Mock()
+        self.app.handle_text("Remind me twice")
+        self.app.system2.direct.assert_not_called()
+        self.assertEqual(self.app.sessions.list_tasks(self.app.session_id)[0]["state"],
+                         "rejected")
+
+    def test_another_request_cannot_reset_during_native_feedback(self):
+        entered=threading.Event(); release=threading.Event()
+        events=[]
+        def route(text):
+            events.append("route:"+text)
+            return call()
+        def feedback(raw):
+            events.append("feedback-start")
+            entered.set()
+            self.assertTrue(release.wait(5))
+            events.append("feedback-end")
+            return {"function_calls":[],"confidence":1.0}
+        self.app.cactus.route.side_effect=route
+        self.app.cactus.route_feedback.side_effect=feedback
+        self.app.system2.direct=Mock(return_value=result({"available":True,"gpu_temp_c":60}))
+        def first():
+            self.app.handle_text("Check GPU temperature then check status")
+        def second():
+            self.app.handle_text("Get GPU status")
+        a=threading.Thread(target=first)
+        b=threading.Thread(target=second)
+        try:
+            a.start()
+            self.assertTrue(entered.wait(5))
+            b.start()
+            self.assertEqual(self.app.cactus.route.call_count,1)
+        finally:
+            release.set()
+            a.join(timeout=6)
+            b.join(timeout=6)
+        self.assertFalse(a.is_alive())
+        self.assertFalse(b.is_alive())
+        self.assertEqual(events[0],"route:Check GPU temperature then check status")
+        self.assertEqual(events[1:3],["feedback-start","feedback-end"])
+        self.assertEqual(events[3],"route:Get GPU status")
+        self.assertEqual(self.app.cactus.route_feedback.call_count,1)
+
     def test_fast_status_one_shot_no_feedback_or_qwen(self):
         self.app.cactus.route.return_value=call()
         self.app.system2.direct=Mock(return_value=result({"available":True,
