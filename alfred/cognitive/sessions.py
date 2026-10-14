@@ -78,19 +78,29 @@ class SessionLedger:
         return item
 
     def _history(self, task_id, session_id):
+        task_row = self.store.db.execute(
+            "SELECT source,started_at FROM cognitive_tasks WHERE id=? AND session_id=?",
+            (task_id, session_id)).fetchone()
+        if task_row is None:
+            raise ValueError("Task/session integrity mismatch")
         rows = self.store.db.execute(
-            "SELECT kind,contract_json FROM cognitive_events WHERE task_id=? ORDER BY id LIMIT ?",
+            "SELECT session_id,kind,contract_json FROM cognitive_events "
+            "WHERE task_id=? ORDER BY id LIMIT ?",
             (task_id, MAX_TASK_EVENTS + 1)).fetchall()
         if not rows or len(rows) > MAX_TASK_EVENTS:
             raise ValueError("Missing, corrupt or oversized task history")
         history = []
         for row in rows:
+            if row["session_id"] != session_id:
+                raise ValueError("Cross-session event corruption")
             item = decode_contract(row["contract_json"])
             if item.kind != row["kind"]:
                 raise ValueError("Corrupt event kind")
             history.append(item)
         first = history[0]
-        if not isinstance(first, TaskEnvelope) or first.task_id != task_id or first.session_id != session_id:
+        if (not isinstance(first, TaskEnvelope) or first.task_id != task_id
+                or first.session_id != session_id or first.source != task_row["source"]
+                or first.started_at != task_row["started_at"]):
             raise ValueError("Corrupt task envelope")
         if any(isinstance(x, TaskEnvelope) for x in history[1:]):
             raise ValueError("Duplicate task envelope")
@@ -135,7 +145,10 @@ class SessionLedger:
             if task is None:
                 raise ValueError("Unknown task")
             history = self._history(task_id, task["session_id"])
-            if (task["state"] == "running") != (not isinstance(history[-1], Completion)):
+            final = history[-1]
+            if ((task["state"] == "running" and isinstance(final, Completion))
+                    or (task["state"] != "running" and
+                        (not isinstance(final, Completion) or task["state"] != final.outcome))):
                 raise ValueError("Corrupt task state")
             return history
 
