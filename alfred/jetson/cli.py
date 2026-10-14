@@ -140,7 +140,11 @@ def main(argv=None):
             if pdf.parent!=folder or qr.parent!=folder or not pdf.is_file():
                 raise StorageSafetyError("No valid existing meeting PDF for Bluetooth handoff")
             import hashlib
-            digest=hashlib.sha256(pdf.read_bytes()).hexdigest()
+            hasher=hashlib.sha256()
+            with open(pdf,"rb") as stream:
+                for chunk in iter(lambda:stream.read(65536),b""):
+                    hasher.update(chunk)
+            digest=hasher.hexdigest()
             if json.loads(qr.read_text(encoding="utf-8")).get("sha256")!=digest:
                 raise StorageSafetyError("PDF changed since QR generation; transfer refused")
             result=send_bluetooth_opp(pdf,args.recipient)
