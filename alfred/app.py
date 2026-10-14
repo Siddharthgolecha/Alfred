@@ -73,7 +73,7 @@ class Alfred:
                         LOG.warning("Qwen unavailable; will retry: %s", exc)
                     self._watchdog_stop.wait(int(self.cfg["qwen"]["supervisor_poll_seconds"]))
             self._watchdog_thread = threading.Thread(
-                target=watchdog, name="llama-supervisor", daemon=True)
+                target=watchdog, name="model-supervisor", daemon=True)
             self._watchdog_thread.start()
 
     def reason(self, text, allow_actions=True):
@@ -169,8 +169,8 @@ class Alfred:
         self._watchdog_stop.set()
         self.audio.close()
         self.scheduler.stop()
-        # A llama-server started by Alfred is deliberately kept alive; next
-        # Alfred start reuses its /health endpoint instead of spawning a duplicate.
+        # Managed inference services deliberately stay alive for subsequent runs.
+        # Existing external processes are never stopped or replaced.
 
 def doctor(cfg):
     """Make advertised devices and *verified live microphone* visibly distinct."""
@@ -202,9 +202,9 @@ def doctor(cfg):
     except (OSError,ValueError,RuntimeError) as exc:
         print("Bluetooth profile detection unavailable:",exc)
     s=LlamaSupervisor(cfg["qwen"],cfg["runtime"]["logs"])
-    print("llama.cpp:",json.dumps(s.status()))
-    print("Configured GGUF:",cfg["qwen"]["model_path"] or "(not set)")
-    print("llama-server binary:",cfg["qwen"]["binary"])
+    print("Inference backend:",json.dumps(s.status()))
+    print("Model:",cfg["qwen"]["model"] or cfg["qwen"]["model_path"] or "(auto-select)")
+    print("Backend executable:",s.executable_name())
     return healthy
 
 def main(argv=None):
@@ -213,7 +213,8 @@ def main(argv=None):
     group=parser.add_mutually_exclusive_group()
     group.add_argument("--doctor",action="store_true",help="Show mic/server status without models")
     group.add_argument("--text",help="Execute one command using Needle and tools")
-    group.add_argument("--ensure-llama",action="store_true",help="Start/verify llama-server then exit")
+    group.add_argument("--ensure-backend","--ensure-llama",dest="ensure_backend",
+                       action="store_true",help="Start/verify the selected inference backend then exit")
     group.add_argument("--scheduler-only",action="store_true",
                        help="Run reminders and watches without microphone, Cactus, or Qwen")
     group.add_argument("--automations",action="store_true",
@@ -224,6 +225,32 @@ def main(argv=None):
     group.add_argument("--pending",action="store_true",help="List proposed tool actions awaiting approval")
     group.add_argument("--approve",type=int,metavar="ID",help="Locally approve and execute a proposal once")
     group.add_argument("--reject",type=int,metavar="ID",help="Locally reject a proposal")
+    group.add_argument("--workflow-draft",metavar="JSON_FILE",
+                       help="Validate and save a local workflow graph as unapproved draft")
+    group.add_argument("--workflow-approve",metavar="NAME",
+                       help="Locally approve a validated graph version")
+    group.add_argument("--workflow-list",action="store_true",
+                       help="List graph definitions and their approval state")
+    group.add_argument("--workflow-start",metavar="NAME",
+                       help="Locally queue an approved graph workflow")
+    group.add_argument("--workflow-runs",action="store_true",
+                       help="List recent workflow execution statuses")
+    group.add_argument("--workflow-status",type=int,metavar="RUN_ID",
+                       help="Inspect durable step results for a workflow run")
+    group.add_argument("--workflow-cancel",type=int,metavar="RUN_ID",
+                       help="Cancel pending steps of an in-progress graph")
+    group.add_argument("--workflow-tick",action="store_true",
+                       help="Execute up to three ready graph workflow steps")
+    group.add_argument("--workflow-reconcile",type=int,metavar="RUN_ID",
+                       help="Explicitly mark an uncertain in-flight step interrupted")
+    group.add_argument("--workflow-schedule",metavar="NAME:MINUTES",
+                       help="Schedule a locally approved read-only graph on an interval")
+    group.add_argument("--workflow-triggers",action="store_true",
+                       help="List recurring read-only workflow triggers")
+    group.add_argument("--workflow-trigger-pause",type=int,metavar="TRIGGER_ID")
+    group.add_argument("--workflow-trigger-resume",type=int,metavar="TRIGGER_ID")
+    group.add_argument("--workflow-trigger-cancel",type=int,metavar="TRIGGER_ID")
+
     args=parser.parse_args(argv)
     path=Path(args.config)
     cfg=load_config(path if path.exists() else None)
@@ -233,10 +260,60 @@ def main(argv=None):
                         handlers=[logging.StreamHandler()])
     if args.doctor:
         return 0 if doctor(cfg) else 2
-    if args.ensure_llama:
+    if args.ensure_backend:
         s=LlamaSupervisor(cfg["qwen"],logs)
         s.ensure_running()
         print(json.dumps(s.status()))
+        return 0
+    if (args.workflow_draft or args.workflow_approve or args.workflow_list
+            or args.workflow_start or args.workflow_runs
+            or args.workflow_status is not None or args.workflow_cancel is not None
+            or args.workflow_tick or args.workflow_reconcile is not None
+            or args.workflow_schedule or args.workflow_triggers
+            or args.workflow_trigger_pause is not None
+            or args.workflow_trigger_resume is not None
+            or args.workflow_trigger_cancel is not None):
+        app=Alfred(cfg,load_models=False)
+        try:
+            engine=app.tools.workflow_engine
+            if args.workflow_draft:
+                candidate=Path(args.workflow_draft).expanduser()
+                if not candidate.is_file() or candidate.stat().st_size>40000:
+                    raise ValueError("Workflow JSON must be a local file <=40 kB")
+                draft=json.loads(candidate.read_text(encoding="utf-8"))
+                result=engine.draft(draft)
+            elif args.workflow_approve:
+                result=engine.approve(args.workflow_approve)
+            elif args.workflow_list:
+                result=engine.definitions()
+            elif args.workflow_start:
+                result=engine.start(args.workflow_start)
+            elif args.workflow_runs:
+                result=engine.list_runs()
+            elif args.workflow_status is not None:
+                result=engine.details(args.workflow_status)
+            elif args.workflow_cancel is not None:
+                result=engine.cancel(args.workflow_cancel)
+            elif args.workflow_reconcile is not None:
+                result=engine.reconcile_interrupted(args.workflow_reconcile)
+            elif args.workflow_schedule:
+                parts=args.workflow_schedule.rsplit(":",1)
+                if len(parts)!=2:
+                    raise ValueError("Workflow schedule format must be NAME:MINUTES")
+                result=engine.schedule_readonly(parts[0],int(parts[1]))
+            elif args.workflow_triggers:
+                result=engine.list_triggers()
+            elif args.workflow_trigger_pause is not None:
+                result=engine.change_trigger(args.workflow_trigger_pause,"pause")
+            elif args.workflow_trigger_resume is not None:
+                result=engine.change_trigger(args.workflow_trigger_resume,"resume")
+            elif args.workflow_trigger_cancel is not None:
+                result=engine.change_trigger(args.workflow_trigger_cancel,"cancel")
+            else:
+                result=engine.tick()
+            print(json.dumps(result,indent=2,default=str))
+        finally:
+            app.close()
         return 0
     if args.automations or args.automation_tick or args.scheduler_only:
         app=Alfred(cfg,load_models=False)
