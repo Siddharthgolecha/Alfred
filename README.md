@@ -5,6 +5,10 @@ Offline-first, continuous English voice automation on **NVIDIA Jetson Orin Nano 
 **Microphone → Cactus Whistle streaming STT → Cactus Needle 3 tool router → validated Python tools.**
 Needle can delegate complex commands to a **Qwen 3.5 4B Bartowski Q4_K_M GGUF** model hosted by local **llama.cpp**. The app adopts a healthy existing `llama-server`, or starts it if absent.
 
+## Phase 2 planning and approvals
+
+Alfred includes schema-grounded Qwen planning and local approvals for sensitive commands. The integrated security design and CLI examples are documented in [Phase 2](docs/PHASE2.md). These commands are available without microphone input: `--reason`, `--pending`, `--approve ID`, and `--reject ID`. Voice-only speech cannot approve a privileged action.
+
 ## What is implemented
 
 - Sony **WI-C100** Bluetooth microphone using HFP/HSP (A2DP alone does *not* provide headset mic capture).
@@ -131,7 +135,7 @@ Controlled: `control_service` only for `runtime.allowed_services`, `run_named_ta
 
 Persistent: `create_reminder`, `cancel_reminder`, `schedule_every` (status checks only), `cancel_schedule`. Scheduled jobs are stored in SQLite WAL and recover across Alfred restarts, but are not an exactly-once distributed delivery system.
 
-System 2: Qwen returns JSON plans. Python validates the tools, args, allowed conditions, max steps, and service/task allowlists; nested reasoning and recursive workflows are prohibited. Saving a named workflow requires an explicit "save/create workflow" voice request. Conditions may compare a **top-level field** from an earlier step, e.g. `gpu_temp_c > 80`. **Conditional recurring watches are not implemented**; recurring jobs currently run approved read-only diagnostic tools.
+System 2: Qwen receives live tool schemas and returns JSON plans. Python validates the whole plan and requires local approval for sensitive actions; nested reasoning and recursive workflows are prohibited. Saving a named workflow requires an explicit "save/create workflow" voice request. Conditions may compare a **top-level field** from an earlier step, e.g. `gpu_temp_c > 80`. **Conditional recurring watches are not implemented**; recurring jobs currently run approved read-only diagnostic tools.
 
 For safety and privacy, raw audio is not saved and the database logs **transcript length**, not content. Do not run Alfred with root privileges. Continuous listening is enabled by user choice; only use in spaces where recording is appropriate.
 
