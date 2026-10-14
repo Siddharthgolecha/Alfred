@@ -33,7 +33,7 @@ DEFAULT = {
         "tts": False, "voice_alerts": False, "telemetry": False,
         "cognitive_diagnostics": False,
         "harness_enabled": False, "harness_timeout_seconds": 45,
-        "needle_loop_enabled": True, "needle_max_decisions": 3,
+        "needle_loop_enabled": False, "needle_max_decisions": 3,
         "needle_max_tools": 3, "needle_context_ttl_seconds": 120
     }
 }
