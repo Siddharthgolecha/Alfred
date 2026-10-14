@@ -162,6 +162,20 @@ class AlfredVoiceTests(unittest.TestCase):
         self.assertIn("Whistle: Alfred",output)
         self.assertNotIn("stop service",output)
 
+    def test_wake_authorized_spoken_close_stops_without_needle_or_qwen(self):
+        commands,output,count=self.run_voice(
+            ["close", "Alfred close", "Alfred, check GPU status"])
+        self.assertEqual(commands,[])
+        self.assertEqual(count,2)
+        self.assertIn("Stopping Alfred",output)
+
+    def test_standalone_wake_then_close_stops(self):
+        commands,output,count=self.run_voice(
+            ["Alfred", "close", "Alfred, check GPU status"])
+        self.assertEqual(commands,[])
+        self.assertEqual(count,2)
+        self.assertIn("Stopping Alfred",output)
+
     def test_explicit_opt_out_for_legacy_voice_deployment(self):
         commands,_,_=self.run_voice(["GPU status"], enabled=False)
         self.assertEqual(commands,["GPU status"])

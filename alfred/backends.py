@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 from pathlib import Path
 import shutil
 import socket
@@ -70,6 +71,7 @@ class ModelSupervisor:
         self.lock = threading.RLock()
         self.process = None
         self.started_here = False
+        self._stopping = threading.Event()
 
     def executable_name(self):
         return self.cfg.get("binary") or DEFAULT_BINARIES[self.backend]
@@ -189,6 +191,8 @@ class ModelSupervisor:
 
     def ensure_running(self):
         with self.lock:
+            if self._stopping.is_set():
+                raise RuntimeError("Alfred inference backend is shutting down")
             state = self.health()
             if state == "ready":
                 self.verify_model()
@@ -230,13 +234,60 @@ class ModelSupervisor:
     def _wait_ready(self):
         end = time.monotonic() + int(self.cfg["startup_timeout_seconds"])
         while time.monotonic() < end:
+            if self._stopping.is_set():
+                raise RuntimeError("Alfred inference backend startup cancelled")
             if self.process and self.process.poll() is not None:
                 raise RuntimeError(f"Managed {self.backend} exited with code {self.process.returncode}")
             if self.health() == "ready":
                 self.verify_model()
                 return True
-            time.sleep(1)
+            self._stopping.wait(0.25)
         raise TimeoutError(f"{self.backend} did not become healthy at {self.url}")
+
+    def close(self):
+        """Stop only the backend this supervisor launched, including its process group."""
+        self._stopping.set()  # Wake _wait_ready before acquiring the startup lock.
+        with self.lock:
+            if not self.started_here:
+                return  # Adopted Ollama/LM Studio/llama.cpp instances are never owned.
+            process = self.process
+            if process is not None:
+                try:
+                    if process.poll() is None:
+                        # Popen(start_new_session=True) creates a private process group.
+                        # A bare terminate() would leak backend worker descendants.
+                        try:
+                            if os.getpgid(process.pid) == process.pid:
+                                os.killpg(process.pid, signal.SIGTERM)
+                            else:
+                                process.terminate()
+                        except ProcessLookupError:
+                            pass
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            LOG.warning("%s did not terminate; killing managed process group", self.backend)
+                            try:
+                                if os.getpgid(process.pid) == process.pid:
+                                    os.killpg(process.pid, signal.SIGKILL)
+                                else:
+                                    process.kill()
+                            except ProcessLookupError:
+                                pass
+                            process.wait(timeout=3)
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    LOG.warning("Could not fully stop managed %s: %s", self.backend, exc)
+                finally:
+                    self.process = None
+            elif self.backend == "lm_studio":
+                # LM Studio's CLI launches a daemon and exits; only undo our own start.
+                try:
+                    subprocess.run([self._binary(), "server", "stop"],
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, timeout=10, check=False)
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    LOG.warning("Could not stop Alfred-started LM Studio: %s", exc)
+            self.started_here = False
 
     def status(self):
         status = {"backend": self.backend, "url": self.url, "health": self.health(),

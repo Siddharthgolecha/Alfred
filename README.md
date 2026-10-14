@@ -180,6 +180,43 @@ System 2: Qwen receives live tool schemas and returns JSON plans. Python validat
 
 For safety and privacy, raw audio is not saved and the database logs **transcript length**, not content. Do not run Alfred with root privileges. Continuous listening is enabled by user choice; only use in spaces where recording is appropriate.
 
+## Graceful shutdown
+
+An interactive **Ctrl+C** or systemd **SIGTERM** stops the audio capture subprocess,
+in-progress approved named-task/TTS subprocesses, reminder/workflow threads,
+model watchdog, and **only the inference process Alfred started**. Alfred kills its own llama.cpp/llama-server/Ollama process group if a
+graceful stop times out. A pre-existing server discovered at the same endpoint is
+**never terminated**. LM Studio is stopped via `lms server stop` only if Alfred
+started it, not if it was adopted.
+
+After the wake word is authorized, saying **"Alfred, close"** or **"Hey Alfred,
+stop listening"** shuts down the voice agent locally, without asking Needle or
+Qwen to execute a command. Background speech saying "close" alone is ignored
+when wake-word detection is enabled.
+
+To close an already-running Alfred voice instance (and an independently started
+`--scheduler-only` instance) from another terminal, run:
+
+```bash
+alfred --config config.json close
+# Or, with the default config path:
+alfred close
+```
+
+The command uses a **0600 Unix control socket inside a 0700 user-owned directory**
+under `runtime.logs/.control`, not a PID file, port scan, or `pkill`. It waits
+for shutdown and reports an error if cleanup doesn't finish within the timeout.
+A second instance of the same role refuses to start rather than commandeering
+the running instance. Re-running `alfred close` after shutdown is safe.
+
+**Scope:** User-requested `control_service` actions and externally managed local
+inference services are not undone. `--ensure-backend` is an explicit one-shot
+backend prewarm command; its server is intentionally persistent and is not owned
+by a subsequent Alfred listening session. For systemd, prefer
+`systemctl --user stop alfred` if you also want the service manager's state to
+be explicitly marked stopped. `alfred close` exits cleanly and will not trigger
+`Restart=on-failure`.
+
 ## Deployment as a service
 
 Use `deployment/alfred.service` as a **user** service template (edit paths to your checkout). The audio daemon and BlueZ session must be available to that user; running `systemd --user` without a graphical/audio session may not be enough.
