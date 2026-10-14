@@ -9,6 +9,12 @@ Needle can delegate complex commands to a **Qwen 3.5 4B Bartowski Q4_K_M GGUF** 
 
 Alfred includes schema-grounded Qwen planning and local approvals for sensitive commands. The integrated security design and CLI examples are documented in [Phase 2](docs/PHASE2.md). These commands are available without microphone input: `--reason`, `--pending`, `--approve ID`, and `--reject ID`. Voice-only speech cannot approve a privileged action.
 
+## Phase 3 — automations and typing-style speech
+
+Phase 3 adds [persistent absolute/daily reminders and GPU-temperature watches](docs/PHASE3.md), with SQLite notification delivery and a headless `--scheduler-only` service that works without a microphone. Sensitive recurring changes still need local approval. Run `python -m alfred --automations` to inspect jobs.
+
+Whistle now updates **one terminal line like typing** as new speech arrives. Corrections revise only the changed suffix. It does not print a new line for every partial phrase; the final transcript is committed and used for tool execution. Non-TTY logs only print the final transcript.
+
 ## What is implemented
 
 - Sony **WI-C100** Bluetooth microphone using HFP/HSP (A2DP alone does *not* provide headset mic capture).
@@ -99,19 +105,7 @@ echo $?   # 0: functional microphone / 2: no valid input
 
 ## Live Whistle transcripts and GPU status routing
 
-While listening in an interactive terminal, Alfred shows Whistle's *pending* transcript on a single updating `Whistle (live):` line, then prints the confirmed `Whistle (final):` utterance as a separate line. In a redirected/non-interactive console, it emits each distinct partial update on a new line. **Only final confirmed speech is sent to Needle and tools; pending text never executes actions.**
-
-For example:
-
-```text
-Whistle (live): could you show
-Whistle (live): could you show gpu status
-Whistle (final): could you show GPU status
-```
-
-Alfred also guards explicit GPU status/temperature/usage requests against Needle accidentally selecting `get_system_status`. It uses `get_gpu_status` for GPU-only status and retains `get_system_status` if both system and GPU diagnostics are asked for. The correction only applies to non-mutating status-tool choices: reminders, service operations and reasoning requests are never silently rewritten.
-
-**Privacy note:** CLI partial/final transcripts are intentionally visible; if Alfred runs under a service manager that journals stdout, that manager may retain these lines. Disable or redirect stdout logging if recording utterances is not appropriate. Alfred's own SQLite event table does not persist transcript text.
+Interactive terminal output is a single progressively typed `Whistle: ` line. Partial changes are shown in-place without creating new lines. Redirected output only includes the final text. Pending hypotheses never trigger tools. See [Phase 3](docs/PHASE3.md) for details. Explicit GPU metrics still route to `get_gpu_status`.
 
 ## Pair and select Sony WI-C100
 

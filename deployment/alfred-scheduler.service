@@ -1,0 +1,16 @@
+[Unit]
+Description=Alfred persistent reminders and GPU condition watches (no microphone required)
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Alfred
+ExecStart=%h/Alfred/.venv/bin/alfred --config %h/Alfred/config.json --scheduler-only
+Environment=PYTHONUNBUFFERED=1
+Environment=NEEDLE_TELEMETRY=0
+Restart=on-failure
+RestartSec=5
+# Distinct from the voice service: no audio dependency or model startup.
+
+[Install]
+WantedBy=default.target

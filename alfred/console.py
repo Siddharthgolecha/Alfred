@@ -1,61 +1,76 @@
-"""Live, privacy-respecting console display for streaming Whistle transcripts.
+"""In-place, typing-style Whistle preview.
 
-Nothing here persists transcript contents to disk. TTY output redraws one line;
-redirected stdout emits distinct incremental updates as individual lines.
+A terminal sees only newly arrived characters, not repeated full lines.
+Partial text is display-only; it never reaches command execution.
+Non-interactive output emits the FINAL transcript only, preventing log spam.
 """
 from __future__ import annotations
-
 import re
-import shutil
 import sys
 
-_ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_ANSI=re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+_CONTROL=re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
-def clean(text):
-    raw=_ANSI.sub("",str(text or ""))
-    return _CONTROL.sub(" ",raw).strip()
+def clean(value):
+    return _CONTROL.sub(" ",_ANSI.sub("",str(value or ""))).strip()
 
 class TranscriptDisplay:
-    """One instance per utterance, with a stable final line."""
+    """TTY incremental typing with in-place correction and one final line."""
     def __init__(self,stream=None):
-        self.stream=stream if stream is not None else sys.stdout
+        self.stream=sys.stdout if stream is None else stream
         self.last=""
         self.live=False
 
+    def _tty(self):
+        return bool(getattr(self.stream,"isatty",lambda:False)())
+
     def update(self,text):
-        transcript=clean(text)
-        if not transcript or transcript==self.last:
+        new=clean(text)
+        if not new or new==self.last:
             return
-        self.last=transcript
-        if self.stream.isatty():
-            width=max(24,shutil.get_terminal_size((100,25)).columns)
-            rendered="Whistle (live): "+transcript
-            rendered=rendered[:width-1]
-            self.stream.write("\r\x1b[2K"+rendered)
-            self.stream.flush()
+        if not self._tty():
+            # Piped output/systemd journals only confirmed speech, never every
+            # partial hypothesis. Avoid one log line per Whistle update.
+            self.last=new
+            return
+        if not self.live:
+            self.stream.write("Whistle: ")
+            self.live=True
+        old=self.last
+        # Appends are typed as deltas. A revised hypothesis erases the changed
+        # suffix and types only the replacement. No artificial sleep/delay.
+        common=0
+        for a,b in zip(old,new):
+            if a!=b:
+                break
+            common+=1
+        changed=len(old)-common
+        if changed:
+            self.stream.write("\b"*changed)
+            self.stream.write(new[common:])
+            self.stream.write("\x1b[K")
         else:
-            self.stream.write("Whistle (live): "+transcript+"\n")
-            self.stream.flush()
-        self.live=True
+            self.stream.write(new[common:])
+        self.stream.flush()
+        self.last=new
 
     def finish(self,confirmed):
         final=clean(confirmed)
-        if self.live and self.stream.isatty():
-            self.stream.write("\r\x1b[2K")
-        if final:
-            self.stream.write("Whistle (final): "+final+"\n")
-        elif self.live:
-            self.stream.write("Whistle (final): [no confirmed speech]\n")
+        if self._tty() and self.live:
+            # The final hypothesis may correct the last partial. Update only
+            # the changed suffix, then finish exactly one line.
+            if final:
+                self.update(final)
+            self.stream.write("\n")
+        elif final:
+            self.stream.write("Whistle: "+final+"\n")
         self.stream.flush()
         self.last=""
         self.live=False
 
     def abort(self):
-        if self.live:
-            if self.stream.isatty():
-                self.stream.write("\r\x1b[2K")
-            self.stream.write("Whistle (interrupted)\n")
+        if self.live and self._tty():
+            self.stream.write("\n[Whistle interrupted]\n")
             self.stream.flush()
         self.last=""
         self.live=False
