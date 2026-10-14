@@ -20,7 +20,7 @@ from .config import data_path, load_config
 from .models import Cactus, LlamaSupervisor, Qwen
 from .lifecycle import ChildProcesses, ShutdownSocket, request_close
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools
-from .system2 import System2
+from .system2 import System2, parse_plan
 from .wakeword import WakeWordGate, AcousticWakeDetector
 from .cognitive import (SessionLedger, Decision, Observation, Escalation,
                         ApprovalReference, Completion, Diagnostic)
@@ -104,15 +104,28 @@ class Alfred:
     def reason(self, text, allow_actions=True):
         if not self.cfg["qwen"]["enabled"]:
             return {"message":"Qwen System 2 is disabled","results":[]}
-        # Harness is strictly read-only: all action-capable requests still go
-        # through existing System2 preflight and trusted one-shot approval.
-        if not allow_actions and self.harness is not None:
+        # Harness only produces text/UNTRUSTED tool proposals. The protected
+        # Python System2 remains the sole gate for execution and approvals.
+        if self.harness is not None and self.session_id is not None:
             try:
-                self.supervisor.ensure_running()  # existing backend; no second server
-                if self.session_id is not None:
-                    return self.harness.run(text, self.session_id)
+                self.supervisor.ensure_running()  # never launches another backend
+                if allow_actions:
+                    proposed = self.harness.plan(
+                        text, self.session_id, tools=TOOL_SCHEMAS,
+                        allowed_services=self.tools.services,
+                        named_tasks=self.tools.tasks.keys(),
+                        max_steps=self.cfg["runtime"]["max_plan_steps"])
+                    message, steps, save_as = parse_plan(
+                        proposed, text, self.tools,
+                        self.cfg["runtime"]["max_plan_steps"])
+                    return self.system2.execute_or_stage(
+                        steps, message, save_as, allow_actions=True)
+                return self.harness.run(text, self.session_id)
             except Exception:
-                LOG.warning("Local Harness failed, falling back to System2 (no unsafe replay)")
+                # If a tool proposal fails validation, NEVER execute that
+                # proposal. Fresh legacy planning goes through identical
+                # System2 preflight/approval safeguards.
+                LOG.warning("Local Harness failed validation/runtime; using System2")
         return self.system2.reason(text,allow_actions=allow_actions)
 
     def _start_task(self, source, input_chars):
