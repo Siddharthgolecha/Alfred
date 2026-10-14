@@ -85,9 +85,10 @@ def source_status(source, explicitly_selected=False):
     onboard=("built-in" in description.lower() or "builtin" in description.lower()
              or lower.startswith("alsa_input.platform") or "onboard" in description.lower())
     if onboard:
-        if any(x in ("yes","true","1") for x in available):
-            return True,"onboard input port reports available; must pass capture probe"
-        return False,"built-in/SoC audio has no confirmed available microphone input port"
+        return False,(
+            "built-in/SoC audio is not auto-trusted as a connected microphone; "
+            "set audio.direct_source explicitly for a known wired/I2S capture device"
+        )
     if ports and any(x in ("yes","true","1") for x in available):
         return True,"input port reports available; must pass capture probe"
     return False,"physical input not confirmed; configure direct_source explicitly"
