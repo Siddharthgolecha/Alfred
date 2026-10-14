@@ -94,4 +94,4 @@ def probe_microphone(source,timeout=2.0):
                 proc.kill()
                 proc.wait(timeout=1.5)
             if proc.stdout:
-                proc.stdout.close
+                proc.stdout.close()
