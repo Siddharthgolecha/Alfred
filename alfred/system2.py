@@ -175,6 +175,80 @@ class System2:
         results=self.tools.run_plan(steps)
         return {"message":message or "Completed","results":results}
 
+    def continue_handoff(self, handoff, *, harness=None, supervisor=None):
+        """Continue one trusted, already-authorized task, never replay its tools.
+
+        Model inference can fail or fall back before execution. Validation and
+        execution are *outside* the exception handler, preventing a partially
+        executed plan from being retried. Observations sent to Qwen contain
+        only bounded telemetry; no raw stdout, names, or tool result strings.
+        """
+        from .cognitive.escalation import EscalationEnvelope
+        from .cognitive.harness_sdk import HarnessUnavailable
+
+        if not isinstance(handoff, EscalationEnvelope):
+            raise ValueError("Expected a validated escalation envelope")
+        context = handoff.to_model_context()
+        self.store.event("cognitive_handoff", {
+            "version":handoff.version, "session_id":handoff.session_id,
+            "task_id":handoff.task_id, "reason":handoff.reason,
+            "completed":len(handoff.completed),
+            "budget":handoff.remaining_tools,
+            "actionable":handoff.allow_actions,
+        })
+        completed = [{"tool":call["name"],"metrics":value}
+                     for call,value in zip(handoff.completed,handoff.observations)]
+        if (handoff.remaining_tools == 0 and
+                not self.cfg.get("explain_on_handoff_without_tools", True)):
+            return {"status":"incomplete", "message":"No remaining tool budget.",
+                    "results":completed, "partial":bool(completed)}
+        if not self.qwen.cfg.get("enabled", True):
+            return {"status":"incomplete", "message":"Qwen is disabled; request remains incomplete.",
+                    "results":completed, "partial":bool(completed)}
+        catalog = [s for s in TOOL_SCHEMAS
+                   if s["name"] not in ("delegate_to_reasoner","run_workflow")]
+        try:
+            if harness is not None:
+                if supervisor is not None:
+                    supervisor.ensure_running()
+                try:
+                    plan = harness.plan(
+                        handoff.request, handoff.session_id, tools=catalog,
+                        allowed_services=self.tools.services,
+                        named_tasks=self.tools.tasks.keys(),
+                        max_steps=self.cfg.get("max_plan_steps",5),
+                        handoff=handoff)
+                except (HarnessUnavailable, OSError, TimeoutError, RuntimeError):
+                    # Fresh Qwen inference is safe here: zero tools executed by
+                    # either planner. Do not catch anything from System2 below.
+                    plan = self.qwen.complete(
+                        handoff.request, catalog,
+                        allowed_services=self.tools.services,
+                        named_tasks=self.tools.tasks.keys(), handoff=handoff)
+            else:
+                plan = self.qwen.complete(
+                    handoff.request, catalog,
+                    allowed_services=self.tools.services,
+                    named_tasks=self.tools.tasks.keys(), handoff=handoff)
+        except (OSError, ValueError, RuntimeError, TimeoutError, ConnectionError):
+            return {"status":"incomplete",
+                    "message":"Local reasoner unavailable; no follow-up action executed.",
+                    "results":completed, "partial":bool(completed)}
+        # Never catch validation/execution failures as a signal to re-plan:
+        # once delegated tool execution begins it cannot safely be replayed.
+        message, steps, save_as = parse_plan(
+            plan, handoff.request, self.tools, self.cfg.get("max_plan_steps",5))
+        handoff.reconcile(steps)
+        if not handoff.allow_actions and save_as:
+            raise PermissionError("Read-only handoff cannot save a workflow")
+        result = self.execute_or_stage(
+            steps, message, save_as, allow_actions=handoff.allow_actions)
+        result["handoff"] = {"version":handoff.version, "session_id":handoff.session_id,
+                             "task_id":handoff.task_id, "reason":handoff.reason}
+        if "approval" not in result:
+            result["results"] = completed + result.get("results", [])
+        return result
+
     def reason(self, utterance, allow_actions=True):
         # Tool schemas, not just tool names, are provided to the planner.
         tool_catalog=[s for s in TOOL_SCHEMAS if s["name"] not in
