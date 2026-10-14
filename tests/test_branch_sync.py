@@ -64,6 +64,9 @@ class GitBranchSyncTests(unittest.TestCase):
         self.advance_main()
         run("git","switch","intrinsic_jetson",cwd=self.work)
         self.sync()
+        # The workflow pushes the merge before the next run; a local-only
+        # unpublished merge must be rejected as an unexpected target advance.
+        run("git","push","origin","intrinsic_jetson",cwd=self.work)
         before=run("git","rev-parse","HEAD",cwd=self.work).stdout
         result=self.sync()
         self.assertIn("already included",result.stdout)
@@ -75,6 +78,7 @@ class GitBranchSyncTests(unittest.TestCase):
         (self.work/"shared.txt").write_text("jetson changes\n")
         run("git","add",".",cwd=self.work)
         run("git","commit","-m","jetson changed same line",cwd=self.work)
+        run("git","push","origin","intrinsic_jetson",cwd=self.work)
         before=run("git","rev-parse","HEAD",cwd=self.work).stdout
         failed=self.sync(check=False)
         self.assertEqual(failed.returncode,4)
