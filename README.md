@@ -10,6 +10,7 @@ Needle can delegate complex commands to a **Qwen 3.5 4B Bartowski Q4_K_M GGUF** 
 - Sony **WI-C100** Bluetooth microphone using HFP/HSP (A2DP alone does *not* provide headset mic capture).
 - `auto` / `bluetooth` / `direct` selection; auto prefers the Sony mic and falls back to a direct microphone.
 - BlueZ + PipeWire-Pulse/PulseAudio discovery, profile switching, explicit source capture with `parec`, reconnection attempts if a MAC address is configured.
+- Fail-fast microphone health check: reject unconfirmed Jetson "Built-in Audio" inputs, reject monitor sources and unavailable ports, require actual timed PCM delivery before loading the models.
 - 16 kHz mono PCM capture, tunable RMS VAD, incremental Whistle transcription; **only finalized utterances** can trigger tools.
 - Needle 3 structured calls; no direct execution by the model; Python validates each action and its arguments.
 - Strict allowlists for `systemctl --user` services and fixed named script argv; **no arbitrary shell**.
@@ -48,6 +49,7 @@ python -m unittest discover -s tests -v
 
 # Check available audio sources and the llama.cpp endpoint:
 python -m alfred --config config.json --doctor
+# Exit code 2 means no usable mic; source names by themselves are not enough.
 
 # Ensure llama.cpp is healthy; if absent, start it detached:
 python -m alfred --config config.json --ensure-llama
@@ -68,6 +70,28 @@ cmake --build llama.cpp/build --config Release -j4
 ```
 
 Start with context 4096, parallelism 1; change `qwen.gpu_layers` downward if 8GB shared RAM becomes constrained. Alfred **does not terminate** a server already running on the configured port. If that port serves a different model, it refuses Qwen requests rather than overwriting the process.
+
+## Missing microphone / misleading "Built-in Audio" (bug-fix)
+
+On some Orin Nano installations, PipeWire/PulseAudio lists **Built-in Audio** even though no microphone is connected to the developer kit. The name may describe an onboard audio controller rather than a connected microphone. Alfred **does not treat the label as proof**.
+
+- \`alfred --doctor\` now reports each advertised recording source as \`[CANDIDATE]\` or \`[REJECTED]\`, including a reason. It attempts a short PCM read from the preferred source and reports \`MICROPHONE CONNECTED AND CAPTURING\` *only if recording bytes arrive*. It exits with status **2** otherwise.
+- Ordinary continuous listening **fails at startup with exit code 2** when no microphone can capture audio. Cactus models and llama-server watchdog are not started in that case. The agent no longer pretends to listen while endlessly logging "No approved microphone".
+- Auto mode prefers Sony WI-C100 HFP/HSP, then an operational USB/direct microphone. If a candidate cannot deliver audio, a subsequent eligible candidate is probed before failure.
+- Generic onboard analog input without a positively available input port is rejected from automatic selection. If a genuine microphone is wired to an onboard audio device but the port is reported as unknown, explicitly set \`audio.direct_source\` after inspecting \`pactl list sources\`; a live PCM probe is *still mandatory*. Explicitly selected ports known to be unavailable are never accepted.
+- If audio disconnects while listening, Alfred attempts to switch to another operational candidate. If none is available, it exits nonzero instead of retrying forever. If run under systemd with \`Restart=on-failure\`, the service manager may retry launching Alfred until a mic returns.
+- \`audio.probe_timeout_seconds\` and \`audio.read_timeout_seconds\` default to 5 seconds each. Silence in a working stream is not a failure—PCM availability is only a functional check, not a physical-presence guarantee for every driver.
+
+Useful diagnostics:
+
+\`\`\`bash
+pactl -f json list sources
+pactl -f json list cards
+python -m alfred --config config.json --doctor
+echo $?   # 0: functional microphone / 2: no valid input
+\`\`\`
+
+\`--text\` and \`--ensure-llama\` do not need a microphone and remain available for diagnostics.
 
 ## Pair and select Sony WI-C100
 
