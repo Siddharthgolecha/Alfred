@@ -57,6 +57,7 @@ class Alfred:
         self.sessions = SessionLedger(self.store)
         self.session_id = None
         self._command_source = "text"
+        self._needle_task_lock = threading.RLock()
         self.needle_slots = SessionSlots(runtime["needle_context_ttl_seconds"])
         self._needle_cancel = threading.Event()
         self.processes = ChildProcesses()
@@ -140,6 +141,13 @@ class Alfred:
         return envelope
 
     def handle_text(self,text):
+        # Hold ownership from native reset() until final feedback and result.
+        # Other authorized requests cannot reset the shared Needle agent
+        # while this task's synchronous complete()/System2 calls are live.
+        with self._needle_task_lock:
+            return self._handle_text_locked(text)
+
+    def _handle_text_locked(self,text):
         text=text.strip()
         if not text:
             return
@@ -148,14 +156,16 @@ class Alfred:
         # A later unrelated command invalidates the only supported pronoun
         # referent. Context must never leak across topics or sessions.
         from .cognitive.needle_loop import PRONOUN, GPU_TEMP
-        if not PRONOUN.fullmatch(text) and not GPU_TEMP.search(text):
-            self.needle_slots.clear(self.session_id)
-        try:
-            routed_text = self.needle_slots.resolve(self.session_id, text)
-        except ContextUnavailable as exc:
-            self.sessions.append(task.task_id, Completion("rejected", "unsafe_route"))
-            self.feedback.tell(str(exc))
-            return
+        routed_text = text
+        if self.cfg["runtime"]["needle_loop_enabled"]:
+            if not PRONOUN.fullmatch(text) and not GPU_TEMP.search(text):
+                self.needle_slots.clear(self.session_id)
+            try:
+                routed_text = self.needle_slots.resolve(self.session_id, text)
+            except ContextUnavailable as exc:
+                self.sessions.append(task.task_id, Completion("rejected", "unsafe_route"))
+                self.feedback.tell(str(exc))
+                return
         if self.cactus is None:
             self.sessions.append(task.task_id, Completion("failed", "exception"))
             raise RuntimeError("Cactus models were not initialized")
@@ -179,7 +189,7 @@ class Alfred:
                 return
             floor=float(self.cfg["runtime"]["needle_confidence_floor"])
             if calls and (type(confidence) not in (float, int)
-                          or not math.isfinite(confidence) or confidence < floor):
+                          or not math.isfinite(confidence) or not floor <= confidence <= 1):
                 self.store.event("route_uncertain",{
                     "confidence": confidence, "call_count": len(calls)})
                 self.sessions.append(task.task_id, Decision("needle3", "uncertain",
@@ -226,7 +236,7 @@ class Alfred:
                 loop_outcome = loop.run(
                     {**response, "function_calls":calls}, permit_feedback=True)
                 calls = list(loop_outcome.accepted_calls)
-                if loop_outcome.stop not in ("completed", "protected"):
+                if loop_outcome.stop not in ("completed", "protected", "partial"):
                     self.sessions.append(task.task_id, Completion(
                         "rejected", "low_confidence" if loop_outcome.stop == "uncertain"
                         else "unsafe_route"))
@@ -272,7 +282,8 @@ class Alfred:
                     # a genuine, explicit successful GPU temperature read
                     # from the controlled System2 path refreshes that referent.
                     for call, item in zip(calls, observed):
-                        if call.get("name") == "get_gpu_status":
+                        if (self.cfg["runtime"]["needle_loop_enabled"]
+                                and call.get("name") == "get_gpu_status"):
                             self.needle_slots.remember(
                                 self.session_id, routed_text, "get_gpu_status", item)
                 outcome = ("disabled" if not self.cfg["qwen"]["enabled"] and route != "direct"
