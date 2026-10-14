@@ -394,6 +394,15 @@ class WorkflowEngine:
                                 "steps":[{**node,"depends_on":[],"when":None}]},
                                self.tools,max_steps=1)
                 result=_result(self.tools.execute(node["tool"],node["args"],from_plan=True))
+                # A subprocess or systemctl failure is a failed workflow step,
+                # even though the tool returned a structured response.
+                if node["tool"]=="run_named_task" and result.get("returncode")!=0:
+                    raise RuntimeError("Approved named task exited nonzero")
+                if node["tool"]=="control_service" and (
+                    not isinstance(result.get("result"),dict) or
+                    result["result"].get("exit_code")!=0
+                ):
+                    raise RuntimeError("Approved systemctl action failed")
                 if (time.monotonic()-started)>node["timeout_seconds"]:
                     raise TimeoutError("Tool exceeded its configured wall-clock budget")
             except Exception as exc:
