@@ -215,10 +215,12 @@ class System2:
             # Stage the digest in the existing one-shot trusted CLI approval,
             # never as a remotely executable tool argument.
             try:
-                entry=self.tools.workflow_engine.get(workflow_name)
+                entry=self.tools.workflow_engine.get(workflow_name,require_approved=False)
             except ValueError:
                 entry=None
             if entry is not None:
+                if entry["state"]!="approved":
+                    raise PermissionError("Graph workflow requires local approval")
                 item={"tool":"run_workflow","args":{
                     "name":workflow_name,"approved_digest":entry["digest"]}}
                 proposal=self.approvals.propose([item])
