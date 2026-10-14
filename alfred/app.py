@@ -263,7 +263,11 @@ class Alfred:
                 loop_outcome = loop.run(
                     {**response, "function_calls":calls}, permit_feedback=True)
                 calls = list(loop_outcome.accepted_calls)
-                if loop_outcome.stop not in ("completed", "protected", "partial"):
+                if (loop_outcome.stop not in ("completed", "protected", "partial")
+                        and not loop_outcome.result.get("partial", False)):
+                    # No successful observations: reject without pretending
+                    # that a requested tool ran. A completed read-only prefix
+                    # is reported below, even when a later call was denied.
                     self.sessions.append(task.task_id, Completion(
                         "rejected", "low_confidence" if loop_outcome.stop == "uncertain"
                         else "unsafe_route"))
