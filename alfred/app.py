@@ -214,6 +214,12 @@ def main(argv=None):
     group.add_argument("--doctor",action="store_true",help="Show mic/server status without models")
     group.add_argument("--text",help="Execute one command using Needle and tools")
     group.add_argument("--ensure-llama",action="store_true",help="Start/verify llama-server then exit")
+    group.add_argument("--scheduler-only",action="store_true",
+                       help="Run reminders and watches without microphone, Cactus, or Qwen")
+    group.add_argument("--automations",action="store_true",
+                       help="List Phase 3 automations without loading native models")
+    group.add_argument("--automation-tick",action="store_true",
+                       help="Run one scheduler cycle for debugging and exit")
     group.add_argument("--reason",help="Test Qwen planner on a text input; no Cactus engine required")
     group.add_argument("--pending",action="store_true",help="List proposed tool actions awaiting approval")
     group.add_argument("--approve",type=int,metavar="ID",help="Locally approve and execute a proposal once")
@@ -231,6 +237,27 @@ def main(argv=None):
         s=LlamaSupervisor(cfg["qwen"],logs)
         s.ensure_running()
         print(json.dumps(s.status()))
+        return 0
+    if args.automations or args.automation_tick or args.scheduler_only:
+        app=Alfred(cfg,load_models=False)
+        try:
+            if args.automations:
+                print(json.dumps(app.tools.automations.list_jobs(all_states=True),
+                                 indent=2,default=str))
+            elif args.automation_tick:
+                app.tools.automations.tick(app.tools,app._remind)
+            else:
+                # Keep persistent timers and watches running independently of
+                # the microphone and Qwen. Do not start llama watchdog.
+                LOG.info("Starting headless Phase 3 scheduler")
+                app.scheduler.start()
+                try:
+                    while True:
+                        time.sleep(1)
+                except KeyboardInterrupt:
+                    LOG.info("Stopping headless scheduler")
+        finally:
+            app.close()
         return 0
     # Administrative actions are intentionally CLI-only; they never appear in
     # Needle's tool schemas. No model needs loading to approve or reject.
