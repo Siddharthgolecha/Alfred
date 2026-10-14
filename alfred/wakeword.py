@@ -131,11 +131,14 @@ class AcousticWakeDetector:
             frame = self._pending[:self.WINDOW_SAMPLES]
             self._pending = self._pending[self.WINDOW_SAMPLES:]
             scores = self.model.predict(frame)
-            if isinstance(scores, dict) and any(
-                isinstance(score, (int, float)) and math.isfinite(score)
-                and score >= self.threshold for score in scores.values()
-            ):
-                hit = True
+            if isinstance(scores, dict):
+                for score in scores.values():
+                    try:
+                        value = float(score)  # ONNX may return numpy.float32.
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(value) and value >= self.threshold:
+                        hit = True
         return hit
 
     def capture_after_wake(self, chunks, frame_ms):
