@@ -49,6 +49,8 @@ class Alfred:
             os.environ.setdefault("NEEDLE_TELEMETRY","0")
         self.cactus = Cactus(TOOL_SCHEMAS) if load_models else None
         self.scheduler = Scheduler(self.store,self.tools,self._remind)
+        self._watchdog_stop = threading.Event()
+        self._watchdog_thread = None
 
     def _remind(self,event):
         text=f"Reminder #{event['id']}: {event['message']}"
@@ -58,13 +60,17 @@ class Alfred:
     def start_services(self):
         self.scheduler.start()
         if self.cfg["qwen"]["enabled"]:
-            def warmup():
-                try:
-                    self.supervisor.ensure_running()
-                    LOG.info("Qwen ready: %s",self.supervisor.status())
-                except Exception as exc:
-                    LOG.warning("Qwen startup unavailable: %s",exc)
-            threading.Thread(target=warmup,name="llama-supervisor",daemon=True).start()
+            def watchdog():
+                while not self._watchdog_stop.is_set():
+                    try:
+                        self.supervisor.ensure_running()
+                        LOG.info("Qwen available: %s", self.supervisor.status())
+                    except Exception as exc:
+                        LOG.warning("Qwen unavailable; will retry: %s", exc)
+                    self._watchdog_stop.wait(int(self.cfg["qwen"]["supervisor_poll_seconds"]))
+            self._watchdog_thread = threading.Thread(
+                target=watchdog, name="llama-supervisor", daemon=True)
+            self._watchdog_thread.start()
 
     def reason(self,text,allow_actions=True):
         if not self.cfg["qwen"]["enabled"]:
@@ -146,6 +152,7 @@ class Alfred:
                 time.sleep(1)
 
     def close(self):
+        self._watchdog_stop.set()
         self.audio.close()
         self.scheduler.stop()
         # A llama-server started by Alfred is deliberately kept alive; next
