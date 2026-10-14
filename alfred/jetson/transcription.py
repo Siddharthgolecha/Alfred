@@ -163,18 +163,21 @@ def annotate_overlap(segments):
                          b["end_seconds"]-b["start_seconds"])
             if duration<=0 or intersection/duration<.68:
                 continue
-            if SequenceMatcher(None,ta,tb).ratio()<.9:
+            if SequenceMatcher(None,ta,tb).ratio()<.94:
                 continue
-            # Relative gain is not an identity oracle. Suppress only if one
-            # channel receives at least 2x the energy of the other.
+            # A genuine overlapping speaker may utter the same phrase.
+            # Only suppress when BOTH boundaries align within decoder-scale
+            # tolerances and one mic has overwhelming comparative energy.
             ea=max(1e-8,a["energy_rms"])
             eb=max(1e-8,b["energy_rms"])
-            if max(ea,eb)/min(ea,eb)<2:
-                a["ambiguous_crosstalk"]=True
-                b["ambiguous_crosstalk"]=True
-            else:
+            aligned=(abs(a["start_seconds"]-b["start_seconds"])<=.16
+                     and abs(a["end_seconds"]-b["end_seconds"])<=.26)
+            if aligned and max(ea,eb)/min(ea,eb)>=3:
                 weaker=a if ea<eb else b
                 weaker["likely_crosstalk"]=True
+            else:
+                a["ambiguous_crosstalk"]=True
+                b["ambiguous_crosstalk"]=True
     for row in segments:
         row["overlap"]=bool(row["overlap_with"])
         row["included_in_minutes"]=not row["likely_crosstalk"]
