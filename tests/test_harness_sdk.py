@@ -177,8 +177,91 @@ class AlfredSdkIntegrationTests(unittest.TestCase):
             try:
                 app.handle_text("Run shell")
                 app.system2.execute_or_stage.assert_not_called()
+                app.system2.reason.assert_not_called()
+                # An invalid model plan fails closed, instead of granting a
+                # fresh chance to reinterpret a forged tool request.
+                self.assertEqual(
+                    app.sessions.list_tasks(app.session_id)[0]["state"], "failed")
+            finally:
+                app.close()
+
+    def test_execution_exception_cannot_replay_after_partial_side_effect(self):
+        with tempfile.TemporaryDirectory() as home:
+            app = self.make_app(home)
+            fake = Mock()
+            fake.plan.return_value = {
+                "message": "Approved read", "steps": [
+                    {"tool": "get_gpu_status", "args": {}}], "save_as": None}
+            app.harness = fake
+            app.supervisor.ensure_running = Mock()
+            app.cactus.route.return_value = {
+                "confidence": .98,
+                "function_calls": [{"name": "delegate_to_reasoner", "arguments": {}}]}
+            side_effects = []
+            def partial_execute(*args, **kwargs):
+                side_effects.append("already-happened")
+                raise RuntimeError("tool failed after external effect")
+            app.system2.execute_or_stage = Mock(side_effect=partial_execute)
+            app.system2.reason = Mock(side_effect=AssertionError("replayed side effect"))
+            try:
+                app.handle_text("Read GPU status and analyze")
+                self.assertEqual(side_effects, ["already-happened"])
+                app.system2.execute_or_stage.assert_called_once()
+                app.system2.reason.assert_not_called()
+                fake.plan.assert_called_once()
+                self.assertEqual(
+                    app.sessions.list_tasks(app.session_id)[0]["state"], "failed")
+            finally:
+                app.close()
+
+    def test_sensitive_plan_staged_once_and_not_auto_approved(self):
+        with tempfile.TemporaryDirectory() as home:
+            app = self.make_app(home)
+            app.tools.tasks["safe-task"] = ["/bin/echo", "ok"]
+            fake = Mock()
+            fake.plan.return_value = {
+                "message": "Request approval",
+                "steps": [{"tool": "run_named_task",
+                           "args": {"name": "safe-task"}}], "save_as": None}
+            app.harness = fake
+            app.supervisor.ensure_running = Mock()
+            app.cactus.route.return_value = {
+                "confidence": .98,
+                "function_calls": [{"name": "delegate_to_reasoner", "arguments": {}}]}
+            app.tools.run_plan = Mock(side_effect=AssertionError("no auto execution"))
+            app.system2.approve = Mock(side_effect=AssertionError("no auto approval"))
+            try:
+                app.handle_text("Run my approved named task")
+                app.tools.run_plan.assert_not_called()
+                app.system2.approve.assert_not_called()
+                pending = app.system2.approvals.pending()
+                self.assertEqual(len(pending), 1)
+                self.assertEqual(pending[0]["actions"], "run_named_task")
+                self.assertEqual(app.sessions.list_tasks(app.session_id)[0]["state"],
+                                 "pending_approval")
+                task_id = app.sessions.list_tasks(app.session_id)[0]["id"]
+                self.assertIn("approval", [e.kind for e in app.sessions.events(task_id)])
+                self.assertEqual(app.store.db.execute(
+                    "SELECT status FROM approvals WHERE id=?",
+                    (pending[0]["id"],)).fetchone()[0], "pending")
+            finally:
+                app.close()
+
+    def test_generation_crash_may_fallback_before_any_execution(self):
+        with tempfile.TemporaryDirectory() as home:
+            app = self.make_app(home)
+            fake = Mock()
+            fake.plan.side_effect = HarnessUnavailable("SDK exited before a plan")
+            app.harness = fake
+            app.supervisor.ensure_running = Mock()
+            app.system2.execute_or_stage = Mock()
+            app.system2.reason = Mock(return_value={"message":"Fallback","results":[]})
+            try:
+                out = app.reason("Find an answer", allow_actions=True)
+                self.assertEqual(out["message"], "Fallback")
                 app.system2.reason.assert_called_once_with(
-                    "Run shell", allow_actions=True)
+                    "Find an answer", allow_actions=True)
+                app.system2.execute_or_stage.assert_not_called()
             finally:
                 app.close()
 
