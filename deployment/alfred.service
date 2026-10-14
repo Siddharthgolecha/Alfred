@@ -10,6 +10,8 @@ ExecStart=%h/Alfred/.venv/bin/alfred --config %h/Alfred/config.json
 Environment=PYTHONUNBUFFERED=1
 Environment=NEEDLE_TELEMETRY=0
 Restart=on-failure
+# Missing/unusable microphone: surface the fatal state instead of restart-looping.
+RestartPreventExitStatus=2
 RestartSec=5
 TimeoutStopSec=15
 

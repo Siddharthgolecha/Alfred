@@ -10,7 +10,8 @@ DEFAULT = {
         "mode": "auto", "sony_name": "WI-C100", "bluetooth_address": "",
         "direct_source": "", "poll_seconds": 5, "frame_ms": 500,
         "speech_rms": 0.013, "end_silence_frames": 2, "max_utterance_seconds": 25,
-        "auto_fallback": True
+        "auto_fallback": True, "probe_timeout_seconds": 5,
+        "read_timeout_seconds": 5
     },
     "qwen": {
         "url": "http://127.0.0.1:8080", "binary": "llama-server",
@@ -56,6 +57,10 @@ def load_config(path=None):
         raise ValueError("audio.mode must be auto/direct/bluetooth")
     if int(cfg["audio"]["frame_ms"]) not in (250, 500, 1000):
         raise ValueError("audio.frame_ms must be 250, 500 or 1000")
+    if not 1 <= float(cfg["audio"]["probe_timeout_seconds"]) <= 30:
+        raise ValueError("audio.probe_timeout_seconds must be 1..30")
+    if not 1 <= float(cfg["audio"]["read_timeout_seconds"]) <= 30:
+        raise ValueError("audio.read_timeout_seconds must be 1..30")
     if not (0.001 <= float(cfg["audio"]["speech_rms"]) <= 0.2):
         raise ValueError("audio.speech_rms out of range")
     if not (1 <= int(q["ctx_size"]) <= 131072):
