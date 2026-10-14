@@ -31,6 +31,90 @@ DENIED_ROWS = frozenset({
     "plugin-package-inventory-deepseek", "session-log-deepseek",
     "compaction-basic", "image-offload",
 })
+# Exact effective `dsh --profile sdk-minimal --patch ... --dump-config`
+# inventory captured from the official pinned 0.1.5rc1 binary. All registered
+# plugins, including invariant providers, must match; no additional plugins
+# are permitted. The model-facing tools registry must have ZERO actual tools.
+EXPECTED_ACTIVE_ROWS = {
+    "sdk-app-startup": "@deepseek-ai/dsh-sdk-app",
+    "sdk-jsonrpc-server": "@deepseek-ai/dsh-sdk-jsonrpc-server",
+    "deepseek-llm-api-extensions": "@deepseek-ai/dsh-deepseek-llm-api-extensions",
+    "llm-deepseek": "@deepseek-ai/dsh-llm-deepseek",
+    "session-projection": "@deepseek-ai/dsh-session-projection",
+    "timer": "@deepseek-ai/cordis-plugin-timer",
+    "llm": "@deepseek-ai/dsh-llm",
+    "session": "@deepseek-ai/dsh-session",
+    "session-title": "@deepseek-ai/dsh-session-title",
+    "system-prompt": "@deepseek-ai/dsh-system-prompt",
+    "tools": "@deepseek-ai/dsh-tools",
+    "agent": "@deepseek-ai/dsh-agent",
+    "llm-retry": "@deepseek-ai/dsh-llm-retry",
+    "invariants": "@deepseek-ai/dsh-invariants",
+    "session-invariant": "@deepseek-ai/dsh-session/invariant",
+    "agent-invariant": "@deepseek-ai/dsh-agent/invariant",
+    "scope-invariant": "@deepseek-ai/dsh-scope/invariant",
+    "agent-loop-invariant": "@deepseek-ai/dsh-agent-loop/invariant",
+    "agent-loop": "@deepseek-ai/dsh-agent-loop",
+    "sessions": "@deepseek-ai/dsh-session-persistence-jsonl",
+}
+EXPECTED_DISABLED_ROWS = {
+    "session-log-deepseek": "@deepseek-ai/dsh-session-log-deepseek",
+    "plugin-package-inventory-deepseek": "@deepseek-ai/dsh-plugin-package-inventory-deepseek",
+    "sandbox": "@deepseek-ai/dsh-sandbox-local",
+    "sandbox-policy": "@deepseek-ai/dsh-sandbox-policy",
+    "subprocess": "@deepseek-ai/dsh-subprocess-local",
+    "pty": "@deepseek-ai/dsh-terminal",
+    "terminal-bash": "@deepseek-ai/dsh-terminal-bash",
+    "terminal-pwsh": "@deepseek-ai/dsh-terminal-bash",
+    "jobs": "@deepseek-ai/dsh-jobs-local",
+    "persistent-bash": "@deepseek-ai/dsh-tool-bash-persistent",
+    "persistent-pwsh": "@deepseek-ai/dsh-tool-pwsh-persistent",
+}
+
+
+def audit_effective_cordis_config(dump):
+    """Fail closed on unexpected plugin permissions in official --dump-config.
+
+    The official CLI emits an ordered YAML list of top-level plugin rows,
+    with source comments and possible !!js config expressions. Parse only
+    *literal* top-level id/name/disabled metadata; never evaluate JS tags,
+    YAML constructors, or external plugin commands.
+    """
+    if type(dump) is not str or not 0 < len(dump) < 200000:
+        raise HarnessUnavailable("Invalid Cordis config dump length")
+    rows = {}
+    current = None
+    for line in dump.splitlines():
+        if line.startswith("- id: "):
+            name = line[6:]
+            if (not re.fullmatch(r"[a-z][a-z0-9-]*", name)
+                    or name in rows):
+                raise HarnessUnavailable("Duplicate or invalid Cordis row")
+            rows[name] = {"name": None, "disabled": False}
+            current = rows[name]
+        elif line.startswith("- ") and not line.startswith("- id: "):
+            raise HarnessUnavailable("Unknown top-level Cordis entry")
+        elif current is not None and line.startswith("  name: "):
+            if current["name"] is not None:
+                raise HarnessUnavailable("Duplicate plugin name")
+            current["name"] = line[8:].strip("'\\\"")
+        elif current is not None and line.startswith("  disabled: "):
+            if line != "  disabled: true":
+                raise HarnessUnavailable("Dynamic or enabled plugin state")
+            current["disabled"] = True
+    expected = set(EXPECTED_ACTIVE_ROWS) | set(EXPECTED_DISABLED_ROWS)
+    if set(rows) != expected:
+        raise HarnessUnavailable("Unexpected effective Cordis plugin inventory")
+    for key, name in EXPECTED_ACTIVE_ROWS.items():
+        if rows[key] != {"name": name, "disabled": False}:
+            raise HarnessUnavailable("Unexpected active Cordis plugin")
+    for key, name in EXPECTED_DISABLED_ROWS.items():
+        if rows[key] != {"name": name, "disabled": True}:
+            raise HarnessUnavailable("Unsafe Cordis plugin is enabled")
+    return {"active": sorted(EXPECTED_ACTIVE_ROWS),
+            "disabled": sorted(EXPECTED_DISABLED_ROWS)}
+
+
 PATCH = Path(__file__).with_name("alfred_safe.patch.yml")
 MAX_PROMPT = 8192
 MAX_RESPONSE = 2000
