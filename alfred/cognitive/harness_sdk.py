@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import tempfile
 import threading
 from urllib.parse import urlsplit
@@ -190,6 +191,30 @@ class LocalHarness:
         self._sdk = None
         self._closed = False
 
+    def _audit_installed_runtime(self, root, workspace):
+        """Audit the EXACT binary/profile to be launched, before a model turn.
+
+        Source/profile comments or local YAML text are not sufficient: only
+        the official runtime's final Cordis composition is authoritative.
+        Called once per optional SDK process, not for each model request.
+        """
+        if self.factory is not None:
+            return  # Unit-test fake adapter; real runtime smoke covers this.
+        try:
+            from deepseek_harness_runtime import resolve_bundled_launch_args
+            args = (*resolve_bundled_launch_args(), "--profile", "sdk-minimal",
+                    "--patch", str(self.patch), "--dump-config")
+            env = dict(os.environ)
+            env["DSH_HOME"] = str(root / "home")
+            probe = subprocess.run(args, cwd=workspace, env=env,
+                                   capture_output=True, text=True, timeout=15,
+                                   check=False)
+            if probe.returncode != 0:
+                raise HarnessUnavailable("Bundled Cordis configuration audit failed")
+            audit_effective_cordis_config(probe.stdout)
+        except (ImportError, OSError, subprocess.TimeoutExpired, ValueError) as exc:
+            raise HarnessUnavailable("Cannot verify trusted Cordis plugin graph") from exc
+
     def _open(self):
         if self._closed:
             raise HarnessUnavailable("Harness closed")
@@ -217,6 +242,10 @@ class LocalHarness:
         workspace = root / "workspace"
         workspace.mkdir(mode=0o700)
         try:
+            # This is the same release/binary and private home used by SDK.
+            # Any unexpected plugin, enabled shell, or patch failure prevents
+            # execution before a model request can be accepted.
+            self._audit_installed_runtime(root, workspace)
             # The installed SDK launches one owned dsh process and closes it.
             # The original Qwen supervisor already owns the local model server.
             self._sdk = factory(
