@@ -129,10 +129,10 @@ class Qwen:
         model = self.supervisor.model_id()
         prompt = (
             "You are Alfred's local System 2 planner. Output only a JSON object. "
-            "Schema: {\\\"message\\\": \\\"short result or clarification\\\", "
-            "\\\"steps\\\": [{\\\"tool\\\": \\\"allowlisted_tool\\\", \\\"args\\\": {}, "
-            "\\\"when\\\": {\\\"step\\\": 0, \\\"field\\\": \\\"gpu_temp_c\\\", \\\"op\\\": \\\"gt\\\", \\\"value\\\": 80}}], "
-            "\\\"save_as\\\": null}. "
+            "Schema: {\"message\": \"short result or clarification\", "
+            "\"steps\": [{\"tool\": \"allowlisted_tool\", \"args\": {}, "
+            "\"when\": {\"step\": 0, \"field\": \"gpu_temp_c\", \"op\": \"gt\", \"value\": 80}}], "
+            "\"save_as\": null}. "
             "The when field is optional and may compare a top-level scalar result from an EARLIER step only. "
             "Allowed condition ops: gt, gte, lt, lte, eq, neq. "
             "If a user explicitly asks to save/create a named workflow, set save_as to its short snake_case name "
