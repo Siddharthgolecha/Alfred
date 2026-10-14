@@ -173,7 +173,7 @@ def doctor(cfg):
                   f"{source['name']} — {source['reason']}")
         try:
             selected=manager.ensure_input()
-            print(f"MICROPHONE CONNECTED AND CAPTURING: {selected}")
+            print(f"MICROPHONE INPUT STREAM VERIFIED: {selected}")
             healthy=True
         except AudioUnavailableError as exc:
             print(f"MICROPHONE NOT CONNECTED / NOT USABLE: {exc}")
