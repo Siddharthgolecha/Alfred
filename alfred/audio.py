@@ -48,6 +48,21 @@ class AudioManager:
         self.active_source = None
         self.process = None
         self.last_check = 0
+        self.last_reconnect_attempt = 0
+
+    def _try_reconnect(self):
+        address = self.cfg.get("bluetooth_address", "").strip()
+        if not address or time.monotonic() - self.last_reconnect_attempt < 30:
+            return
+        self.last_reconnect_attempt = time.monotonic()
+        if not re.fullmatch(r"[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}", address):
+            LOG.warning("Invalid Bluetooth address; expected MAC")
+            return
+        try:
+            subprocess.run(["bluetoothctl", "connect", address], capture_output=True,
+                           timeout=8, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            LOG.warning("Bluetooth reconnect attempt failed: %s", exc)
 
     def _headset_card(self):
         try:
@@ -97,11 +112,13 @@ class AudioManager:
     def _sources(self):
         data = pactl_json("sources")
         return [s for s in data if ".monitor" not in s.get("name","").lower()
-                and not s.get("monitor_of_sink") not in (None, "n/a", 4294967295)]
+                and s.get("monitor_of_sink") in (None, "n/a", 4294967295)]
 
     def choose_source(self):
         mode = self.cfg["mode"]
         if mode != "direct":
+            if self._headset_card() is None:
+                self._try_reconnect()
             self._enable_headset_mic()
         try:
             sources = self._sources()
