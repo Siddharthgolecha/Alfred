@@ -198,6 +198,32 @@ class CalibrationTests(unittest.TestCase):
             self.assertIsNone(cal["USB_2"]["uncertainty_ms"])
 
 
+class MeetingCLIIntegrationTests(unittest.TestCase):
+    def test_auto_discovery_feeds_all_working_mics_to_parallel_recorder(self):
+        from alfred.jetson.cli import main
+        sources=[Source("USB_1","alsa_input.usb_1"),
+                 Source("USB_2","alsa_input.usb_2"),
+                 Source("Bluetooth_1","bluez_input.1")]
+        with patch("alfred.jetson.cli.GuardedSSD"),\
+             patch("alfred.jetson.cli.discover_mics",return_value=sources) as discover,\
+             patch("alfred.jetson.cli.Recorder") as record,\
+             patch("alfred.jetson.cli.process_session",return_value={"pdf":"minutes.pdf"}):
+            record.return_value.record.return_value=("/ssd/meeting",{})
+            result=main(["--ssd","/ssd","meeting","--consent",
+                         "--seconds","15","--max-mics","8"])
+        self.assertEqual(result,0)
+        discover.assert_called_once_with(limit=8)
+        self.assertEqual(record.call_args.args[1],sources)
+
+    def test_no_input_fails_without_recording(self):
+        from alfred.jetson.cli import main
+        with patch("alfred.jetson.cli.GuardedSSD"),\
+             patch("alfred.jetson.cli.discover_mics",return_value=[]),\
+             patch("alfred.jetson.cli.Recorder") as record:
+            result=main(["--ssd","/ssd","meeting","--consent","--seconds","10"])
+        self.assertEqual(result,2)
+        record.assert_not_called()
+
 class LivePreviewTests(unittest.TestCase):
     def test_live_preview_displays_channels_with_bounded_asr(self):
         from alfred.jetson.live import LiveMeetingPreview
