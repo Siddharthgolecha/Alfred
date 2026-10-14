@@ -1,6 +1,6 @@
 # Issue #13 — optional offline DeepSeek Harness SDK bridge
 
-**Status:** Implemented and tested in an isolated read-only mode. Disabled by default. **No shell, plugin, tool, browser, remote endpoint, or automatic approval is ever authorized by the Harness route.** Full action-bearing Cordis agent orchestration is deliberately not enabled because it would bypass Alfred's existing approval authority. Native Needle stays in Python. The existing Qwen-compatible inference service is shared, not restarted by the SDK.
+**Status:** Implemented as a read-only *Cordis runtime* that can propose actions, never execute them. Disabled by default. **No shell, plugin, tool, browser, remote endpoint, or automatic approval is ever authorized by the Harness runtime.** Alfred's existing System2/Tools preflight and one-time approvals exclusively execute/stage validated proposals. Native Needle stays in Python, sharing the canonical session ID with SDK Qwen. The existing Qwen-compatible inference service is shared, not restarted by the SDK.
 
 ## Upstream identity and reproducible packages
 
@@ -29,10 +29,10 @@ When enabled:
 
 1. Wake-authorized/CLI command opens its existing canonical `TaskEnvelope` and logical `session_id`; native Needle routes it. Direct commands, including GPU/system status, retain the existing `System2.direct` policy and **do not make an SDK/Qwen request**.
 2. For unsupported, **read-only** questions (Needle produced no calls), Alfred uses `LocalHarness.run(text, session_id)`. The actual official SDK starts one lazily owned subprocess, reuses it and forwards a single prompt to the existing loopback Qwen endpoint. The same canonical session ID is used for subsequent read-only turns, while the event ledger keeps task IDs per authorized request.
-3. Any action-capable Needle delegation continues through `System2.reason(...,allow_actions=True)`, `Tools` and `Approvals`; it **never** hands execution authority to the Harness. A harness suggestion is never converted into `System2.approve`. A crash, timeout, malformed response, missing package or runtime teardown falls back once to the original **read-only** Qwen/System2 path for the unsupported question.
+3. For action-capable Needle delegation or `--reason`, the same SDK session produces an **untrusted JSON plan** using a bounded tool catalog. Alfred then calls its existing `parse_plan` (complete schema and preflight checks) and `System2.execute_or_stage` (existing approval policy). The SDK itself has zero Cordis tools; plans are not executed in Cordis. A malformed/unsafe plan is **never executed** and instead falls back to the original `System2.reason` path, where the same validation applies. No call is made to `System2.approve` without a separate local CLI approval.
 4. `alfred/cognitive/harness_bridge.py` is a separate *internal structural frame* adapter for canonical TaskEnvelope, Decision, Observation, Escalation, ApprovalReference, Completion and Diagnostic contracts. It strictly validates shapes and sizes and **cannot contain executable tool arguments or trusted observations**. It is not the SDK's official JSON-RPC protocol; the SDK uses its own typed `DeepSeekHarness` client.
 
-An optional SDK route for action-bearing prompts is intentionally forbidden. Needle→Qwen actionable handoff continues under existing Python System2 policy; a future Cordis tool-hosting feature would need its own review against `System2.preflight` and one-shot approvals. This limitation does not affect the read-only shared logical session functionality.
+**Limit:** Cordis does not host Alfred's privileged tools or native Needle model. All Needle observations and actionable Qwen plans remain inside Alfred's Python orchestration, correlated with the SDK's same session ID. Cordis returns text/proposals only. Extending Cordis to call tools directly would require a separate security review and is intentionally outside this issue.
 
 ## Installation
 
@@ -58,7 +58,7 @@ Keep the rest of the normal Alfred configuration and allowlists unchanged. If th
 
 ## Reproducible evidence
 
-CI `.github/workflows/check.yml` runs full offline Python 3.10 and 3.12 regression suites. A dedicated `harness-sdk-smoke` job downloads both Linux release wheels plus ARM64 artifact from PyPI and **verifies all three SHA-256 hashes before installing**. Then `tests/sdk_smoke.py` starts a real pinned Cordis/SDK process, talks to a threaded local stub model by streaming OpenAI-compatible SSE, confirms the response and asserts the model request contains **no model-facing tools**. It asserts the SDK child is reaped after close. All SDK traffic in the smoke stays on `127.0.0.1`; no real DeepSeek or Qwen model is downloaded.
+CI `.github/workflows/check.yml` runs full offline Python 3.10 and 3.12 regression suites. A dedicated `harness-sdk-smoke` job downloads both Linux release wheels plus ARM64 artifact from PyPI and **verifies all three SHA-256 hashes before installing**. Then `tests/sdk_smoke.py` starts a real pinned Cordis/SDK process, talks to a threaded local stub model by streaming OpenAI-compatible SSE, confirms a normal reply **and a same-session structured Qwen plan**, and asserts both model requests contain **no model-facing Cordis tools**. It asserts the SDK child is reaped after close. All SDK traffic in the smoke stays on `127.0.0.1`; no real DeepSeek or Qwen model is downloaded.
 
 `tests/test_harness_bridge.py` covers strict canonical schemas, duplicate keys, size bounds, spoofed tool/URL/plugin payload rejection. `tests/test_harness_sdk.py` covers URL and configuration rejection, lifecycle and reuse, timeout, SDK crash fallback, shared canonical session, empty tool authority, and unchanged System2 direct actions.
 
