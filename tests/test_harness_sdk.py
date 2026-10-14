@@ -122,6 +122,20 @@ class SafeSdkTests(unittest.TestCase):
         self.assertTrue(Slow.created[0].closed)
         self.assertIsNone(client._sdk)
 
+    def test_runtime_exception_does_not_echo_secret_or_retain_temp_home(self):
+        secret = "private-test-token-ABC123"
+        class Exploding(FakeSdk):
+            def run(self, prompt, session_id):
+                raise RuntimeError(secret + " " + prompt)
+        client = LocalHarness("http://127.0.0.1:8080", "qwen", factory=Exploding)
+        with self.assertRaises(HarnessUnavailable) as exc:
+            client.run("do not log " + secret, "a" * 32)
+        self.assertNotIn(secret, str(exc.exception))
+        self.assertIn("unavailable", str(exc.exception))
+        sdk = Exploding.created[0]
+        self.assertTrue(sdk.closed)
+        self.assertFalse(Path(sdk.kwargs["dsh_home"]).parent.exists())
+
     def test_incomplete_response_cannot_claim_success(self):
         class Bad(FakeSdk):
             def run(self, prompt, session_id):
