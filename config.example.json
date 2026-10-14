@@ -1,0 +1,36 @@
+{
+  "audio": {
+    "mode": "auto",
+    "sony_name": "WI-C100",
+    "bluetooth_address": "",
+    "direct_source": "",
+    "poll_seconds": 5,
+    "frame_ms": 500,
+    "speech_rms": 0.013,
+    "end_silence_frames": 2,
+    "max_utterance_seconds": 25,
+    "auto_fallback": true
+  },
+  "qwen": {
+    "url": "http://127.0.0.1:8080",
+    "binary": "llama-server",
+    "model_path": "/home/jetson/models/Qwen3.5-4B-Q4_K_M.gguf",
+    "expected_model": "Qwen3.5-4B",
+    "ctx_size": 4096,
+    "gpu_layers": 99,
+    "startup_timeout_seconds": 120,
+    "max_tokens": 500,
+    "enabled": true
+  },
+  "runtime": {
+    "database": "~/.local/share/alfred/alfred.db",
+    "logs": "~/.local/state/alfred",
+    "allowed_services": [],
+    "named_tasks": {},
+    "needle_confidence_floor": 0.25,
+    "max_plan_steps": 5,
+    "tts": false,
+    "voice_alerts": false,
+    "telemetry": false
+  }
+}
