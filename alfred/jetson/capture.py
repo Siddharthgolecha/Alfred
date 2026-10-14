@@ -70,7 +70,8 @@ def adjusted_seconds(first_unix,frame_index,s:Source,rate=RATE):
 
 class Recorder:
     """Small buffers, no memory-held recordings, fail closed on lost SSD/microphone."""
-    def __init__(self,ssd:GuardedSSD,sources,duration_seconds):
+    def __init__(self,ssd:GuardedSSD,sources,duration_seconds,
+                 on_preview=None,preview_seconds=3):
         self.ssd=ssd
         self.sources=list(sources)
         self.seconds=int(duration_seconds)
@@ -81,6 +82,10 @@ class Recorder:
         self.errors={}
         self.records={}
         self._threads=[]
+        self.on_preview=on_preview
+        self.preview_samples=int(preview_seconds*RATE)
+        if not 2*RATE<=self.preview_samples<=10*RATE:
+            raise ValueError("Preview chunk must be 2..10 seconds")
 
     def _record_one(self,source,folder):
         name=source.speaker
@@ -98,6 +103,8 @@ class Recorder:
                 raise RuntimeError("Meeting start barrier timed out")
             total=0
             first=None
+            preview=bytearray()
+            preview_first=0
             with wave.open(str(path),"wb") as wav:
                 wav.setnchannels(1)
                 wav.setsampwidth(BYTES_PER_SAMPLE)
@@ -121,11 +128,23 @@ class Recorder:
                         first=receipt-len(block)/(RATE*BYTES_PER_SAMPLE)
                     wav.writeframesraw(block)
                     total+=len(block)//BYTES_PER_SAMPLE
+                    if self.on_preview is not None:
+                        preview.extend(block)
+                        window_bytes=self.preview_samples*BYTES_PER_SAMPLE
+                        while len(preview)>=window_bytes:
+                            chunk=bytes(preview[:window_bytes])
+                            del preview[:window_bytes]
+                            # A bounded non-blocking consumer must never stall
+                            # microphone recording or exhaust RAM.
+                            self.on_preview(name,chunk,preview_first,first)
+                            preview_first+=self.preview_samples
                     if time.monotonic()-last_guard>=2:
                         self.ssd.check(need_bytes=FRAME_BYTES*10,require_ram=True)
                         last_guard=time.monotonic()
             if total==0:
                 raise RuntimeError("No samples captured")
+            if self.on_preview is not None and len(preview)>=RATE*BYTES_PER_SAMPLE:
+                self.on_preview(name,bytes(preview),preview_first,first)
             self.records[name]={"speaker":name,"source":source.pulse_source,
                                 "wav":str(path),"samples":total,"sample_rate":RATE,
                                 "first_sample_unix_estimate":first,
