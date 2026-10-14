@@ -91,8 +91,16 @@ class DeepSeekGenuineSdkSmoke(TestCase):
                      "--patch", str(client.patch), "--dump-config"],
                     env=env, cwd=client._sdk.config.runtime_cwd,
                     capture_output=True, text=True, timeout=20, check=True)
-                print("AUDIT_TREE_SAMPLE_START", dump.stdout[:2400],
-                      "AUDIT_TREE_SAMPLE_END", flush=True)
+                rows = []
+                for line in dump.stdout.splitlines():
+                    if line.startswith("- id: "):
+                        rows.append({"id": line[6:], "name": None, "disabled": False})
+                    elif rows and line.startswith("  name: "):
+                        rows[-1]["name"] = line[8:].strip("'\\\"")
+                    elif rows and line == "  disabled: true":
+                        rows[-1]["disabled"] = True
+                print("AUDIT_EFFECTIVE_CORDIS_ROWS",
+                      json.dumps(rows, sort_keys=True), flush=True)
                 self.assertEqual(answer["message"], "PONG")
                 self.assertEqual(answer["results"], [])
                 from alfred.runtime import TOOL_SCHEMAS
