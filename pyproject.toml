@@ -19,5 +19,8 @@ alfred = "alfred.app:main"
 [tool.setuptools.packages.find]
 include = ["alfred*"]
 
+[tool.setuptools.package-data]
+"alfred.cognitive" = ["*.yml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
