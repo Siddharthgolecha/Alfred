@@ -212,7 +212,7 @@ def status():
 def _valid_name(s):
     return isinstance(s,str) and bool(re.fullmatch(r"[a-zA-Z0-9_.@-]{1,80}",s))
 
-def validate_plan(steps, max_steps=5):
+def validate_plan(steps, max_steps=5, allow_cancellations=False):
     if not isinstance(steps,list) or len(steps)>max_steps:
         raise ValueError(f"Plan must contain <= {max_steps} steps")
     safe = []
@@ -221,8 +221,10 @@ def validate_plan(steps, max_steps=5):
             raise ValueError("Invalid plan step keys")
         name = step.get("tool")
         validate(name,step.get("args",{}),allow_delegate=False)
-        if name in ("run_workflow", "cancel_reminder", "cancel_schedule"):
-            raise ValueError(f"{name} cannot appear in generated plans")
+        if name == "run_workflow" or (
+            not allow_cancellations and name in ("cancel_reminder", "cancel_schedule")
+        ):
+            raise ValueError(f"{name} cannot appear in this plan")
         predicate = step.get("when")
         if predicate is not None:
             if not isinstance(predicate,dict) or set(predicate)!={"step","field","op","value"}:
@@ -310,8 +312,9 @@ class Tools:
                               timeout=10,check=False)
         return {"exit_code":done.returncode,"message":(done.stdout or done.stderr).strip()[:300]}
 
-    def run_plan(self,steps):
-        steps = validate_plan(steps, self.cfg.get("max_plan_steps",5))
+    def run_plan(self,steps, allow_cancellations=False):
+        steps = validate_plan(steps, self.cfg.get("max_plan_steps",5),
+                              allow_cancellations=allow_cancellations)
         results=[]
         for step in steps:
             if step.get("when") and not check_condition(step["when"],results):

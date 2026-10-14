@@ -5,6 +5,10 @@ Offline-first, continuous English voice automation on **NVIDIA Jetson Orin Nano 
 **Microphone → Cactus Whistle streaming STT → Cactus Needle 3 tool router → validated Python tools.**
 Needle can delegate complex commands to a **Qwen 3.5 4B Bartowski Q4_K_M GGUF** model hosted by local **llama.cpp**. The app adopts a healthy existing `llama-server`, or starts it if absent.
 
+## Phase 2 planning and approvals
+
+Alfred includes schema-grounded Qwen planning and local approvals for sensitive commands. The integrated security design and CLI examples are documented in [Phase 2](docs/PHASE2.md). These commands are available without microphone input: `--reason`, `--pending`, `--approve ID`, and `--reject ID`. Voice-only speech cannot approve a privileged action.
+
 ## What is implemented
 
 - Sony **WI-C100** Bluetooth microphone using HFP/HSP (A2DP alone does *not* provide headset mic capture).
@@ -93,6 +97,22 @@ echo $?   # 0: functional microphone / 2: no valid input
 
 \`--text\` and \`--ensure-llama\` do not need a microphone and remain available for diagnostics.
 
+## Live Whistle transcripts and GPU status routing
+
+While listening in an interactive terminal, Alfred shows Whistle's *pending* transcript on a single updating `Whistle (live):` line, then prints the confirmed `Whistle (final):` utterance as a separate line. In a redirected/non-interactive console, it emits each distinct partial update on a new line. **Only final confirmed speech is sent to Needle and tools; pending text never executes actions.**
+
+For example:
+
+```text
+Whistle (live): could you show
+Whistle (live): could you show gpu status
+Whistle (final): could you show GPU status
+```
+
+Alfred also guards explicit GPU status/temperature/usage requests against Needle accidentally selecting `get_system_status`. It uses `get_gpu_status` for GPU-only status and retains `get_system_status` if both system and GPU diagnostics are asked for. The correction only applies to non-mutating status-tool choices: reminders, service operations and reasoning requests are never silently rewritten.
+
+**Privacy note:** CLI partial/final transcripts are intentionally visible; if Alfred runs under a service manager that journals stdout, that manager may retain these lines. Disable or redirect stdout logging if recording utterances is not appropriate. Alfred's own SQLite event table does not persist transcript text.
+
 ## Pair and select Sony WI-C100
 
 1. Put WI-C100 in pairing mode. It is a Bluetooth neckband headset; its USB-C port is for charging, not a wired microphone.
@@ -131,7 +151,7 @@ Controlled: `control_service` only for `runtime.allowed_services`, `run_named_ta
 
 Persistent: `create_reminder`, `cancel_reminder`, `schedule_every` (status checks only), `cancel_schedule`. Scheduled jobs are stored in SQLite WAL and recover across Alfred restarts, but are not an exactly-once distributed delivery system.
 
-System 2: Qwen returns JSON plans. Python validates the tools, args, allowed conditions, max steps, and service/task allowlists; nested reasoning and recursive workflows are prohibited. Saving a named workflow requires an explicit "save/create workflow" voice request. Conditions may compare a **top-level field** from an earlier step, e.g. `gpu_temp_c > 80`. **Conditional recurring watches are not implemented**; recurring jobs currently run approved read-only diagnostic tools.
+System 2: Qwen receives live tool schemas and returns JSON plans. Python validates the whole plan and requires local approval for sensitive actions; nested reasoning and recursive workflows are prohibited. Saving a named workflow requires an explicit "save/create workflow" voice request. Conditions may compare a **top-level field** from an earlier step, e.g. `gpu_temp_c > 80`. **Conditional recurring watches are not implemented**; recurring jobs currently run approved read-only diagnostic tools.
 
 For safety and privacy, raw audio is not saved and the database logs **transcript length**, not content. Do not run Alfred with root privileges. Continuous listening is enabled by user choice; only use in spaces where recording is appropriate.
 
