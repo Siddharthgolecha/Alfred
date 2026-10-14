@@ -117,7 +117,7 @@ class TranscriptConsoleTests(unittest.TestCase):
             def simulate(chunks,on_partial):
                 on_partial("Start unsafe service")
                 on_partial("GPU sta")
-                return "GPU status"
+                return "Alfred GPU status"
             app.cactus.transcribe_stream.side_effect=simulate
             app.handle_text=Mock(side_effect=lambda text:called.append(text))
             class OneUtterance:
@@ -131,7 +131,7 @@ class TranscriptConsoleTests(unittest.TestCase):
                     app.listen()
                 self.assertEqual(called,["GPU status"])
                 self.assertNotIn("unsafe service",output.getvalue())
-                self.assertEqual(output.getvalue(),"Whistle: GPU status\n")
+                self.assertEqual(output.getvalue(),"Whistle: Alfred GPU status\n")
             finally:
                 app.close()
                 app.store.db.close()
