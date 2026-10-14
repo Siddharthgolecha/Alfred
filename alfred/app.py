@@ -22,6 +22,8 @@ from .lifecycle import ChildProcesses, ShutdownSocket, request_close
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools
 from .system2 import System2
 from .wakeword import WakeWordGate, AcousticWakeDetector
+from .cognitive import (SessionLedger, Decision, Observation, Escalation,
+                        ApprovalReference, Completion, Diagnostic)
 
 LOG = logging.getLogger(__name__)
 
@@ -48,6 +50,9 @@ class Alfred:
         self.cfg = cfg
         runtime = cfg["runtime"]
         self.store = Store(runtime["database"])
+        self.sessions = SessionLedger(self.store)
+        self.session_id = None
+        self._command_source = "text"
         self.processes = ChildProcesses()
         self.tools = Tools(runtime,self.store,processes=self.processes)
         self.feedback = Feedback(runtime["tts"],processes=self.processes)
@@ -90,21 +95,37 @@ class Alfred:
             return {"message":"Qwen System 2 is disabled","results":[]}
         return self.system2.reason(text,allow_actions=allow_actions)
 
+    def _start_task(self, source, input_chars):
+        """One durable ID per authorized request, reused for every decision."""
+        envelope = self.sessions.begin_task(source, input_chars, self.session_id)
+        self.session_id = envelope.session_id
+        return envelope
+
     def handle_text(self,text):
         text=text.strip()
         if not text:
             return
+        task = self._start_task(self._command_source, len(text))
         self.store.event("utterance",{"length":len(text)})  # No raw transcript stored.
         if self.cactus is None:
+            self.sessions.append(task.task_id, Completion("failed", "exception"))
             raise RuntimeError("Cactus models were not initialized")
         try:
+            routed_at = time.monotonic()
             response=self.cactus.route(text)
+            if self.cfg["runtime"].get("cognitive_diagnostics",False):
+                duration = max(0, min(300000, int((time.monotonic() - routed_at)*1000)))
+                self.sessions.append(task.task_id, Diagnostic("needle_route", {
+                    "latency_ms":duration, "input_chars":len(text)}))
             calls=response.get("function_calls") or []
             confidence=response.get("confidence")
             validation = response.get("validation") or {}
             if response.get("suppressed_calls") or (
                 isinstance(validation, dict) and validation.get("ungrounded")
             ):
+                self.sessions.append(task.task_id, Decision("needle3", "rejected",
+                                     min(len(calls), 50)))
+                self.sessions.append(task.task_id, Completion("rejected", "unsafe_route"))
                 self.feedback.tell("I couldn't safely determine that command. Please clarify.")
                 return
             floor=float(self.cfg["runtime"]["needle_confidence_floor"])
@@ -112,6 +133,9 @@ class Alfred:
                           or confidence < floor):
                 self.store.event("route_uncertain",{
                     "confidence": confidence, "call_count": len(calls)})
+                self.sessions.append(task.task_id, Decision("needle3", "uncertain",
+                                     min(len(calls), 50)))
+                self.sessions.append(task.task_id, Completion("rejected", "low_confidence"))
                 self.feedback.tell("Command uncertain. Please repeat or be more specific.")
                 return
             corrected=adjust_status_calls(text,calls)
@@ -128,24 +152,57 @@ class Alfred:
                 "delegated":bool(not calls or (len(calls)==1 and
                     calls[0].get("name")=="delegate_to_reasoner"))
             })
+            route = ("readonly" if not calls else
+                     "delegate" if len(calls)==1 and
+                     calls[0].get("name")=="delegate_to_reasoner" else "direct")
+            safe_confidence = (float(confidence) if type(confidence) in (float,int)
+                               and 0 <= confidence <= 1 else None)
+            self.sessions.append(task.task_id, Decision("needle3", route,
+                                 min(len(calls), 50), safe_confidence))
             if not calls:
+                self.sessions.append(task.task_id,
+                                     Escalation("needle3", "qwen", "unsupported"))
                 # An unsupported Needle command may still be an ordinary Q&A question.
                 # Qwen here is strictly read-only, regardless of what it proposes.
                 result=self.reason(text,allow_actions=False)
             elif len(calls)==1 and calls[0].get("name")=="delegate_to_reasoner":
                 # Use the actual transcript, never a possibly altered model argument.
+                self.sessions.append(task.task_id,
+                                     Escalation("needle3", "qwen", "delegated"))
                 result=self.reason(text,allow_actions=True)
             else:
                 result=self.system2.direct(calls)
             if "approval" in result:
                 approval=result["approval"]
+                self.sessions.append(task.task_id,
+                                     ApprovalReference(approval["approval_id"]))
+                for call in calls:
+                    if call.get("name") in SCHEMA_BY_NAME and call["name"] != "delegate_to_reasoner":
+                        self.sessions.append(task.task_id, Observation(call["name"], "staged"))
+                self.sessions.append(task.task_id,
+                                     Completion("pending_approval", "needs_approval"))
                 message=(f"Local approval required for {approval['actions']}. "
                          f"On the Jetson, run: alfred --approve {approval['approval_id']}")
                 self.feedback.tell(message)
             else:
+                # Persist only tool names/outcomes, never arguments or results.
+                observed = result.get("results") or []
+                if isinstance(observed, list):
+                    for call in calls[:len(observed)]:
+                        if call.get("name") in SCHEMA_BY_NAME and call["name"] != "delegate_to_reasoner":
+                            self.sessions.append(task.task_id, Observation(call["name"], "returned"))
+                outcome = ("disabled" if not self.cfg["qwen"]["enabled"] and route != "direct"
+                           else "no_action" if not observed else "executed")
+                self.sessions.append(task.task_id,
+                                     Completion("failed" if outcome == "disabled" else "completed",
+                                                outcome))
                 self.feedback.tell(json.dumps(result,default=str)[:1800])
         except Exception as exc:
             LOG.exception("Command failed")
+            try:
+                self.sessions.append(task.task_id, Completion("failed", "exception"))
+            except Exception:
+                LOG.exception("Could not record failed command")
             self.feedback.tell(f"Could not complete command: {exc}")
 
     def listen(self):
@@ -188,12 +245,20 @@ class Alfred:
                     # authorization; never send shutdown requests to Needle/Qwen.
                     if re.fullmatch(r"(?:close|exit|quit|stop listening|shut down|shutdown)[.!?]*",
                                     command.strip(), flags=re.IGNORECASE):
+                        task = self._start_task("voice", len(command))
+                        self.sessions.append(task.task_id, Decision("local", "shutdown", 0))
+                        self.sessions.append(task.task_id, Completion("completed", "shutdown"))
                         LOG.info("Wake-authorized spoken shutdown")
                         print("Stopping Alfred", flush=True)
                         break
                     LOG.info("Wake-authorized command received (%d characters)",len(command))
                     # Never forward a wake phrase to Needle or Qwen.
-                    self.handle_text(command)
+                    previous_source = self._command_source
+                    self._command_source = "voice"
+                    try:
+                        self.handle_text(command)
+                    finally:
+                        self._command_source = previous_source
                 else:
                     LOG.info("Wake word detected; awaiting follow-up command")
                 # Discard speech buffered during synchronous TTS to prevent
@@ -432,7 +497,25 @@ def _main(argv=None):
     if args.reason:
         app=Alfred(cfg,load_models=False)
         try:
-            print(json.dumps(app.reason(args.reason),default=str,indent=2))
+            task = app._start_task("reason", len(args.reason))
+            app.sessions.append(task.task_id, Decision("local", "delegate", 0))
+            app.sessions.append(task.task_id,
+                                Escalation("local", "qwen", "explicit_reason"))
+            try:
+                result = app.reason(args.reason)
+                if "approval" in result:
+                    app.sessions.append(task.task_id,
+                                        ApprovalReference(result["approval"]["approval_id"]))
+                    app.sessions.append(task.task_id,
+                                        Completion("pending_approval", "needs_approval"))
+                else:
+                    app.sessions.append(task.task_id,
+                                        Completion("completed" if cfg["qwen"]["enabled"] else "failed",
+                                                   "no_action" if cfg["qwen"]["enabled"] else "disabled"))
+                print(json.dumps(result,default=str,indent=2))
+            except Exception:
+                app.sessions.append(task.task_id, Completion("failed", "exception"))
+                raise
         finally:
             app.close()
         return 0
