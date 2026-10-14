@@ -247,6 +247,9 @@ class System2:
                              "task_id":handoff.task_id, "reason":handoff.reason}
         if "approval" not in result:
             result["results"] = completed + result.get("results", [])
+            result["executed_tools"] = [step["tool"] for step in steps]
+        else:
+            result["proposed_tools"] = [step["tool"] for step in steps]
         return result
 
     def reason(self, utterance, allow_actions=True):
