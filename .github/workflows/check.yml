@@ -2,7 +2,7 @@ name: Alfred offline checks
 
 on:
   push:
-    branches: [main, feat/jetson-voice-agent]
+    branches: [main, feat/jetson-voice-agent, intrinsic_jetson]
   pull_request:
   workflow_dispatch:
 
