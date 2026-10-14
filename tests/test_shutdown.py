@@ -8,13 +8,14 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import tempfile
 import time
 import unittest
 
 from alfred.backends import ModelSupervisor
 from alfred.config import load_config
-from alfred.lifecycle import ShutdownSocket, control_dir, request_close
+from alfred.lifecycle import ChildProcesses, ShutdownSocket, control_dir, request_close
 
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "Unix socket and process group tests")
@@ -110,6 +111,40 @@ class ShutdownTests(unittest.TestCase):
             with ShutdownSocket(self.logdir, "voice"):
                 pass
         self.assertEqual(path.read_text(), "Do not remove me")
+
+    def test_owned_tool_child_is_cancelled_on_shutdown(self):
+        registry = ChildProcesses()
+        started = threading.Event()
+        result = []
+        def worker():
+            started.set()
+            result.append(registry.run(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                timeout=65, capture_output=True, text=True,
+            ))
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        self.assertTrue(started.wait(2))
+        deadline = time.monotonic() + 5
+        while not registry._children and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(registry._children)
+        process = next(iter(registry._children))
+        registry.close()
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertIsNotNone(process.poll())
+        self.assertEqual(result[0].returncode, -signal.SIGTERM)
+        with self.assertRaisesRegex(RuntimeError, "shutting down"):
+            registry.run([sys.executable, "-c", "pass"], timeout=2)
+
+    def test_named_task_timeout_reaps_child(self):
+        registry = ChildProcesses()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            registry.run([sys.executable, "-c", "import time; time.sleep(60)"],
+                         timeout=0.1, capture_output=True, text=True)
+        self.assertFalse(registry._children)
+        registry.close()
 
     def test_managed_model_terminates_its_process_group(self):
         cfg = load_config()["qwen"]
