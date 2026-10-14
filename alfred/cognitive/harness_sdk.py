@@ -203,7 +203,17 @@ class LocalHarness:
             self._sdk, self._temp = None, None
             try:
                 if sdk is not None:
-                    sdk.close()
+                    # SDK 0.1.5rc1 reaps dsh but leaves Python pipe objects
+                    # open (ResourceWarning). Close them after process exit.
+                    proc = (getattr(sdk.client, "_proc", None)
+                            if self.factory is None else None)
+                    try:
+                        sdk.close()
+                    finally:
+                        if proc is not None and proc.poll() is not None:
+                            for fd in (proc.stdin, proc.stdout, proc.stderr):
+                                if fd is not None and not fd.closed:
+                                    fd.close()
             finally:
                 if tmp is not None:
                     tmp.cleanup()
