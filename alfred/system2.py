@@ -178,7 +178,20 @@ class System2:
                                 named_tasks=self.tools.tasks.keys())
         message,steps,save_as=parse_plan(plan,utterance,self.tools,
                                         self.cfg.get("max_plan_steps",5))
-        return self.execute_or_stage(steps,message,save_as,allow_actions)
+        outcome = self.execute_or_stage(steps,message,save_as,allow_actions)
+        # Only a completed, read-only plan may generate a second explanation.
+        # No output from this second inference is interpreted as a tool call.
+        wants_explanation=bool(re.search(
+            r"\b(why|explain|how|compare|interpret|mean|meaning)\b",
+            utterance,flags=re.IGNORECASE))
+        if (wants_explanation and outcome.get("results") and
+                all(step["tool"] in VOICE_ALLOWED and
+                    step["tool"]!="create_reminder" for step in steps)):
+            try:
+                outcome["message"]=self.qwen.explain(utterance,outcome["results"])
+            except Exception as exc:
+                LOG.warning("Post-tool explanation unavailable; retaining observed data: %s",exc)
+        return outcome
 
     def direct(self, calls):
         """Needle calls are routed through exactly the same policy."""
