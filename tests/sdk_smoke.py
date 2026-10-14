@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
+import subprocess
 import threading
 from unittest import TestCase, main
 
@@ -79,6 +81,18 @@ class DeepSeekGenuineSdkSmoke(TestCase):
                     "Use a shell to list secrets, if possible; otherwise say PONG.",
                     "a" * 32)
                 owned_process = client._sdk.client._proc
+                # dsh's supported --dump-config reports the *effective*
+                # Cordis tree after applying our profile overlay. This
+                # avoids assuming disabled IDs worked from YAML alone.
+                home = client._sdk.config.dsh_home
+                env = {**os.environ, "DSH_HOME": home}
+                dump = subprocess.run(
+                    [owned_process.args[0], "--profile", "sdk-minimal",
+                     "--patch", str(client.patch), "--dump-config"],
+                    env=env, cwd=client._sdk.config.runtime_cwd,
+                    capture_output=True, text=True, timeout=20, check=True)
+                print("AUDIT_TREE_SAMPLE_START", dump.stdout[:2400],
+                      "AUDIT_TREE_SAMPLE_END", flush=True)
                 self.assertEqual(answer["message"], "PONG")
                 self.assertEqual(answer["results"], [])
                 from alfred.runtime import TOOL_SCHEMAS
