@@ -24,6 +24,7 @@ from .system2 import System2
 from .wakeword import WakeWordGate, AcousticWakeDetector
 from .cognitive import (SessionLedger, Decision, Observation, Escalation,
                         ApprovalReference, Completion, Diagnostic)
+from .cognitive.harness_sdk import LocalHarness, HarnessUnavailable
 
 LOG = logging.getLogger(__name__)
 
@@ -61,6 +62,16 @@ class Alfred:
         self.supervisor = LlamaSupervisor(cfg["qwen"],runtime["logs"])
         self.qwen = Qwen(cfg["qwen"],self.supervisor)
         self.system2 = System2(self.qwen,self.tools,self.store,runtime)
+        # Optional read-only Harness route, never a new tool authority/server.
+        self.harness = None
+        if runtime.get("harness_enabled", False):
+            model = cfg["qwen"]["model"] or cfg["qwen"]["expected_model"]
+            try:
+                self.harness = LocalHarness(
+                    self.supervisor.url if hasattr(self.supervisor, "url") else cfg["qwen"]["url"],
+                    model, timeout=runtime["harness_timeout_seconds"])
+            except HarnessUnavailable:
+                LOG.warning("Safe harness unavailable; using legacy Qwen path")
         if not runtime.get("telemetry",False):
             import os
             os.environ.setdefault("NEEDLE_TELEMETRY","0")
@@ -93,6 +104,15 @@ class Alfred:
     def reason(self, text, allow_actions=True):
         if not self.cfg["qwen"]["enabled"]:
             return {"message":"Qwen System 2 is disabled","results":[]}
+        # Harness is strictly read-only: all action-capable requests still go
+        # through existing System2 preflight and trusted one-shot approval.
+        if not allow_actions and self.harness is not None:
+            try:
+                self.supervisor.ensure_running()  # existing backend; no second server
+                if self.session_id is not None:
+                    return self.harness.run(text, self.session_id)
+            except (HarnessUnavailable, OSError, RuntimeError):
+                LOG.warning("Local Harness failed, falling back to System2 (no unsafe replay)")
         return self.system2.reason(text,allow_actions=allow_actions)
 
     def _start_task(self, source, input_chars):
@@ -285,6 +305,7 @@ class Alfred:
         # Stop startup/restart attempts before waiting for the watchdog.
         for component, action in (
             ("audio capture", self.audio.close),
+            ("harness subprocess", self.harness.close if self.harness else lambda: None),
             ("inference backend", self.supervisor.close),
             ("task and speech subprocesses", self.processes.close),
             ("scheduler", self.scheduler.stop),
