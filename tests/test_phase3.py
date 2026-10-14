@@ -122,10 +122,17 @@ class Phase3Tests(unittest.TestCase):
     def test_watch_alerts_hysteresis_rearm_and_cooldown(self):
         job=self.auto.watch_gpu(75,1,1)
         id=job["id"]
+        base=int(time.time())
+        index=0
         def poll(value):
-            self._due(id)
+            nonlocal index
+            # Use distinct, deterministic event times; the durable outbox
+            # intentionally deduplicates same-job alerts within one second.
+            event_time=base+index*10
+            index+=1
+            self._due(id,event_time-1)
             with patch("alfred.runtime.gpu_status",return_value={"gpu_temp_c":value}):
-                self.auto.tick(self.tools,self.deliveries.append)
+                self.auto.tick(self.tools,self.deliveries.append,now=event_time)
         poll(74)
         self.assertEqual(len(self.deliveries),0)
         poll(78)
@@ -138,7 +145,7 @@ class Phase3Tests(unittest.TestCase):
         with self.store.lock,self.store.db:
             self.store.db.execute(
                 "UPDATE automation_jobs SET last_triggered_at=? WHERE id=?",
-                (int(time.time())-1000,id))
+                (base-1000,id))
         poll(81)
         self.assertEqual(len(self.deliveries),2)
         self.assertIn("temperature alert",self.deliveries[-1]["message"])
