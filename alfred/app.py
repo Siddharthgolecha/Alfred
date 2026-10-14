@@ -174,8 +174,9 @@ class Alfred:
                 if not self.cfg["qwen"]["enabled"] else "exception"))
             self.feedback.tell(json.dumps(result,default=str)[:1800])
         else:
-            for name in result.get("executed_tools", ()):
-                self.sessions.append(task.task_id, Observation(name, "returned"))
+            for item in result.get("tool_outcomes", ()):
+                self.sessions.append(task.task_id, Observation(
+                    item["tool"], item["outcome"]))
             self.sessions.append(task.task_id, Completion(
                 "completed", "executed" if result.get("results") else "no_action"))
             self.feedback.tell(json.dumps(result,default=str)[:1800])
