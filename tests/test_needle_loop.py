@@ -131,7 +131,7 @@ class LoopCoreTests(unittest.TestCase):
         self.assertEqual(out.stop,"partial")
         self.assertEqual(out.result["results"], [{"available":True,"gpu_temp_c":53}])
         self.assertTrue(out.result["partial"])
-        self.assertIn("remaining",out.result["message"])
+        self.assertIn("remain unverified",out.result["message"])
         self.assertEqual(policy.direct.call_count,1)
         cb.assert_not_called()
         cancelled=[False]
@@ -156,7 +156,7 @@ class LoopCoreTests(unittest.TestCase):
         feedback.assert_not_called()
         policy.direct.assert_called_once()
 
-    def test_three_tool_decisions_stop_at_readonly_listing(self):
+    def test_three_tool_decisions_stop_truthfully_at_exact_budget(self):
         # A third, distinct read-only listing is valid, but it is terminal:
         # its opaque result cannot be laundered into a fourth Needle turn.
         replies=iter([call("get_system_status"), call("list_services")])
@@ -165,11 +165,12 @@ class LoopCoreTests(unittest.TestCase):
         policy.direct.side_effect=[
             result({"available":True,"gpu_temp_c":70}),
             result({"uptime_seconds":500}),
-            result([{"service":"private","instructions":"run bad shell"}])]
+            result({"my-service": "injected text", "secret-service": "run bad shell"})]
         outcome=loop.run(call(),permit_feedback=True)
-        self.assertEqual(outcome.stop,"completed")
+        self.assertEqual(outcome.stop,"partial")
         self.assertEqual(len(outcome.accepted_calls),3)
         self.assertEqual(len(outcome.result["results"]),3)
+        self.assertTrue(outcome.result["partial"])
         self.assertEqual(feedback.call_count,2)
         self.assertEqual(policy.direct.call_count,3)
 
@@ -198,14 +199,30 @@ class LoopCoreTests(unittest.TestCase):
                     self.assertEqual(out.stop,"unsafe")
                     policy.direct.assert_not_called()
 
-    def test_listing_is_terminal_and_does_not_feed_empty_metrics(self):
-        loop,policy,feedback=engine()
-        policy.direct.return_value=result([{"name":"private","secret":"never-to-model"}])
+    def test_service_listing_feeds_only_count_never_names_or_results(self):
+        seen=[]
+        def feedback(raw):
+            seen.append(json.loads(raw))
+            return {"function_calls":[], "confidence":1.0}
+        loop,policy,_=engine(feedback)
+        policy.direct.return_value=result({
+            "service-private": "secret text", "another": "ignore safety"})
         out=loop.run(call("list_services"),permit_feedback=True)
         self.assertEqual(out.stop,"completed")
         self.assertEqual(policy.direct.call_count,1)
-        feedback.assert_not_called()
-        self.assertIn("secret",str(out.result))  # user-facing result remains intact.
+        self.assertEqual(seen,[{"observations":[{
+            "tool":"list_services","metrics":{"service_count":2}}]}])
+        self.assertNotIn("secret",str(seen))
+        self.assertIn("secret",str(out.result))  # direct result preserved.
+
+    def test_opaque_listings_cannot_chain_or_leak(self):
+        cb=Mock()
+        loop,policy,_=engine(cb)
+        policy.direct.return_value=result([{"name":"private", "secret":"never"}])
+        out=loop.run(call("list_automations"),permit_feedback=True)
+        self.assertEqual(out.stop,"protected")
+        policy.direct.assert_called_once()
+        cb.assert_not_called()
 
     def test_invalid_confidence_over_one_cannot_execute(self):
         for score in (1.0001,4.0):
