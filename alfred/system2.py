@@ -1,0 +1,207 @@
+"""System 2 policy: stage sensitive plans; perform no tool side effect before approval.
+
+An approval is a local, one-time CLI action, *not* an open-microphone "yes".
+The same policy applies to Needle direct calls and Qwen-generated plans.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import re
+import sqlite3
+import time
+from dataclasses import dataclass
+
+from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, validate_plan
+
+LOG = logging.getLogger(__name__)
+
+# Only read-only requests and simple reminder creation are eligible for voice execution.
+# These operations may still be rejected by the tool registry at execution time.
+VOICE_ALLOWED = frozenset({
+    "get_system_status", "get_gpu_status", "list_services",
+    "list_reminders", "list_schedules", "list_workflows", "create_reminder"
+})
+SENSITIVE = frozenset({
+    "control_service", "run_named_task", "run_workflow",
+    "cancel_reminder", "schedule_every", "cancel_schedule"
+})
+
+
+def needs_approval(steps, save_as=None):
+    return bool(save_as) or any(step["tool"] not in VOICE_ALLOWED for step in steps)
+
+
+def preflight(steps, tools, max_steps=5):
+    """Validate the full plan and concrete allowlists BEFORE any step executes."""
+    validated = validate_plan(steps, max_steps)
+    for step in validated:
+        tool, args = step["tool"], step.get("args", {})
+        if tool == "control_service" and args["name"] not in tools.services:
+            raise PermissionError("Unknown/unapproved service")
+        if tool == "run_named_task" and args["name"] not in tools.tasks:
+            raise PermissionError("Unknown/unapproved named task")
+    return validated
+
+
+def concise_plan(steps):
+    """Summarize actions without leaking full user content into speech/logs."""
+    return ", ".join(step["tool"] for step in steps) or "(no actions)"
+
+
+class Approvals:
+    """Durable queue, atomic one-time claiming, never replay after interrupted action."""
+    def __init__(self, store, ttl_seconds=180):
+        self.store = store
+        self.ttl = int(ttl_seconds)
+        with self.store.lock, self.store.db:
+            self.store.db.execute("""
+                CREATE TABLE IF NOT EXISTS approvals(
+                    id INTEGER PRIMARY KEY,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    steps_json TEXT NOT NULL,
+                    save_as TEXT,
+                    result_json TEXT
+                )
+            """)
+
+    def propose(self, steps, save_as=None):
+        if not isinstance(steps, list) or (not steps and not save_as):
+            raise ValueError("Nothing to approve")
+        now = int(time.time())
+        with self.store.lock, self.store.db:
+            cur = self.store.db.execute(
+                "INSERT INTO approvals(created_at,expires_at,status,steps_json,save_as) "
+                "VALUES(?,?,?,?,?)", (now, now+self.ttl, "pending",
+                                    json.dumps(steps, separators=(",",":")),save_as))
+            return {"approval_id":cur.lastrowid, "expires_at":now+self.ttl,
+                    "actions":concise_plan(steps), "save_as":save_as}
+
+    def pending(self):
+        now=int(time.time())
+        with self.store.lock:
+            rows=self.store.db.execute(
+                "SELECT id,created_at,expires_at,steps_json,save_as FROM approvals "
+                "WHERE status='pending' AND expires_at>? ORDER BY created_at",
+                (now,)).fetchall()
+        return [{"id":r["id"],"created_at":r["created_at"],"expires_at":r["expires_at"],
+                 "actions":concise_plan(json.loads(r["steps_json"])),"save_as":r["save_as"]}
+                for r in rows]
+
+    def claim(self, approval_id):
+        now=int(time.time())
+        with self.store.lock, self.store.db:
+            row=self.store.db.execute(
+                "SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchone()
+            if not row or row["status"]!="pending" or row["expires_at"]<=now:
+                raise ValueError("Approval missing, expired, or already acted on")
+            cur=self.store.db.execute(
+                "UPDATE approvals SET status='running' WHERE id=? AND status='pending' AND expires_at>?",
+                (approval_id,now))
+            if cur.rowcount!=1:
+                raise ValueError("Approval already claimed")
+            return {"id":row["id"],"steps":json.loads(row["steps_json"]),
+                    "save_as":row["save_as"]}
+
+    def finish(self, approval_id, result=None, error=None):
+        status="failed" if error else "complete"
+        outcome={"error":str(error)[:300]} if error else {"result":result}
+        with self.store.lock, self.store.db:
+            self.store.db.execute(
+                "UPDATE approvals SET status=?,result_json=? WHERE id=? AND status='running'",
+                (status,json.dumps(outcome,default=str)[:10000],approval_id))
+
+    def reject(self, approval_id):
+        with self.store.lock, self.store.db:
+            cur=self.store.db.execute(
+                "UPDATE approvals SET status='rejected' WHERE id=? AND status='pending'",
+                (approval_id,))
+            return bool(cur.rowcount)
+
+
+def parse_plan(plan, text, tools, max_steps):
+    if not isinstance(plan,dict) or not isinstance(plan.get("steps"),list):
+        raise ValueError("Reasoner response is not a valid plan")
+    if any(k not in ("message","steps","save_as") for k in plan):
+        raise ValueError("Unrecognized plan field")
+    message=plan.get("message","")
+    if not isinstance(message,str) or len(message)>1000:
+        raise ValueError("Invalid reasoner message")
+    steps=preflight(plan["steps"],tools,max_steps)
+    save_as=plan.get("save_as") or None
+    if save_as is not None:
+        if not isinstance(save_as,str) or not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{1,40}",save_as):
+            raise ValueError("Invalid workflow name")
+        if not re.search(r"\b(save|create|remember|store)\b.*\bworkflow\b",text,re.I):
+            raise ValueError("Saving a workflow requires an explicit request")
+        if not steps:
+            raise ValueError("Cannot save empty workflow")
+    return message,steps,save_as
+
+
+class System2:
+    """Single entry for Qwen plans, with explicit read-only fallback."""
+    def __init__(self, qwen, tools, store, cfg):
+        self.qwen=qwen
+        self.tools=tools
+        self.store=store
+        self.cfg=cfg
+        self.approvals=Approvals(store,cfg.get("approval_ttl_seconds",180))
+
+    def execute_or_stage(self, steps, message="", save_as=None, allow_actions=True):
+        steps=preflight(steps,self.tools,self.cfg.get("max_plan_steps",5))
+        if not allow_actions:
+            if any(s["tool"] not in VOICE_ALLOWED or s["tool"]=="create_reminder" for s in steps) or save_as:
+                # Never silently filter out dangerous steps and claim the command succeeded.
+                return {"message":"That request needs an explicit actionable command.", "steps":[]}
+        if needs_approval(steps,save_as):
+            proposal=self.approvals.propose(steps,save_as)
+            self.store.event("approval_requested",{"id":proposal["approval_id"],
+                         "actions":proposal["actions"]})
+            return {"message":message or "Awaiting local approval", "approval":proposal}
+        if not steps:
+            return {"message":message or "No tool action required","results":[]}
+        results=self.tools.run_plan(steps)
+        return {"message":message or "Completed","results":results}
+
+    def reason(self, utterance, allow_actions=True):
+        # Tool schemas, not just tool names, are provided to the planner.
+        tool_catalog=[s for s in TOOL_SCHEMAS if s["name"] not in
+                      ("delegate_to_reasoner","run_workflow")]
+        plan=self.qwen.complete(utterance,tool_catalog)
+        message,steps,save_as=parse_plan(plan,utterance,self.tools,
+                                        self.cfg.get("max_plan_steps",5))
+        return self.execute_or_stage(steps,message,save_as,allow_actions)
+
+    def direct(self, calls):
+        """Needle calls are routed through exactly the same policy."""
+        if not isinstance(calls,list):
+            raise ValueError("Malformed Needle calls")
+        if len(calls)>self.cfg.get("max_plan_steps",5):
+            raise ValueError("Too many Needle calls")
+        if any(c.get("name")=="delegate_to_reasoner" for c in calls):
+            if len(calls)!=1:
+                raise ValueError("Reasoner delegation must be a standalone call")
+            raise ValueError("Call reason() with the original utterance")
+        steps=[{"tool":c["name"],"args":c.get("arguments") or {}} for c in calls]
+        return self.execute_or_stage(steps)
+
+    def approve(self, approval_id):
+        """Invoke ONLY from a trusted local CLI, not through the voice registry."""
+        item=self.approvals.claim(approval_id)
+        try:
+            steps=preflight(item["steps"],self.tools,self.cfg.get("max_plan_steps",5))
+            if item["save_as"]:
+                # Saving is a write: the plan is not executed by saving it.
+                result=self.store.save_workflow(item["save_as"],steps)
+                self.store.event("workflow_saved",result)
+            else:
+                result=self.tools.run_plan(steps)
+            self.approvals.finish(approval_id,result=result)
+            return result
+        except Exception as exc:
+            self.approvals.finish(approval_id,error=exc)
+            raise
