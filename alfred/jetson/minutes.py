@@ -19,74 +19,8 @@ from .capture import Source,adjusted_seconds,iso_utc
 from .storage import GuardedSSD,StorageSafetyError
 
 
-def _frames(wav,frame_samples=8000):
-    while True:
-        raw=wav.readframes(frame_samples)
-        if not raw:
-            return
-        samples=array("h")
-        samples.frombytes(raw[:len(raw)//2*2])
-        yield [x/32768.0 for x in samples]
-
-
-def _asr_segment(wav,whistle,window_seconds=12):
-    """Bounded window decode. Timestamps delimit audio windows, not words."""
-    nframes=int(window_seconds*RATE)
-    while True:
-        start=wav.tell()
-        if start>=wav.getnframes():
-            return
-        raw=wav.readframes(nframes)
-        if not raw:
-            return
-        samples=array("h")
-        samples.frombytes(raw)
-        # Skip silent windows; captured hardware may emit zeros even without speech.
-        if not samples or max(abs(x) for x in samples)<350:
-            yield start,wav.tell(),""
-            continue
-        def iterator():
-            for off in range(0,len(samples),8000):
-                yield [x/32768.0 for x in samples[off:off+8000]]
-        pieces=[]
-        for event in whistle.stream(iterator(),language="en",
-                                    keywords=["Alfred","Jetson","Qwen"]):
-            if isinstance(event,dict):
-                text=str(event.get("text") or "").strip()
-                if text:
-                    pieces.append(text)
-        yield start,wav.tell()," ".join(pieces).strip()
-
-
-def merge_channels(records,whistle=None):
-    """Decode one channel at a time to avoid several ASR models in memory."""
-    if whistle is None:
-        import needle
-        whistle=needle.Whistle()
-    merged=[]
-    for name,entry in sorted(records.items()):
-        src=Source(name,entry["source"],entry.get("offset_ms",0),entry.get("drift_ppm",0))
-        with wave.open(entry["wav"],"rb") as wav:
-            if wav.getframerate()!=RATE or wav.getnchannels()!=1 or wav.getsampwidth()!=2:
-                raise ValueError("Captured WAV must be PCM16 mono 16kHz")
-            for first,last,text in _asr_segment(wav,whistle):
-                if not text:
-                    continue
-                start=adjusted_seconds(entry["first_sample_unix_estimate"],first,src)
-                end=adjusted_seconds(entry["first_sample_unix_estimate"],last,src)
-                merged.append({"speaker":name,"start_seconds":round(start,3),
-                               "end_seconds":round(end,3),
-                               "start_utc":iso_utc(start),"end_utc":iso_utc(end),
-                               "text":text,"precision":"window-level, not word-level"})
-    merged.sort(key=lambda t:(t["start_seconds"],t["speaker"]))
-    return merged
-
-
-def pretty_transcript(segments):
-    return "\n".join(
-        f"[{s['start_utc']} .. {s['end_utc']}] {s['speaker']}: {s['text']}"
-        for s in segments)
-
+# Backward-compatible exports for existing meeting workflow callers.
+from .transcription import merge_channels,pretty_transcript
 
 MINUTES_FIELDS={
     "title":{"type":"string"},
@@ -244,7 +178,7 @@ def save_meeting_pdf(ssd:GuardedSSD,session_dir,minutes,segments):
         story.append(Paragraph(html.escape(str(t)).replace("\n","<br/>"),sty))
     para(minutes["title"],title)
     para("Offline minutes • speaker-labeled transcript • "
-         "audio-window timestamps (not word-exact)")
+         "Whistle estimated word timestamps; inter-device sync may be uncertain")
     para("Summary",section)
     para(minutes["summary"])
     for key,heading in (("agenda","Agenda"),("key_points","Discussion & key points"),
