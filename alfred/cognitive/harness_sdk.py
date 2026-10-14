@@ -194,6 +194,64 @@ class LocalHarness:
                 self.close()
                 raise HarnessUnavailable("Local harness unavailable; using legacy path") from exc
 
+    def plan(self, utterance, session_id, *, tools, allowed_services=(),
+             named_tasks=(), max_steps=5):
+        """Ask the shared SDK for an UNTRUSTED JSON plan; do not execute tools.
+
+        The caller MUST pass the result through System2.parse_plan and
+        System2.execute_or_stage before any side effect. No Cordis tool
+        invocation or approval is possible in this profile.
+        """
+        if not isinstance(utterance, str) or not 0 < len(utterance) <= 1600:
+            raise HarnessUnavailable("Invalid bounded planning request")
+        if type(max_steps) is not int or not 1 <= max_steps <= 10:
+            raise HarnessUnavailable("Invalid plan limit")
+        names = []
+        for item in tools:
+            if not isinstance(item, dict) or type(item.get("name")) is not str:
+                raise HarnessUnavailable("Invalid tool registry")
+            if item["name"] in ("delegate_to_reasoner", "run_workflow"):
+                continue
+            spec = item.get("parameters") or {}
+            props = spec.get("properties", {})
+            names.append({"name": item["name"], "args": {
+                k: {"type": v.get("type"), "enum": v.get("enum"),
+                    "minimum": v.get("minimum"), "maximum": v.get("maximum")}
+                for k, v in props.items()},
+                "required": spec.get("required", [])})
+        compact = json.dumps(names, separators=(",", ":"), sort_keys=True)
+        prompt = (
+            "Return ONLY a JSON object (no Markdown) with exactly fields "
+            "message (string), steps (array), save_as (null or string). "
+            "Each step is {tool:string,args:object}; no arbitrary commands. "
+            "Optional when can refer only to an earlier step. "
+            "Never claim to have executed actions. Max steps: " + str(max_steps) +
+            ". Approved services: " + json.dumps(sorted(allowed_services)) +
+            ". Named tasks: " + json.dumps(sorted(named_tasks)) +
+            ". Tool argument shapes: " + compact +
+            ". Use steps=[] if unclear. Request: " + utterance
+        )
+        if len(prompt) > MAX_PROMPT:
+            raise HarnessUnavailable("Planning context too large")
+        raw = self.run(prompt, session_id)["message"]
+        try:
+            def unique(pairs):
+                obj = {}
+                for key, value in pairs:
+                    if key in obj:
+                        raise ValueError("Duplicate JSON plan key")
+                    obj[key] = value
+                return obj
+            plan = json.loads(raw, object_pairs_hook=unique,
+                              parse_constant=lambda _: (_ for _ in ()).throw(
+                                  ValueError("Nonfinite plan field")))
+        except (ValueError, TypeError) as exc:
+            raise HarnessUnavailable("Invalid SDK plan") from exc
+        if not isinstance(plan, dict) or set(plan) != {"message", "steps", "save_as"}:
+            raise HarnessUnavailable("SDK plan has invalid fields")
+        # System2.parse_plan is still the authoritative schema and policy check.
+        return plan
+
     def close(self):
         with self._lock:
             if self._closed:
