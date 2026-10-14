@@ -5,6 +5,7 @@ import argparse
 from contextlib import nullcontext
 import json
 import logging
+import math
 from pathlib import Path
 import re
 import shutil
@@ -177,8 +178,8 @@ class Alfred:
                 self.feedback.tell("I couldn't safely determine that command. Please clarify.")
                 return
             floor=float(self.cfg["runtime"]["needle_confidence_floor"])
-            if calls and (confidence is None or not isinstance(confidence,(float,int))
-                          or confidence < floor):
+            if calls and (type(confidence) not in (float, int)
+                          or not math.isfinite(confidence) or confidence < floor):
                 self.store.event("route_uncertain",{
                     "confidence": confidence, "call_count": len(calls)})
                 self.sessions.append(task.task_id, Decision("needle3", "uncertain",
