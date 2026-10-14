@@ -9,7 +9,9 @@ from unittest.mock import Mock, patch
 from alfred.config import load_config
 from alfred.app import Alfred
 from alfred.cognitive.harness_sdk import (
-    LocalHarness, HarnessUnavailable, check_safe_patch, DENIED_ROWS, SDK_VERSION)
+    LocalHarness, HarnessUnavailable, check_safe_patch, DENIED_ROWS,
+    EXPECTED_ACTIVE_ROWS, EXPECTED_DISABLED_ROWS, audit_effective_cordis_config,
+    SDK_VERSION)
 
 
 class FakeSdk:
@@ -45,6 +47,33 @@ class SafeSdkTests(unittest.TestCase):
                 p.write_text(text)
                 with self.subTest(text=text), self.assertRaises(HarnessUnavailable):
                     check_safe_patch(p)
+
+    def test_exact_effective_cordis_audit_rejects_bypass_and_spoof(self):
+        def fixture():
+            rows = []
+            for key, plugin in EXPECTED_ACTIVE_ROWS.items():
+                rows.extend(("- id: " + key, "  name: '" + plugin + "'"))
+            for key, plugin in EXPECTED_DISABLED_ROWS.items():
+                rows.extend(("- id: " + key, "  name: '" + plugin + "'",
+                             "  disabled: true"))
+            return "\\n".join(rows) + "\\n"
+        good = fixture()
+        expected = audit_effective_cordis_config(good)
+        self.assertIn("persistent-bash", expected["disabled"])
+        candidates = [
+            good.replace("  disabled: true", "  disabled: false", 1),
+            good.replace("  disabled: true", "  disabled: !!js false", 1),
+            good.replace("  name: '@deepseek-ai/dsh-tools'",
+                         "  name: '@evil/executor'", 1),
+            good + "- id: rogue-tool\\n  name: '@rogue/shell'\\n",
+            good + "- id: tools\\n  name: '@deepseek-ai/dsh-tools'\\n",
+            good.replace("- id: persistent-bash\\n", "", 1),
+            good.replace("  name: '@deepseek-ai/dsh-tool-bash-persistent'",
+                         "  name: '@evil/danger'", 1),
+        ]
+        for bad in candidates:
+            with self.subTest(case=bad[-90:]), self.assertRaises(HarnessUnavailable):
+                audit_effective_cordis_config(bad)
 
     def test_remote_urls_and_invalid_ids_fail_closed(self):
         for url in ("https://127.0.0.1:8000", "http://example.com:8000",
