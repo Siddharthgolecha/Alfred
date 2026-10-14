@@ -60,11 +60,28 @@ Plug USB microphones into a powered USB hub if needed, connect Bluetooth microph
 
 For alignment, the recorder stores the estimated first audio sample arrival wall-clock timestamp and a sample-accurate offset within each channel. Optionally provide independently measured `offset_ms` and `drift_ppm` calibration for each mic. **Timestamps represent audio windows, not precise word start/end**, unless a future forced alignment stage is added. NTP is not needed for local relative order, but independent device clocks can drift; a shared clap at the start/end is helpful for calibration.
 
+### Automatic microphone enumeration and speaker-channel labels
+
+Omit `--mic` to let Alfred discover and live-probe every eligible USB microphone attached to a hub and every Bluetooth microphone already exposed by PipeWire/PulseAudio. It rejects playback monitors, fake Built-in Audio sources and microphones that fail a bounded PCM probe. It sorts input device names deterministically and assigns `USB_1`, `USB_2`, ... and `Bluetooth_1`, etc. It caps automatic selection at **eight** independent sources (`--max-mics 1..8`). `alfred-jetson ... sources` prints the currently usable source count.
+
+These labels are **recording channels, not proven speaker identities**. One participant can be picked up by multiple microphones. Manual `--mic Alice=...` remains supported when assigning a microphone to a known participant.
+
+The USB hub is not a shared ADC clock. When feasible, deliberately clap once near the start (and once near the end) and add `--clap-sync` or `--clap-sync --two-claps`. Alfred estimates per-channel offset and, with two reliable claps, sample-clock drift. It saves the calibration and uncertainty in `calibration.json` and `transcript.json`; if calibration is unavailable, it explicitly records that fact instead of fabricating sub-sample synchronization. In heavy Bluetooth buffering or fluctuating latency, calibration may still be imperfect.
+
+Whistle transcribes bounded 12-second audio pieces sequentially, retaining **word-level start/end timestamps and confidence** from its native API when available, and marks window-level timing when only the legacy streaming API is supported. Distinct overlapping speakers retain separate timeline events. Strong identical cross-talk transcripts can be marked as duplicates, but all raw recognized events remain archived in `transcript.json`. The Qwen minutes generator receives the cleaned speaker-labeled, overlap-annotated transcript. Timestamps are decoder estimates (roughly 80 ms frame scale), not exact ADC sample/word boundaries.
+
+The meeting CLI shows what every input captured. During post-recording transcription, interactive terminals update fixed rows for each channel instead of printing repeated partial phrases; non-interactive terminals emit timestamped confirmed speaker events. For best-effort **while-recording** transcription, add `--live-preview`. This starts a single dedicated Whistle worker behind a bounded queue; if it cannot keep up, previews are skipped instead of losing the primary SSD audio. After recording, Alfred still re-transcribes the complete channels for the final minutes. Live previews use additional CPU/RAM and can lag behind actual speech.
+
 ### Record → ASR → Qwen → PDF → QR
 
 ```bash
 alfred-jetson --ssd /YOUR/SSD/MOUNT \
   --swapfile /YOUR/SSD/MOUNT/16GB.swap \
+  meeting --consent --seconds 600 --title "Project Review" \
+  --live-preview --clap-sync --max-mics 8
+
+# Optional explicit speaker/channel mapping:
+alfred-jetson --ssd /YOUR/SSD/MOUNT \
   meeting --consent --seconds 600 --title "Project Review" \
   --mic Alice=alsa_input.usb-mic-one.analog-mono \
   --mic Bob=alsa_input.usb-mic-two.analog-mono \
