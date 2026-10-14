@@ -144,6 +144,11 @@ class Alfred:
             return
         task = self._start_task(self._command_source, len(text))
         self.store.event("utterance",{"length":len(text)})  # No raw transcript stored.
+        # A later unrelated command invalidates the only supported pronoun
+        # referent. Context must never leak across topics or sessions.
+        from .cognitive.needle_loop import PRONOUN, GPU_TEMP
+        if not PRONOUN.fullmatch(text) and not GPU_TEMP.search(text):
+            self.needle_slots.clear(self.session_id)
         try:
             routed_text = self.needle_slots.resolve(self.session_id, text)
         except ContextUnavailable as exc:
