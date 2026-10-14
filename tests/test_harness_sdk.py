@@ -9,7 +9,9 @@ from unittest.mock import Mock, patch
 from alfred.config import load_config
 from alfred.app import Alfred
 from alfred.cognitive.harness_sdk import (
-    LocalHarness, HarnessUnavailable, check_safe_patch, DENIED_ROWS, SDK_VERSION)
+    LocalHarness, HarnessUnavailable, check_safe_patch, DENIED_ROWS,
+    EXPECTED_ACTIVE_ROWS, EXPECTED_DISABLED_ROWS, audit_effective_cordis_config,
+    SDK_VERSION)
 
 
 class FakeSdk:
@@ -45,6 +47,33 @@ class SafeSdkTests(unittest.TestCase):
                 p.write_text(text)
                 with self.subTest(text=text), self.assertRaises(HarnessUnavailable):
                     check_safe_patch(p)
+
+    def test_exact_effective_cordis_audit_rejects_bypass_and_spoof(self):
+        def fixture():
+            rows = []
+            for key, plugin in EXPECTED_ACTIVE_ROWS.items():
+                rows.extend(("- id: " + key, "  name: '" + plugin + "'"))
+            for key, plugin in EXPECTED_DISABLED_ROWS.items():
+                rows.extend(("- id: " + key, "  name: '" + plugin + "'",
+                             "  disabled: true"))
+            return "\n".join(rows) + "\n"
+        good = fixture()
+        expected = audit_effective_cordis_config(good)
+        self.assertIn("persistent-bash", expected["disabled"])
+        candidates = [
+            good.replace("  disabled: true", "  disabled: false", 1),
+            good.replace("  disabled: true", "  disabled: !!js false", 1),
+            good.replace("  name: '@deepseek-ai/dsh-tools'",
+                         "  name: '@evil/executor'", 1),
+            good + "- id: rogue-tool\n  name: '@rogue/shell'\n",
+            good + "- id: tools\n  name: '@deepseek-ai/dsh-tools'\n",
+            good.replace("- id: persistent-bash\n", "", 1),
+            good.replace("  name: '@deepseek-ai/dsh-tool-bash-persistent'",
+                         "  name: '@evil/danger'", 1),
+        ]
+        for bad in candidates:
+            with self.subTest(case=bad[-90:]), self.assertRaises(HarnessUnavailable):
+                audit_effective_cordis_config(bad)
 
     def test_remote_urls_and_invalid_ids_fail_closed(self):
         for url in ("https://127.0.0.1:8000", "http://example.com:8000",
@@ -92,6 +121,20 @@ class SafeSdkTests(unittest.TestCase):
             client.run("hi", "a" * 32)
         self.assertTrue(Slow.created[0].closed)
         self.assertIsNone(client._sdk)
+
+    def test_runtime_exception_does_not_echo_secret_or_retain_temp_home(self):
+        secret = "private-test-token-ABC123"
+        class Exploding(FakeSdk):
+            def run(self, prompt, session_id):
+                raise RuntimeError(secret + " " + prompt)
+        client = LocalHarness("http://127.0.0.1:8080", "qwen", factory=Exploding)
+        with self.assertRaises(HarnessUnavailable) as exc:
+            client.run("do not log " + secret, "a" * 32)
+        self.assertNotIn(secret, str(exc.exception))
+        self.assertIn("unavailable", str(exc.exception))
+        sdk = Exploding.created[0]
+        self.assertTrue(sdk.closed)
+        self.assertFalse(Path(sdk.kwargs["dsh_home"]).parent.exists())
 
     def test_incomplete_response_cannot_claim_success(self):
         class Bad(FakeSdk):
@@ -177,8 +220,91 @@ class AlfredSdkIntegrationTests(unittest.TestCase):
             try:
                 app.handle_text("Run shell")
                 app.system2.execute_or_stage.assert_not_called()
+                app.system2.reason.assert_not_called()
+                # An invalid model plan fails closed, instead of granting a
+                # fresh chance to reinterpret a forged tool request.
+                self.assertEqual(
+                    app.sessions.list_tasks(app.session_id)[0]["state"], "failed")
+            finally:
+                app.close()
+
+    def test_execution_exception_cannot_replay_after_partial_side_effect(self):
+        with tempfile.TemporaryDirectory() as home:
+            app = self.make_app(home)
+            fake = Mock()
+            fake.plan.return_value = {
+                "message": "Approved read", "steps": [
+                    {"tool": "get_gpu_status", "args": {}}], "save_as": None}
+            app.harness = fake
+            app.supervisor.ensure_running = Mock()
+            app.cactus.route.return_value = {
+                "confidence": .98,
+                "function_calls": [{"name": "delegate_to_reasoner", "arguments": {}}]}
+            side_effects = []
+            def partial_execute(*args, **kwargs):
+                side_effects.append("already-happened")
+                raise RuntimeError("tool failed after external effect")
+            app.system2.execute_or_stage = Mock(side_effect=partial_execute)
+            app.system2.reason = Mock(side_effect=AssertionError("replayed side effect"))
+            try:
+                app.handle_text("Read GPU status and analyze")
+                self.assertEqual(side_effects, ["already-happened"])
+                app.system2.execute_or_stage.assert_called_once()
+                app.system2.reason.assert_not_called()
+                fake.plan.assert_called_once()
+                self.assertEqual(
+                    app.sessions.list_tasks(app.session_id)[0]["state"], "failed")
+            finally:
+                app.close()
+
+    def test_sensitive_plan_staged_once_and_not_auto_approved(self):
+        with tempfile.TemporaryDirectory() as home:
+            app = self.make_app(home)
+            app.tools.tasks["safe-task"] = ["/bin/echo", "ok"]
+            fake = Mock()
+            fake.plan.return_value = {
+                "message": "Request approval",
+                "steps": [{"tool": "run_named_task",
+                           "args": {"name": "safe-task"}}], "save_as": None}
+            app.harness = fake
+            app.supervisor.ensure_running = Mock()
+            app.cactus.route.return_value = {
+                "confidence": .98,
+                "function_calls": [{"name": "delegate_to_reasoner", "arguments": {}}]}
+            app.tools.run_plan = Mock(side_effect=AssertionError("no auto execution"))
+            app.system2.approve = Mock(side_effect=AssertionError("no auto approval"))
+            try:
+                app.handle_text("Run my approved named task")
+                app.tools.run_plan.assert_not_called()
+                app.system2.approve.assert_not_called()
+                pending = app.system2.approvals.pending()
+                self.assertEqual(len(pending), 1)
+                self.assertEqual(pending[0]["actions"], "run_named_task")
+                self.assertEqual(app.sessions.list_tasks(app.session_id)[0]["state"],
+                                 "pending_approval")
+                task_id = app.sessions.list_tasks(app.session_id)[0]["id"]
+                self.assertIn("approval", [e.kind for e in app.sessions.events(task_id)])
+                self.assertEqual(app.store.db.execute(
+                    "SELECT status FROM approvals WHERE id=?",
+                    (pending[0]["id"],)).fetchone()[0], "pending")
+            finally:
+                app.close()
+
+    def test_generation_crash_may_fallback_before_any_execution(self):
+        with tempfile.TemporaryDirectory() as home:
+            app = self.make_app(home)
+            fake = Mock()
+            fake.plan.side_effect = HarnessUnavailable("SDK exited before a plan")
+            app.harness = fake
+            app.supervisor.ensure_running = Mock()
+            app.system2.execute_or_stage = Mock()
+            app.system2.reason = Mock(return_value={"message":"Fallback","results":[]})
+            try:
+                out = app.reason("Find an answer", allow_actions=True)
+                self.assertEqual(out["message"], "Fallback")
                 app.system2.reason.assert_called_once_with(
-                    "Run shell", allow_actions=True)
+                    "Find an answer", allow_actions=True)
+                app.system2.execute_or_stage.assert_not_called()
             finally:
                 app.close()
 

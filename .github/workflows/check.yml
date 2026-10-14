@@ -79,3 +79,35 @@ jobs:
         env:
           PYTHONPATH: .
         run: python tests/sdk_smoke.py -v
+
+  review-base-to-head:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Export exact PR base-to-head patch for independent security review
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p review
+          git cat-file -e "$BASE_SHA^{commit}"
+          git cat-file -e "$HEAD_SHA^{commit}"
+          git diff --binary "$BASE_SHA" "$HEAD_SHA" > review/full-base-to-head.diff
+          git diff --stat "$BASE_SHA" "$HEAD_SHA" > review/summary.txt
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" > review/paths.txt
+          { echo "base=$BASE_SHA"; echo "head=$HEAD_SHA"; } > review/revisions.txt
+          (cd review && sha256sum full-base-to-head.diff > SHA256SUMS)
+          test -s review/full-base-to-head.diff
+          cat review/summary.txt
+          cat review/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: review-base-to-head-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          path: review/
+          if-no-files-found: error
+          retention-days: 30

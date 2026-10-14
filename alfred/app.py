@@ -110,28 +110,32 @@ class Alfred:
     def reason(self, text, allow_actions=True):
         if not self.cfg["qwen"]["enabled"]:
             return {"message":"Qwen System 2 is disabled","results":[]}
-        # Harness only produces text/UNTRUSTED tool proposals. The protected
-        # Python System2 remains the sole gate for execution and approvals.
+        # The Harness only proposes; Python System2 remains the sole execution
+        # and local approval authority. A failed SDK inference may safely fall
+        # back BEFORE any tool is handed to System2. Never wrap execution in
+        # that fallback handler: a partially completed action is not retryable.
         if self.harness is not None and self.session_id is not None:
             try:
-                self.supervisor.ensure_running()  # never launches another backend
-                if allow_actions:
-                    proposed = self.harness.plan(
-                        text, self.session_id, tools=TOOL_SCHEMAS,
-                        allowed_services=self.tools.services,
-                        named_tasks=self.tools.tasks.keys(),
-                        max_steps=self.cfg["runtime"]["max_plan_steps"])
-                    message, steps, save_as = parse_plan(
-                        proposed, text, self.tools,
-                        self.cfg["runtime"]["max_plan_steps"])
-                    return self.system2.execute_or_stage(
-                        steps, message, save_as, allow_actions=True)
-                return self.harness.run(text, self.session_id)
-            except Exception:
-                # If a tool proposal fails validation, NEVER execute that
-                # proposal. Fresh legacy planning goes through identical
-                # System2 preflight/approval safeguards.
-                LOG.warning("Local Harness failed validation/runtime; using System2")
+                self.supervisor.ensure_running()  # existing model service only
+                if not allow_actions:
+                    return self.harness.run(text, self.session_id)
+                proposed = self.harness.plan(
+                    text, self.session_id, tools=TOOL_SCHEMAS,
+                    allowed_services=self.tools.services,
+                    named_tasks=self.tools.tasks.keys(),
+                    max_steps=self.cfg["runtime"]["max_plan_steps"])
+            except (HarnessUnavailable, OSError, TimeoutError, RuntimeError):
+                LOG.warning("Harness inference unavailable before execution; falling back to System2")
+                return self.system2.reason(text, allow_actions=allow_actions)
+            # Invalid, spoofed or malformed SDK plans are a hard rejection,
+            # not a second chance to reinterpret their action-bearing text.
+            message, steps, save_as = parse_plan(
+                proposed, text, self.tools,
+                self.cfg["runtime"]["max_plan_steps"])
+            # Deliberately OUTSIDE the retry block. If a tool runs and then
+            # raises, the caller reports failure without a second execution.
+            return self.system2.execute_or_stage(
+                steps, message, save_as, allow_actions=True)
         return self.system2.reason(text,allow_actions=allow_actions)
 
     def _start_task(self, source, input_chars):
