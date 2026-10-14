@@ -204,6 +204,9 @@ class ChildProcesses:
             if check:
                 done.check_returncode()
             return done
+        except BaseException:
+            self._stop_child(process)
+            raise
         finally:
             with self._lock:
                 self._children.discard(process)
