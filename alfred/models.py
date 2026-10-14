@@ -270,5 +270,13 @@ class Cactus:
             if committed:
                 pieces.append(committed)
             if on_partial:
-                on_partial(" ".join(pieces + ([pending] if pending else [])))
+                confirmed=" ".join(pieces).strip()
+                provisional=pending.strip()
+                # Some streaming providers return a pending transcript that
+                # already includes the confirmed prefix; do not echo it twice.
+                if provisional and confirmed and provisional.lower().startswith(confirmed.lower()):
+                    shown=provisional
+                else:
+                    shown=" ".join(part for part in (confirmed,provisional) if part)
+                on_partial(shown)
         return " ".join(pieces).strip()
