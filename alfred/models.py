@@ -179,6 +179,14 @@ class Cactus:
         self.agent.reset()
         return self.agent.complete(transcript, max_new_tokens=384)
 
+    def route_feedback(self, observation_json):
+        """Continue the current isolated task without reset; input is trusted scalar JSON.
+
+        Needle.complete() interprets a JSON result as tool feedback. Never use
+        Needle.run(), which would execute model-named Python functions itself.
+        """
+        return self.agent.complete(observation_json, max_new_tokens=384)
+
     def transcribe_stream(self, frames, on_partial=None):
         # Whistle commits segments as it receives streaming samples.
         pieces = []
