@@ -139,7 +139,8 @@ class Escalation(Contract):
     def validate(self):
         if self.source_model not in ("needle3", "local") or self.target_model != "qwen":
             raise ValueError("Invalid escalation")
-        if self.reason not in ("unsupported", "delegated", "explicit_reason"):
+        if self.reason not in ("unsupported", "delegated", "explicit_reason",
+                             "uncertain", "incomplete"):
             raise ValueError("Invalid escalation reason")
 
 
