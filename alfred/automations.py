@@ -171,6 +171,12 @@ class Automations:
             cur=self.store.db.execute(
                 "UPDATE automation_jobs SET status=?,next_at=? WHERE id=? AND status=?",
                 (destination,next_at,job_id,previous))
+            if cur.rowcount and action=="cancel":
+                # A cancellation also revokes outstanding, undelivered alerts
+                # from this rule. An already displayed notification is final.
+                self.store.db.execute(
+                    "DELETE FROM automation_outbox WHERE job_id=? AND status='pending'",
+                    (job_id,))
             return {"changed":cur.rowcount==1,"id":job_id,"status":destination}
 
     def _enqueue(self,job_id,due_at,message,now):
