@@ -108,6 +108,27 @@ class LedgerTests(unittest.TestCase):
             "SELECT COUNT(*) FROM cognitive_events WHERE task_id=?",
             (task.task_id,)).fetchone()[0], 2)
 
+    def test_cross_session_row_or_wrong_task_metadata_fail_closed(self):
+        task = self.ledger.begin_task("text", 3)
+        other = self.ledger.begin_task("voice", 8)
+        with self.store.db:
+            self.store.db.execute(
+                "INSERT INTO cognitive_events(session_id,task_id,at,kind,contract_json) "
+                "VALUES(?,?,?,?,?)", (other.session_id, task.task_id, 2, "decision",
+                                       Decision("local", "direct", 0).to_json()))
+        with self.assertRaisesRegex(ValueError, "Cross-session"):
+            self.ledger.events(task.task_id)
+        with self.assertRaisesRegex(ValueError, "Cross-session"):
+            self.ledger.append(task.task_id, Completion("completed", "no_action"))
+        with self.store.db:
+            self.store.db.execute(
+                "DELETE FROM cognitive_events WHERE task_id=? AND kind='decision'",
+                (task.task_id,))
+            self.store.db.execute("UPDATE cognitive_tasks SET source='voice' WHERE id=?",
+                                  (task.task_id,))
+        with self.assertRaisesRegex(ValueError, "Corrupt task envelope"):
+            self.ledger.events(task.task_id)
+
     def test_retention_does_not_purge_running_tasks_or_legacy_tables(self):
         self.store.event("legacy", {"note": "retained"})
         task = self.ledger.begin_task("text", 10)
