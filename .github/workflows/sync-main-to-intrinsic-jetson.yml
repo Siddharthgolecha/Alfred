@@ -1,0 +1,139 @@
+name: Sync main to intrinsic_jetson (safe merge)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: alfred-main-to-intrinsic-jetson
+  cancel-in-progress: false
+
+jobs:
+  merge-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out intrinsic_jetson without discarding its history
+        uses: actions/checkout@v4
+        with:
+          ref: intrinsic_jetson
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set identity for merge commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Attempt ordinary main -> intrinsic merge
+        id: merge
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/sync_main_into_jetson.sh
+
+      - name: Configure Python 3.10
+        if: steps.merge.outcome == 'success' && steps.merge.outputs.noop != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Test merged tree on Python 3.10
+        id: py310
+        if: steps.merge.outcome == 'success' && steps.merge.outputs.noop != 'true'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install "reportlab>=4" "qrcode[pil]>=7.4"
+          python -m compileall -q alfred tests
+          python -m unittest discover -s tests -v
+
+      - name: Configure Python 3.12
+        if: steps.merge.outcome == 'success' && steps.merge.outputs.noop != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test merged tree on Python 3.12
+        id: py312
+        if: steps.merge.outcome == 'success' && steps.merge.outputs.noop != 'true'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install "reportlab>=4" "qrcode[pil]>=7.4"
+          python -m compileall -q alfred tests
+          python -m unittest discover -s tests -v
+
+      - name: Push only fully tested merge (never force)
+        id: push
+        if: >-
+          steps.merge.outcome == 'success' &&
+          steps.merge.outputs.noop != 'true' &&
+          steps.py310.outcome == 'success' &&
+          steps.py312.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Compare-and-swap semantics: a concurrent branch update rejects this push.
+          git push origin HEAD:refs/heads/intrinsic_jetson
+
+      - name: Create blocking issue on conflict, test failure or rejected push
+        if: >-
+          always() &&
+          (steps.merge.outcome == 'failure' ||
+           steps.py310.outcome == 'failure' ||
+           steps.py312.outcome == 'failure' ||
+           steps.push.outcome == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MERGE_STATE: ${{ steps.merge.outcome }}
+          PY310_STATE: ${{ steps.py310.outcome }}
+          PY312_STATE: ${{ steps.py312.outcome }}
+          PUSH_STATE: ${{ steps.push.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="[sync] main to intrinsic_jetson blocked at $MAIN_SHA"
+          found="$(gh issue list -R "$GITHUB_REPOSITORY" --state open                      --search "$MAIN_SHA in:title" --json number                      --jq '.[0].number // empty' || true)"
+          if [[ -n "$found" ]]; then
+            echo "Already tracked by issue #$found"
+            exit 0
+          fi
+          {
+            echo "## Automatic branch sync blocked"
+            echo
+            echo "main SHA: \`$MAIN_SHA\`"
+            echo "Workflow run: $RUN_URL"
+            echo
+            echo "| Stage | Result |"
+            echo "|---|---|"
+            echo "| merge | $MERGE_STATE |"
+            echo "| Python 3.10 | $PY310_STATE |"
+            echo "| Python 3.12 | $PY312_STATE |"
+            echo "| push | $PUSH_STATE |"
+            echo
+            echo "Remote intrinsic_jetson was **not force-pushed or rewritten**."
+            echo "Inspect the workflow logs; fix conflicts/tests on an ordinary branch/PR,"
+            echo "then rerun the sync workflow. Never use -X ours/theirs to discard Jetson changes."
+          } > /tmp/alfred-sync-issue.md
+          gh issue create -R "$GITHUB_REPOSITORY" --title "$title"               --label "maestaris:task" --label "priority:P0"               --body-file /tmp/alfred-sync-issue.md
+
+      - name: Fail closed if sync could not be completed
+        if: >-
+          always() &&
+          (steps.merge.outcome == 'failure' ||
+           steps.py310.outcome == 'failure' ||
+           steps.py312.outcome == 'failure' ||
+           steps.push.outcome == 'failure')
+        run: |
+          echo "Safe sync blocked. Check the linked workflow and generated issue."
+          exit 1
