@@ -11,7 +11,7 @@ import subprocess
 import threading
 import time
 
-from .audio import AudioManager, UtteranceStream, pactl_json
+from .audio import AudioManager, AudioUnavailableError, UtteranceStream, pactl_json
 from .config import data_path, load_config
 from .models import Cactus, LlamaSupervisor, Qwen
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools, validate_plan
@@ -144,7 +144,7 @@ class Alfred:
                 # Drain capture buffered during synchronous TTS to prevent self-trigger.
                 if self.feedback.tts:
                     self.audio.close()
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, AudioUnavailableError):
                 raise
             except Exception:
                 LOG.exception("Audio/transcription error, recovering")
@@ -159,21 +159,39 @@ class Alfred:
         # Alfred start reuses its /health endpoint instead of spawning a duplicate.
 
 def doctor(cfg):
+    """Make advertised devices and *verified live microphone* visibly distinct."""
     print("Audio input mode:",cfg["audio"]["mode"])
+    manager=AudioManager(cfg["audio"])
+    healthy=False
     try:
-        for source in pactl_json("sources"):
-            if "monitor" not in source.get("name","").lower():
-                print("Available microphone:",source.get("name"),
-                      (source.get("properties") or {}).get("device.description",""))
+        entries=manager.diagnostics()
+        if not entries:
+            print("Audio server lists no recording sources.")
+        for source in entries:
+            tag="CANDIDATE" if source["eligible"] else "REJECTED"
+            print(f"[{tag}] {source['description'] or source['name']}: "
+                  f"{source['name']} — {source['reason']}")
+        try:
+            selected=manager.ensure_input()
+            print(f"MICROPHONE CONNECTED AND CAPTURING: {selected}")
+            healthy=True
+        except AudioUnavailableError as exc:
+            print(f"MICROPHONE NOT CONNECTED / NOT USABLE: {exc}")
+    except Exception as exc:
+        print(f"MICROPHONE NOT CONNECTED / AUDIO SERVER FAILURE: {exc}")
+    finally:
+        manager.close()
+    try:
         for card in pactl_json("cards"):
             if str(card.get("name","")).startswith("bluez_card"):
                 print("Bluetooth card:",card.get("name"),"profile:",card.get("active_profile"))
-    except Exception as exc:
-        print("Audio server probe failed:",exc)
+    except (OSError,ValueError,RuntimeError) as exc:
+        print("Bluetooth profile detection unavailable:",exc)
     s=LlamaSupervisor(cfg["qwen"],cfg["runtime"]["logs"])
     print("llama.cpp:",json.dumps(s.status()))
     print("Configured GGUF:",cfg["qwen"]["model_path"] or "(not set)")
     print("llama-server binary:",cfg["qwen"]["binary"])
+    return healthy
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description="Alfred Jetson voice automation agent")
@@ -190,13 +208,24 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO,format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                         handlers=[logging.StreamHandler()])
     if args.doctor:
-        doctor(cfg)
-        return 0
+        return 0 if doctor(cfg) else 2
     if args.ensure_llama:
         s=LlamaSupervisor(cfg["qwen"],logs)
         s.ensure_running()
         print(json.dumps(s.status()))
         return 0
+    if not args.text:
+        # Fail before loading native Whistle/Needle models or starting services.
+        # Merely seeing a Pulse "Built-in Audio" entry is not enough.
+        mic=AudioManager(cfg["audio"])
+        try:
+            selected=mic.ensure_input()
+            LOG.info("Audio preflight passed: %s",selected)
+        except AudioUnavailableError as exc:
+            LOG.error("MICROPHONE NOT CONNECTED / NOT USABLE: %s",exc)
+            return 2
+        finally:
+            mic.close()
     app=Alfred(cfg)
     try:
         app.start_services()
@@ -206,6 +235,9 @@ def main(argv=None):
             app.listen()
     except KeyboardInterrupt:
         LOG.info("Stopping Alfred")
+    except AudioUnavailableError as exc:
+        LOG.error("Microphone disconnected or capture failed: %s",exc)
+        return 2
     finally:
         app.close()
     return 0
