@@ -15,7 +15,7 @@ Needle can delegate complex commands to a **Qwen 3.5 4B Bartowski Q4_K_M GGUF** 
 - Strict allowlists for `systemctl --user` services and fixed named script argv; **no arbitrary shell**.
 - System diagnostics, SQLite reminders, recurring read-only status polls, Qwen multi-step plans, saved named workflows.
 - Lightweight optional local speech feedback using `spd-say`.
-- `llama-server` `/health` checking, model-id sanity check, managed startup, process logging, no duplicate spawn onto an occupied port.
+- `llama-server` `/health` checking, model-id sanity check, managed startup and periodic watchdog recovery, process logging, no duplicate spawn onto an occupied port.
 
 **Not yet hardware-validated:** Bluetooth audio profile support on your particular JetPack image, the native Cactus ARM64 binaries, speed/memory on Jetson, and spoken feedback. Run the checklist below directly on the board.
 
@@ -36,7 +36,7 @@ pip install -e '.[test]'
 cp config.example.json config.json
 ```
 
-**Config:** set `qwen.model_path` to the absolute GGUF location, and `qwen.binary` to your `llama-server` executable (or put it in PATH). Example model: Bartowski **Qwen3.5-4B-Q4_K_M.gguf**. For an existing server set `qwen.url` to its local listen address (e.g. `http://127.0.0.1:8080`). The model path is required only if Alfred must start the server itself. Optional environment overrides: `ALFRED_GGUF`, `ALFRED_LLAMA_SERVER`, `ALFRED_LLAMA_URL`.
+**Config:** set `qwen.model_path` to the absolute GGUF location, and `qwen.binary` to your `llama-server` executable (or put it in PATH). Example model: Bartowski **Qwen3.5-4B-Q4_K_M.gguf**. For an existing server set `qwen.url` to its local listen address (e.g. `http://127.0.0.1:8080`). The model path is required only if Alfred must start the server itself. The watchdog checks health every `qwen.supervisor_poll_seconds` (default 30) while Alfred runs. Optional environment overrides: `ALFRED_GGUF`, `ALFRED_LLAMA_SERVER`, `ALFRED_LLAMA_URL`.
 
 ```bash
 # Populate the native model caches before going offline:
