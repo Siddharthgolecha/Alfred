@@ -251,8 +251,17 @@ class System2:
         result["handoff"] = {"version":handoff.version, "session_id":handoff.session_id,
                              "task_id":handoff.task_id, "reason":handoff.reason}
         if "approval" not in result:
-            result["results"] = completed + result.get("results", [])
-            result["executed_tools"] = [step["tool"] for step in steps]
+            new_results = result.get("results", [])
+            # Conditional branches may skip a proposed tool. The trace must
+            # never call an unexecuted/guarded step an observed success.
+            result["tool_outcomes"] = [
+                {"tool":step["tool"],
+                 "outcome":"blocked" if isinstance(value, dict)
+                                      and value.get("skipped") is True
+                             else "returned"}
+                for step,value in zip(steps,new_results)
+            ]
+            result["results"] = completed + new_results
         else:
             result["proposed_tools"] = [step["tool"] for step in steps]
         return result
