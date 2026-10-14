@@ -20,7 +20,8 @@
     "gpu_layers": 99,
     "startup_timeout_seconds": 120,
     "max_tokens": 500,
-    "enabled": true
+    "enabled": true,
+    "supervisor_poll_seconds": 30
   },
   "runtime": {
     "database": "~/.local/share/alfred/alfred.db",
