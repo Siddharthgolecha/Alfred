@@ -262,6 +262,27 @@ class AppTraceTests(unittest.TestCase):
         self.app.system2.qwen.complete.assert_not_called()
         self.app.harness.plan.assert_not_called()
 
+    def test_unknown_needle_function_is_readonly_clarification(self):
+        self.app.cactus.route.return_value={
+            "confidence":.97,
+            "function_calls":[{"name":"unknown_run_shell",
+                               "arguments":{"command":"echo injected"}}]}
+        self.app.system2.direct=Mock()
+        self.app.system2.qwen.complete.return_value=plan(
+            message="Unknown function; please clarify safely.")
+        self.app.handle_text("Can you tell me how this works?")
+        self.app.system2.direct.assert_not_called()
+        self.assertEqual(self.app.sessions.list_tasks(self.app.session_id)[0]["state"],
+                         "completed")
+        task=self.app.sessions.list_tasks(self.app.session_id)[0]
+        history=self.app.sessions.events(task["id"])
+        self.assertEqual(history[2].kind,"escalation")
+        self.assertEqual(history[2].reason,"unsupported")
+        catalog=self.app.system2.qwen.complete.call_args.args[1]
+        self.assertNotIn("run_named_task",[x["name"] for x in catalog])
+        self.assertNotIn("control_service",[x["name"] for x in catalog])
+        self.assertIn("Unknown function",self.app.feedback.tell.call_args.args[0])
+
     def test_qwen_crash_does_not_mark_success(self):
         self.app.cactus.route.return_value={"confidence":.95,"function_calls":[]}
         self.app.system2.qwen.complete.side_effect=OSError("backend dead")
