@@ -32,6 +32,23 @@ TOOL_SCHEMAS = [
            {"name":STR("Exact approved named task")}, ["name"]),
     schema("create_reminder", "Create an alert in a number of minutes",
            {"message":STR("Reminder text"),"delay_minutes":NUM("Delay in minutes",1,10080)}, ["message","delay_minutes"]),
+    schema("create_reminder_at", "Remind at an explicit ISO-8601 date-time including timezone offset; example 2026-10-15T09:00:00+05:30",
+           {"message":STR("Reminder message"),"when":STR("ISO-8601 date and clock time with +05:30 or Z")},["message","when"]),
+    schema("create_daily_reminder", "Create a daily reminder at a local clock time in an explicit IANA timezone",
+           {"message":STR("Reminder message"),"local_time":STR("HH:MM 24-hour clock"),
+            "timezone":STR("IANA timezone such as Asia/Kolkata")},["message","local_time","timezone"]),
+    schema("watch_gpu_temperature", "Create recurring read-only GPU temperature alert; requires approval",
+           {"threshold_c":NUM("Alert at or above Celsius threshold",20,110),
+            "interval_minutes":NUM("Check frequency, minutes",1,1440),
+            "cooldown_minutes":NUM("Minimum alert cooldown minutes",1,10080)},
+           ["threshold_c","interval_minutes","cooldown_minutes"]),
+    schema("list_automations","List active and paused absolute/daily reminders and GPU temperature watches"),
+    schema("pause_automation","Pause a Phase 3 automation by numeric ID",
+           {"automation_id":NUM("Automation ID",1,1000000000)},["automation_id"]),
+    schema("resume_automation","Resume a paused Phase 3 automation by numeric ID",
+           {"automation_id":NUM("Automation ID",1,1000000000)},["automation_id"]),
+    schema("cancel_automation","Cancel a Phase 3 automation by numeric ID",
+           {"automation_id":NUM("Automation ID",1,1000000000)},["automation_id"]),
     schema("list_reminders", "List scheduled pending reminders"),
     schema("cancel_reminder", "Cancel reminder by numeric identifier",
            {"reminder_id":NUM("Reminder id",1,1000000000)}, ["reminder_id"]),
@@ -259,6 +276,8 @@ class Tools:
         self.store = store
         self.services = set(cfg.get("allowed_services",[]))
         self.tasks = cfg.get("named_tasks",{})
+        from .automations import Automations
+        self.automations=Automations(store)
 
     def execute(self,name,args,from_plan=False):
         validate(name,args,allow_delegate=not from_plan)
@@ -286,6 +305,21 @@ class Tools:
             if not args["message"].strip():
                 raise ValueError("Reminder cannot be blank")
             out = self.store.create_reminder(args["message"],args["delay_minutes"])
+        elif name == "create_reminder_at":
+            out=self.automations.remind_at(args["message"],args["when"])
+        elif name == "create_daily_reminder":
+            out=self.automations.remind_daily(args["message"],args["local_time"],args["timezone"])
+        elif name == "watch_gpu_temperature":
+            out=self.automations.watch_gpu(args["threshold_c"],
+                args["interval_minutes"],args["cooldown_minutes"])
+        elif name == "list_automations":
+            out=self.automations.list_jobs()
+        elif name == "pause_automation":
+            out=self.automations.change(args["automation_id"],"pause")
+        elif name == "resume_automation":
+            out=self.automations.change(args["automation_id"],"resume")
+        elif name == "cancel_automation":
+            out=self.automations.change(args["automation_id"],"cancel")
         elif name == "list_reminders":
             out = self.store.list_reminders()
         elif name == "cancel_reminder":
@@ -329,6 +363,7 @@ class Scheduler:
         self.store, self.tools, self.on_reminder = store,tools,on_reminder
         self.stop_flag=threading.Event()
         self.thread=threading.Thread(target=self._loop,name="alfred-scheduler",daemon=True)
+        self.automations=tools.automations
 
     def start(self):
         self.thread.start()
@@ -350,3 +385,8 @@ class Scheduler:
                 except Exception as exc:
                     LOG.exception("Scheduled event failed: %s",exc)
                     self.store.event("scheduler_error",{"event":event,"error":str(exc)})
+            try:
+                self.automations.tick(self.tools,self.on_reminder)
+            except Exception as exc:
+                LOG.exception("Phase 3 scheduler iteration failed: %s",exc)
+                self.store.event("automation_tick_error",{"error":str(exc)})
