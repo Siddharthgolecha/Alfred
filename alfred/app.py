@@ -15,7 +15,8 @@ from .audio import AudioManager, AudioUnavailableError, UtteranceStream, pactl_j
 from .console import TranscriptDisplay
 from .routing import adjust_status_calls
 from .config import data_path, load_config
-from .models import Cactus, LlamaSupervisor, Qwen
+from .models import Cactus, Qwen
+from .backends import ModelSupervisor
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools
 from .system2 import System2
 
@@ -45,7 +46,7 @@ class Alfred:
         self.tools = Tools(runtime,self.store)
         self.feedback = Feedback(runtime["tts"])
         self.audio = AudioManager(cfg["audio"])
-        self.supervisor = LlamaSupervisor(cfg["qwen"],runtime["logs"])
+        self.supervisor = ModelSupervisor(cfg["qwen"],runtime["logs"])
         self.qwen = Qwen(cfg["qwen"],self.supervisor)
         self.system2 = System2(self.qwen,self.tools,self.store,runtime)
         if not runtime.get("telemetry",False):
@@ -73,7 +74,7 @@ class Alfred:
                         LOG.warning("Qwen unavailable; will retry: %s", exc)
                     self._watchdog_stop.wait(int(self.cfg["qwen"]["supervisor_poll_seconds"]))
             self._watchdog_thread = threading.Thread(
-                target=watchdog, name="llama-supervisor", daemon=True)
+                target=watchdog, name="model-supervisor", daemon=True)
             self._watchdog_thread.start()
 
     def reason(self, text, allow_actions=True):
@@ -169,8 +170,8 @@ class Alfred:
         self._watchdog_stop.set()
         self.audio.close()
         self.scheduler.stop()
-        # A llama-server started by Alfred is deliberately kept alive; next
-        # Alfred start reuses its /health endpoint instead of spawning a duplicate.
+        # Managed inference services deliberately stay alive for subsequent runs.
+        # Existing external processes are never stopped or replaced.
 
 def doctor(cfg):
     """Make advertised devices and *verified live microphone* visibly distinct."""
@@ -201,10 +202,10 @@ def doctor(cfg):
                 print("Bluetooth card:",card.get("name"),"profile:",card.get("active_profile"))
     except (OSError,ValueError,RuntimeError) as exc:
         print("Bluetooth profile detection unavailable:",exc)
-    s=LlamaSupervisor(cfg["qwen"],cfg["runtime"]["logs"])
-    print("llama.cpp:",json.dumps(s.status()))
-    print("Configured GGUF:",cfg["qwen"]["model_path"] or "(not set)")
-    print("llama-server binary:",cfg["qwen"]["binary"])
+    s=ModelSupervisor(cfg["qwen"],cfg["runtime"]["logs"])
+    print("Inference backend:",json.dumps(s.status()))
+    print("Model:",cfg["qwen"]["model"] or cfg["qwen"]["model_path"] or "(auto-select)")
+    print("Backend executable:",s.executable_name())
     return healthy
 
 def main(argv=None):
@@ -213,7 +214,8 @@ def main(argv=None):
     group=parser.add_mutually_exclusive_group()
     group.add_argument("--doctor",action="store_true",help="Show mic/server status without models")
     group.add_argument("--text",help="Execute one command using Needle and tools")
-    group.add_argument("--ensure-llama",action="store_true",help="Start/verify llama-server then exit")
+    group.add_argument("--ensure-backend","--ensure-llama",dest="ensure_backend",
+                       action="store_true",help="Start/verify the selected inference backend then exit")
     group.add_argument("--scheduler-only",action="store_true",
                        help="Run reminders and watches without microphone, Cactus, or Qwen")
     group.add_argument("--automations",action="store_true",
@@ -233,8 +235,8 @@ def main(argv=None):
                         handlers=[logging.StreamHandler()])
     if args.doctor:
         return 0 if doctor(cfg) else 2
-    if args.ensure_llama:
-        s=LlamaSupervisor(cfg["qwen"],logs)
+    if args.ensure_backend:
+        s=ModelSupervisor(cfg["qwen"],logs)
         s.ensure_running()
         print(json.dumps(s.status()))
         return 0

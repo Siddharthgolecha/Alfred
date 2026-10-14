@@ -1,4 +1,4 @@
-"""Cactus Needle/Whistle and managed local llama.cpp Qwen service."""
+"""Cactus Needle/Whistle and schema-constrained multi-backend local reasoning."""
 from __future__ import annotations
 
 import json
@@ -22,102 +22,9 @@ def request_json(url, data=None, timeout=4):
     with urlopen(req, timeout=timeout) as response:
         return json.load(response)
 
-class LlamaSupervisor:
-    """Adopt a healthy existing server; otherwise start exactly one local process.
-
-    Never kill an external server or overwrite an occupied port.
-    """
-    def __init__(self, cfg, logdir):
-        self.cfg = cfg
-        self.url = cfg["url"].rstrip("/")
-        self.logdir = Path(logdir).expanduser()
-        self.logdir.mkdir(parents=True, exist_ok=True)
-        self.lock = threading.RLock()
-        self.process = None
-        self.started_here = False
-
-    def health(self):
-        try:
-            response = request_json(self.url + "/health", timeout=2)
-            if response.get("status") == "ok":
-                return "ready"
-            return "loading"
-        except HTTPError as exc:
-            if exc.code == 503:
-                return "loading"
-            return "unhealthy"
-        except (OSError, ValueError, URLError):
-            return "down"
-
-    def port_open(self):
-        u = urlsplit(self.url)
-        try:
-            with socket.create_connection((u.hostname, u.port or 80), timeout=1):
-                return True
-        except OSError:
-            return False
-
-    def model_id(self):
-        try:
-            data = request_json(self.url + "/v1/models")
-            models = data.get("data", [])
-            return str(models[0].get("id", "")) if models else ""
-        except (OSError, ValueError, LookupError):
-            return ""
-
-    def verify_model(self):
-        expected = self.cfg.get("expected_model", "").lower()
-        actual = self.model_id()
-        if expected and actual and expected not in actual.lower():
-            raise RuntimeError(f"Existing llama-server serves '{actual}', expected '{expected}'; will not replace it")
-        return actual
-
-    def ensure_running(self):
-        with self.lock:
-            status = self.health()
-            if status == "ready":
-                self.verify_model()
-                return True
-            if self.port_open():
-                # A 503 loading server can finish booting; do not launch another.
-                if status == "loading":
-                    return self._wait_ready()
-                raise RuntimeError(f"Port for {self.url} is occupied by an unhealthy/other service")
-            model = Path(self.cfg["model_path"]).expanduser()
-            if not str(self.cfg["model_path"]).strip() or not model.is_file():
-                raise FileNotFoundError("Configure qwen.model_path or ALFRED_GGUF to an existing Bartowski Q4_K_M GGUF")
-            binary = self.cfg["binary"]
-            binary_resolved = shutil.which(binary) or (binary if Path(binary).is_file() else None)
-            if not binary_resolved:
-                raise FileNotFoundError(f"llama-server executable not found: {binary}")
-            u = urlsplit(self.url)
-            cmd = [binary_resolved, "--model", str(model.resolve()), "--host", "127.0.0.1",
-                   "--port", str(u.port or 80), "--ctx-size", str(self.cfg["ctx_size"]),
-                   "--n-gpu-layers", str(self.cfg["gpu_layers"]), "--parallel", "1"]
-            log_file = self.logdir / "llama-server.log"
-            with open(log_file, "ab", buffering=0) as stream:
-                self.process = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
-                                                stdout=stream, stderr=subprocess.STDOUT,
-                                                start_new_session=True)
-            self.started_here = True
-            LOG.info("Started llama-server PID %s, log=%s", self.process.pid, log_file)
-            return self._wait_ready()
-
-    def _wait_ready(self):
-        end = time.monotonic() + int(self.cfg["startup_timeout_seconds"])
-        while time.monotonic() < end:
-            if self.process and self.process.poll() is not None:
-                raise RuntimeError(f"Managed llama-server exited with code {self.process.returncode}")
-            if self.health() == "ready":
-                self.verify_model()
-                return True
-            time.sleep(1)
-        raise TimeoutError(f"llama-server did not become healthy at {self.url}")
-
-    def status(self):
-        return {"health": self.health(), "model": self.model_id(),
-                "pid": self.process.pid if self.process else None,
-                "managed": self.started_here}
+# Backward-compatible import for older callers and tests.
+from .backends import ModelSupervisor
+LlamaSupervisor = ModelSupervisor
 
 # llama.cpp's JSON Schema response_format constrains plan structure;
 # Python still performs semantic validation and tool authorization.
@@ -155,10 +62,17 @@ PLAN_RESPONSE_SCHEMA = {
 }
 
 class Qwen:
-    """Schema-constrained System 2 planner using a pre-existing or managed llama-server."""
+    """Schema-constrained System 2 planner across compatible local services."""
     def __init__(self, cfg, supervisor):
         self.cfg = cfg
         self.supervisor = supervisor
+
+    def _response_format(self, name, schema):
+        # llama.cpp accepts the historical inline 'schema'; Ollama and LM
+        # Studio use the OpenAI-style 'json_schema' envelope.
+        if getattr(self.supervisor, "backend", None) in ("ollama", "lm_studio"):
+            return {"type": "json_schema", "json_schema": {"name": name, "schema": schema}}
+        return {"type": "json_schema", "schema": schema}
 
     def complete(self, transcript, tool_catalog, allowed_services=(), named_tasks=()):
         self.supervisor.ensure_running()
@@ -195,12 +109,12 @@ class Qwen:
         payload = {
             "messages": [{"role":"system","content":prompt},{"role":"user","content":transcript}],
             "temperature": 0, "max_tokens": int(self.cfg["max_tokens"]),
-            "response_format": {"type":"json_schema","schema":PLAN_RESPONSE_SCHEMA},
+            "response_format": self._response_format("alfred_plan", PLAN_RESPONSE_SCHEMA),
             "stream": False
         }
         if model:
             payload["model"] = model
-        out = request_json(self.cfg["url"].rstrip("/") + "/v1/chat/completions",
+        out = request_json(self.supervisor.url + "/v1/chat/completions",
                            payload, timeout=90)
         content = out["choices"][0]["message"].get("content") or ""
         try:
@@ -229,15 +143,15 @@ class Qwen:
             ],
             "temperature":0,
             "max_tokens":min(512,int(self.cfg["max_tokens"])),
-            "response_format":{"type":"json_schema","schema":{
+            "response_format":self._response_format("alfred_explanation", {
                 "type":"object","properties":{"answer":{"type":"string","maxLength":1400}},
                 "required":["answer"],"additionalProperties":False
-            }},
+            }),
             "stream":False
         }
         if model:
             payload["model"]=model
-        out=request_json(self.cfg["url"].rstrip("/") + "/v1/chat/completions",
+        out=request_json(self.supervisor.url + "/v1/chat/completions",
                          payload,timeout=90)
         content=out["choices"][0]["message"].get("content") or ""
         try:
