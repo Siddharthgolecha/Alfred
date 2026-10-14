@@ -84,6 +84,9 @@ class DeepSeekGenuineSdkSmoke(TestCase):
                 self.assertTrue(all("localhost" not in str(request.get("tools", "")) for request in StubHandler.inputs))
             finally:
                 client.close()
+                if owned_process is not None:
+                    self.assertIsNotNone(owned_process.poll(),
+                                         "SDK-owned dsh process still running")
         finally:
             server.shutdown()
             server.server_close()
