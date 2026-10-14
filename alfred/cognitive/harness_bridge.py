@@ -1,21 +1,21 @@
-"""Fail-closed optional harness boundary. No execution authority is delegated.
+"""Validated Alfred cognitive-contract projection; never a privileged tool wire.
 
-The official sdk-minimal profile is unsafe for Alfred (unrestricted shell).
-Until a separately audited Cordis profile is pinned, this bridge only accepts
-bounded, structural events and never starts a harness process.
+These bounded structural frames are INTERNAL to Alfred, not the SDK's JSON-RPC
+wire. The genuine SDK is driven by harness_sdk.LocalHarness. Untrusted harness
+notifications are never promoted to authoritative tool observations.
 """
 from __future__ import annotations
 
+from dataclasses import asdict
 import json
 import math
-import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .contracts import CONTRACT_TYPES, Contract, decode_contract
+
 MAX_FRAME_BYTES = 8192
-ALLOWED_EVENTS = frozenset({"task", "decision", "observation", "escalation", "completion"})
-ID_RE = re.compile(r"^[0-9a-f]{32}$")
-SAFE_TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+ALLOWED_EVENTS = frozenset(CONTRACT_TYPES)
 
 
 class HarnessProtocolError(ValueError):
@@ -62,7 +62,7 @@ def _validate_value(value, depth=0):
 
 
 def decode_frame(raw: bytes) -> dict[str, Any]:
-    """Parse one bounded UTF-8 JSON envelope, never execute a proposal."""
+    """Decode one strict v1 Alfred frame; tool proposals are not representable."""
     if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_FRAME_BYTES:
         raise HarnessProtocolError("invalid frame length")
     try:
@@ -80,39 +80,37 @@ def decode_frame(raw: bytes) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise HarnessProtocolError("invalid event payload")
     _validate_value(payload)
-    # Only structural metadata is accepted. Reject unknown fields, not just
-    # dangerous known field names; this prevents aliases for shell/network.
-    allowed = {
-        "task": {"session_id", "task_id", "source", "input_chars"},
-        "decision": {"engine", "route", "call_count", "confidence"},
-        "observation": {"tool", "outcome"},
-        "escalation": {"source_model", "target_model", "reason"},
-        "completion": {"outcome", "reason"},
-    }[frame["event"]]
-    if not set(payload).issubset(allowed):
-        raise HarnessProtocolError("unexpected payload field")
-    if frame["event"] == "task":
-        if not (ID_RE.fullmatch(str(payload.get("session_id", ""))) and
-                ID_RE.fullmatch(str(payload.get("task_id", "")))):
-            raise HarnessProtocolError("invalid task correlation")
-        if payload.get("source") not in ("text", "voice", "reason"):
-            raise HarnessProtocolError("invalid task source")
-        n = payload.get("input_chars")
-        if type(n) is not int or not 0 <= n <= 100000:
-            raise HarnessProtocolError("invalid input size")
-    elif frame["event"] == "observation":
-        if not SAFE_TOOL_RE.fullmatch(str(payload.get("tool", ""))):
-            raise HarnessProtocolError("invalid tool name")
-        if payload.get("outcome") not in ("returned", "blocked", "failed", "staged"):
-            raise HarnessProtocolError("invalid tool outcome")
+    # Enforce EXACT canonical fields (including missing required ones), full
+    # enum/type checks, and the same 2 KiB limit as the durable v1 ledger.
+    cls = CONTRACT_TYPES[frame["event"]]
+    try:
+        canonical = {"kind": frame["event"], "version": 1, **payload}
+        item = decode_contract(json.dumps(canonical, sort_keys=True,
+                                          separators=(",", ":"), allow_nan=False))
+        if type(item) is not cls:
+            raise HarnessProtocolError("Unexpected contract type")
+    except (ValueError, TypeError, KeyError) as exc:
+        raise HarnessProtocolError("Invalid canonical cognitive payload") from exc
     return frame
 
 
 def encode_frame(event: str, payload: dict[str, Any]) -> bytes:
-    raw = json.dumps({"version": 1, "event": event, "payload": payload},
-                     sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    try:
+        raw = json.dumps({"version": 1, "event": event, "payload": payload},
+                         sort_keys=True, separators=(",", ":"),
+                         allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise HarnessProtocolError("Invalid JSON frame") from exc
     decode_frame(raw)
     return raw
+
+
+def frame_for_contract(contract: Contract) -> bytes:
+    """Only ALFRED-authored typed ledger events may cross this boundary."""
+    if not isinstance(contract, Contract):
+        raise HarnessProtocolError("Expected canonical cognitive contract")
+    contract.validate()
+    return encode_frame(contract.kind, asdict(contract))
 
 
 @dataclass(frozen=True)
@@ -131,7 +129,7 @@ class HarnessConfig:
 
 
 class HarnessBridge:
-    """Validated event exchange, with no SDK launch or privileged tool execution."""
+    """Metadata-only boundary; cannot authorize model-suggested tool calls."""
 
     def __init__(self, config: HarnessConfig = HarnessConfig()):
         config.validate()
@@ -144,9 +142,10 @@ class HarnessBridge:
 
     def send(self, event: str, payload: dict[str, Any],
              transport: Callable[[bytes], bytes]) -> dict[str, Any]:
-        """Exchange with an injected transport (fake tests only until SDK audit).
+        """Fake or local-only structural transport; never executes proposals.
 
-        A transport cannot gain execution authority through this method.
+        This API cannot send executable tool arguments. Actual SDK JSON-RPC
+        is handled by the official SDK, not this standalone frame format.
         """
         if not self.config.enabled:
             raise HarnessProtocolError("harness disabled")
