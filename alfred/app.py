@@ -25,6 +25,8 @@ from .wakeword import WakeWordGate, AcousticWakeDetector
 from .cognitive import (SessionLedger, Decision, Observation, Escalation,
                         ApprovalReference, Completion, Diagnostic)
 from .cognitive.harness_sdk import LocalHarness, HarnessUnavailable
+from .cognitive.needle_loop import (NeedleAgentLoop, SessionSlots,
+                                   ContextUnavailable, MULTISTEP)
 
 LOG = logging.getLogger(__name__)
 
@@ -54,6 +56,8 @@ class Alfred:
         self.sessions = SessionLedger(self.store)
         self.session_id = None
         self._command_source = "text"
+        self.needle_slots = SessionSlots(runtime["needle_context_ttl_seconds"])
+        self._needle_cancel = threading.Event()
         self.processes = ChildProcesses()
         self.tools = Tools(runtime,self.store,processes=self.processes)
         self.feedback = Feedback(runtime["tts"],processes=self.processes)
@@ -140,12 +144,18 @@ class Alfred:
             return
         task = self._start_task(self._command_source, len(text))
         self.store.event("utterance",{"length":len(text)})  # No raw transcript stored.
+        try:
+            routed_text = self.needle_slots.resolve(self.session_id, text)
+        except ContextUnavailable as exc:
+            self.sessions.append(task.task_id, Completion("rejected", "unsafe_route"))
+            self.feedback.tell(str(exc))
+            return
         if self.cactus is None:
             self.sessions.append(task.task_id, Completion("failed", "exception"))
             raise RuntimeError("Cactus models were not initialized")
         try:
             routed_at = time.monotonic()
-            response=self.cactus.route(text)
+            response=self.cactus.route(routed_text)
             if self.cfg["runtime"].get("cognitive_diagnostics",False):
                 duration = max(0, min(300000, int((time.monotonic() - routed_at)*1000)))
                 self.sessions.append(task.task_id, Diagnostic("needle_route", {
@@ -171,7 +181,7 @@ class Alfred:
                 self.sessions.append(task.task_id, Completion("rejected", "low_confidence"))
                 self.feedback.tell("Command uncertain. Please repeat or be more specific.")
                 return
-            corrected=adjust_status_calls(text,calls)
+            corrected=adjust_status_calls(routed_text,calls)
             if corrected is not calls:
                 self.store.event("routing_adjustment",{
                     "reason":"explicit_gpu_status",
@@ -185,6 +195,11 @@ class Alfred:
                 "delegated":bool(not calls or (len(calls)==1 and
                     calls[0].get("name")=="delegate_to_reasoner"))
             })
+            if (self.cfg["runtime"]["needle_loop_enabled"]
+                    and len(calls) > self.cfg["runtime"]["needle_max_tools"]):
+                self.sessions.append(task.task_id, Completion("rejected", "unsafe_route"))
+                self.feedback.tell("Needle exceeded the per-task tool budget. Please clarify.")
+                return
             route = ("readonly" if not calls else
                      "delegate" if len(calls)==1 and
                      calls[0].get("name")=="delegate_to_reasoner" else "direct")
@@ -192,7 +207,29 @@ class Alfred:
                                and 0 <= confidence <= 1 else None)
             self.sessions.append(task.task_id, Decision("needle3", route,
                                  min(len(calls), 50), safe_confidence))
-            if not calls:
+            loop_outcome = None
+            if (self.cfg["runtime"]["needle_loop_enabled"] and
+                    calls and route == "direct" and MULTISTEP.search(text)):
+                loop = NeedleAgentLoop(
+                    self.system2, self.cactus.route_feedback, self.sessions,
+                    task.task_id,
+                    confidence_floor=float(self.cfg["runtime"]["needle_confidence_floor"]),
+                    max_decisions=self.cfg["runtime"]["needle_max_decisions"],
+                    max_tools=self.cfg["runtime"]["needle_max_tools"],
+                    cancelled=self._needle_cancel.is_set)
+                loop_outcome = loop.run(
+                    {**response, "function_calls":calls}, permit_feedback=True)
+                calls = list(loop_outcome.accepted_calls)
+                if loop_outcome.stop not in ("completed", "protected"):
+                    self.sessions.append(task.task_id, Completion(
+                        "rejected", "low_confidence" if loop_outcome.stop == "uncertain"
+                        else "unsafe_route"))
+                    self.feedback.tell(loop_outcome.result["message"])
+                    return
+                result = loop_outcome.result
+            if loop_outcome is not None:
+                pass  # Already guarded by System2 and recorded within the loop.
+            elif not calls:
                 self.sessions.append(task.task_id,
                                      Escalation("needle3", "qwen", "unsupported"))
                 # An unsupported Needle command may still be an ordinary Q&A question.
@@ -221,9 +258,17 @@ class Alfred:
                 # Persist only tool names/outcomes, never arguments or results.
                 observed = result.get("results") or []
                 if isinstance(observed, list):
-                    for call in calls[:len(observed)]:
-                        if call.get("name") in SCHEMA_BY_NAME and call["name"] != "delegate_to_reasoner":
-                            self.sessions.append(task.task_id, Observation(call["name"], "returned"))
+                    if loop_outcome is None:
+                        for call in calls[:len(observed)]:
+                            if call.get("name") in SCHEMA_BY_NAME and call["name"] != "delegate_to_reasoner":
+                                self.sessions.append(task.task_id, Observation(call["name"], "returned"))
+                    # Never use model text to construct a context slot. Only
+                    # a genuine, explicit successful GPU temperature read
+                    # from the controlled System2 path refreshes that referent.
+                    for call, item in zip(calls, observed):
+                        if call.get("name") == "get_gpu_status":
+                            self.needle_slots.remember(
+                                self.session_id, routed_text, "get_gpu_status", item)
                 outcome = ("disabled" if not self.cfg["qwen"]["enabled"] and route != "direct"
                            else "no_action" if not observed else "executed")
                 self.sessions.append(task.task_id,
@@ -315,6 +360,8 @@ class Alfred:
             return
         self._closed = True
         self._watchdog_stop.set()
+        self._needle_cancel.set()
+        self.needle_slots.clear()
         # Stop startup/restart attempts before waiting for the watchdog.
         for component, action in (
             ("audio capture", self.audio.close),
