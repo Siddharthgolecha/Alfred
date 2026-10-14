@@ -166,5 +166,49 @@ class ModelTests(unittest.TestCase):
                 with self.assertRaises(FileNotFoundError):
                     sup.ensure_running()
 
+
+    def test_start_missing_server_from_gguf(self):
+        cfg=load_config()["qwen"]
+        with tempfile.TemporaryDirectory() as temp:
+            model=Path(temp)/"Qwen3.5-4B-Q4_K_M.gguf"
+            model.write_bytes(b"test fixture")
+            cfg["model_path"]=str(model)
+            cfg["binary"]="fake-llama-server"
+            sup=LlamaSupervisor(cfg,temp)
+            proc=MagicMock()
+            proc.pid=12345
+            proc.poll.return_value=None
+            with patch.object(sup,"health",side_effect=["down","ready"]), \
+                 patch.object(sup,"port_open",return_value=False), \
+                 patch.object(sup,"verify_model",return_value="Qwen3.5-4B"), \
+                 patch("alfred.models.shutil.which",return_value="/fake/llama-server"), \
+                 patch("alfred.models.subprocess.Popen",return_value=proc) as spawn:
+                self.assertTrue(sup.ensure_running())
+                self.assertEqual(sup.status if False else sup.process.pid,12345)
+                self.assertTrue(sup.started_here)
+                argv=spawn.call_args.args[0]
+                self.assertIn(str(model.resolve()),argv)
+                self.assertIn("--n-gpu-layers",argv)
+                self.assertEqual(argv[argv.index("--host")+1],"127.0.0.1")
+
+    def test_cactus_uses_finalized_whistle_text(self):
+        import types
+        from alfred.models import Cactus
+        agent=MagicMock()
+        agent.complete.return_value={"type":"respond","function_calls":[]}
+        class FakeWhistle:
+            def stream(self,frames,**kwargs):
+                values=list(frames)
+                self_values=len(values)
+                assert self_values==2
+                yield {"text":"turn","pending":"turn on the"}
+                yield {"text":"on the light","pending":""}
+        fake=types.SimpleNamespace(Needle=lambda tools:agent,Whistle=FakeWhistle)
+        with patch.dict(sys.modules,{"needle":fake}):
+            cactus=Cactus([])
+        self.assertEqual(cactus.transcribe_stream([[0.0]*8000,[0.1]*8000]),"turn on the light")
+        cactus.route("Check GPU")
+        agent.complete.assert_called_once()
+
 if __name__=="__main__":
     unittest.main()
