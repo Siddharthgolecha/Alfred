@@ -106,7 +106,7 @@ class WakeConfigurationTests(unittest.TestCase):
 
 class AlfredVoiceTests(unittest.TestCase):
     def run_voice(self, transcripts, *, mode="transcript", enabled=True,
-                  detector=None):
+                  detector=None, utterance_count=None):
         from alfred.app import Alfred
         cfg=load_config()
         cfg["wake_word"]["mode"]=mode
@@ -129,18 +129,19 @@ class AlfredVoiceTests(unittest.TestCase):
                 def __init__(self,*args,**kwargs):
                     pass
                 def utterances(self):
-                    return iter([iter([[0.0]]) for _ in transcripts])
+                    return iter([iter([[0.0]]) for _ in range(
+                        len(transcripts) if utterance_count is None else utterance_count)])
             out=io.StringIO()
             try:
-                with patch("alfred.app.UtteranceStream",FakeUtterances), \\
-                     patch("sys.stdout",out):
+                with (patch("alfred.app.UtteranceStream",FakeUtterances),
+                      patch("sys.stdout",out)):
                     if detector is not None:
                         with patch("alfred.app.AcousticWakeDetector",return_value=detector):
                             app.listen()
                     else:
                         app.listen()
-                return [x.args[0] for x in app.handle_text.call_args_list], \\
-                       out.getvalue(), app.cactus.transcribe_stream.call_count
+                return ([x.args[0] for x in app.handle_text.call_args_list],
+                        out.getvalue(), app.cactus.transcribe_stream.call_count)
             finally:
                 app.close()
                 app.store.db.close()
@@ -171,7 +172,7 @@ class AlfredVoiceTests(unittest.TestCase):
             None, iter([[0.1]*8000]), None
         ]
         commands,output,asr_count=self.run_voice(
-            ["check GPU"],mode="openwakeword",detector=detector)
+            ["check GPU"],mode="openwakeword",detector=detector,utterance_count=3)
         # The mocked utterance source uses one segment per transcript,
         # so supply three slots to exercise ignored / accepted / ignored.
         self.assertEqual(commands,["check GPU"])
