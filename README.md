@@ -15,6 +15,10 @@ Phase 3 adds [persistent absolute/daily reminders and GPU-temperature watches](d
 
 Whistle now updates **one terminal line like typing** as new speech arrives. Corrections revise only the changed suffix. It does not print a new line for every partial phrase; the final transcript is committed and used for tool execution. Non-TTY logs only print the final transcript.
 
+## Phase 4 — Durable workflow graphs
+
+Phase 4 introduces [approved, persistent workflow DAGs](docs/PHASE4.md), conditional branches, bounded read-only retries, safe cancellation and restart-aware execution. Use `--workflow-draft` and `--workflow-approve` locally to register approved graphs, `--workflow-start` to run them, and `--workflow-status` to inspect results. Read-only graphs can also run on recurring schedules. Voice requests to run these workflows still require Phase 2 local approval. The `intrinsic_jetson` branch remains separate.
+
 ## What is implemented
 
 - Sony **WI-C100** Bluetooth microphone using HFP/HSP (A2DP alone does *not* provide headset mic capture).
