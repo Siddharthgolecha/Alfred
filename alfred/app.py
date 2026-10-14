@@ -23,7 +23,7 @@ from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools
 from .system2 import System2
 from .wakeword import WakeWordGate, AcousticWakeDetector
 from .cognitive import (SessionLedger, Decision, Observation, Escalation,
-                        ApprovalReference, Completion)
+                        ApprovalReference, Completion, Diagnostic)
 
 LOG = logging.getLogger(__name__)
 
@@ -110,7 +110,12 @@ class Alfred:
         try:
             if self.cactus is None:
                 raise RuntimeError("Cactus models were not initialized")
+            routed_at = time.monotonic()
             response=self.cactus.route(text)
+            if self.cfg["runtime"].get("cognitive_diagnostics",False):
+                duration = max(0, min(300000, int((time.monotonic() - routed_at)*1000)))
+                self.sessions.append(task.task_id, Diagnostic("needle_route", {
+                    "latency_ms":duration, "input_chars":len(text)}))
             calls=response.get("function_calls") or []
             confidence=response.get("confidence")
             validation = response.get("validation") or {}
