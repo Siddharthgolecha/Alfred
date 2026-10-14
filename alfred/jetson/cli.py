@@ -12,6 +12,9 @@ from ..audio import pactl_json,source_status
 from ..config import load_config
 from .storage import GuardedSSD,StorageSafetyError
 from .capture import Source,Recorder
+from .discovery import discover_mics,MAX_MICS
+from .calibration import calibrate_claps
+from .console import MeetingDisplay
 from .minutes import merge_channels,MinutesReasoner,save_meeting_pdf,pretty_transcript
 from .sharing import create_qr_handoff,send_bluetooth_opp
 
@@ -44,39 +47,71 @@ def _manifest(folder,ssd):
     return records
 
 
-def process_session(ssd,folder,cfg,title,recipient=None,whistle=None,reasoner=None):
-    """Offline postprocessing. Re-run after interruption with --resume SESSION."""
+def process_session(ssd,folder,cfg,title,recipient=None,whistle=None,reasoner=None,
+                    calibrate=False,require_two_claps=False,show_channels=True):
+    """Generate a time-merged, overlap-aware transcript and local PDF/QR."""
     ssd.check(require_ram=True)
     manifest=_manifest(folder,ssd)
-    segments=merge_channels(manifest["channels"],whistle=whistle)
+    channels=manifest["channels"]
+    if not channels:
+        raise RuntimeError("Meeting contains no captured microphone channels")
+    calibration_file=Path(folder)/"calibration.json"
+    if calibrate:
+        calibrations=calibrate_claps(channels,require_two=require_two_claps)
+        calibration_file.write_text(json.dumps(calibrations,indent=2),encoding="utf-8")
+        calibration_file.chmod(0o600)
+    elif calibration_file.is_file() and not calibration_file.is_symlink():
+        calibrations=json.loads(calibration_file.read_text(encoding="utf-8"))
+    else:
+        calibrations={}
+    view=MeetingDisplay(sorted(channels),enabled=show_channels)
+    try:
+        raw=merge_channels(channels,whistle=whistle,calibrations=calibrations,
+                           on_event=view.event,include_crosstalk=True)
+    finally:
+        view.finish()
+    segments=[row for row in raw if row.get("included_in_minutes",True)]
     if not segments:
         raise RuntimeError("Whistle found no usable speech; cannot invent meeting minutes")
-    output=Path(folder)/"transcript.json"
-    output.write_text(json.dumps({"segments":segments,
-        "timing_warning":"window bounds are sample-aligned estimates, not exact word timestamps"},
-        indent=2),encoding="utf-8")
+    out=Path(folder)
+    transcript_info={
+        "channels":list(sorted(channels)),
+        "microphone_count":len(channels),
+        "calibration":calibrations,
+        "precision_warning":"Decoder word timing and cross-device alignment are estimates; "
+            "independent USB/BT inputs do not share a clock simply because they share a hub.",
+        "segments":segments,
+        "raw_segments":raw,
+        "cross_talk_candidates":sum(1 for row in raw if row.get("likely_crosstalk")),
+        "overlap_events":sum(1 for row in segments if row.get("overlap"))
+    }
+    output=out/"transcript.json"
+    output.write_text(json.dumps(transcript_info,indent=2),encoding="utf-8")
     output.chmod(0o600)
-    txt=Path(folder)/"transcript.txt"
+    txt=out/"transcript.txt"
     txt.write_text(pretty_transcript(segments)+"\n",encoding="utf-8")
     txt.chmod(0o600)
     ssd.check()
-    minutes=(reasoner or MinutesReasoner(cfg["qwen"])).summarize(segments,meeting_title=title)
-    minutes_json=Path(folder)/"minutes.json"
-    minutes_json.write_text(json.dumps(minutes,ensure_ascii=False,indent=2),encoding="utf-8")
+    minutes=(reasoner or MinutesReasoner(cfg["qwen"])).summarize(
+        segments,meeting_title=title)
+    minutes_json=out/"minutes.json"
+    minutes_json.write_text(json.dumps(minutes,ensure_ascii=False,indent=2),
+                            encoding="utf-8")
     minutes_json.chmod(0o600)
     pdf=save_meeting_pdf(ssd,folder,minutes,segments)
     pdf.chmod(0o600)
     ssd.check()
-    # QR created immediately after PDF save, before optional OPP transfer.
     qr,metadata=create_qr_handoff(pdf,folder)
     result={"session":str(folder),"pdf":str(pdf),"qr":str(qr),
-            "transcript":str(txt),"sha256":metadata["sha256"],
+            "transcript":str(txt),"structured_transcript":str(output),
+            "microphone_count":len(channels),"speaker_channels":list(sorted(channels)),
+            "overlap_events":transcript_info["overlap_events"],
+            "cross_talk_candidates":transcript_info["cross_talk_candidates"],
+            "sha256":metadata["sha256"],
             "transfer":"not started; QR alone does not send a Bluetooth file"}
     if recipient:
-        # User explicitly supplies a MAC, and receiver must already be trusted.
         result["transfer"]=send_bluetooth_opp(pdf,recipient)
     return result
-
 
 def build_parser():
     p=argparse.ArgumentParser(prog="alfred-jetson",description=
@@ -92,8 +127,17 @@ def build_parser():
     sub.add_parser("caches",help="Set up HF hub/datasets and tmp caches on SSD")
     sub.add_parser("sources",help="List current Pulse/PipeWire microphones")
     record=sub.add_parser("meeting",help="Capture, transcribe and generate PDF/QR offline")
-    record.add_argument("--mic",action="append",required=True,
-                        help="Speaker=pulse_source[,offset_ms[,drift_ppm]] (repeat)")
+    record.add_argument("--mic",action="append",
+                        help="Explicit Speaker=pulse_source[,offset_ms[,drift_ppm]]; "
+                             "omit to auto-detect connected USB/BT mics")
+    record.add_argument("--max-mics",type=int,default=MAX_MICS,
+                        help="Maximum automatically detected working mics (1..8)")
+    record.add_argument("--clap-sync",action="store_true",
+                        help="Align clocks using intentional shared calibration claps")
+    record.add_argument("--two-claps",action="store_true",
+                        help="Require start/end shared claps for drift calibration")
+    record.add_argument("--no-channel-view",action="store_true",
+                        help="Suppress per-microphone CLI transcript")
     record.add_argument("--seconds",type=int,required=True)
     record.add_argument("--title",default="Meeting Minutes")
     record.add_argument("--consent",action="store_true",
@@ -106,6 +150,12 @@ def build_parser():
     resume=sub.add_parser("resume",help="Finish a previous captured session")
     resume.add_argument("--session",required=True)
     resume.add_argument("--title",default="Meeting Minutes")
+    resume.add_argument("--clap-sync",action="store_true",
+                        help="Recalculate clock calibration from recorded claps")
+    resume.add_argument("--two-claps",action="store_true",
+                        help="Require start/end shared claps to align clocks")
+    resume.add_argument("--no-channel-view",action="store_true",
+                        help="Suppress per-microphone console transcript")
     resume.add_argument("--recipient",help="Explicit paired+trusted OPP recipient MAC")
     return p
 
@@ -124,11 +174,15 @@ def main(argv=None):
             print("Set these environment variables before launching Alfred/Hugging Face downloads.")
             return 0
         if args.command=="sources":
-            for src in pactl_json("sources"):
-                ok,why=source_status(src,explicitly_selected=True)
+            listed=pactl_json("sources")
+            for src in listed:
+                ok,why=source_status(src)
                 print(json.dumps({"source":src.get("name"),"description":
                     (src.get("properties") or {}).get("device.description"),
-                    "recordable_candidate":ok,"reason":why}))
+                    "eligible":ok,"reason":why}))
+            detected=discover_mics(pulse_sources=listed)
+            print(json.dumps({"detected_microphone_count":len(detected),
+                 "channels":[{"label":x.speaker,"source":x.pulse_source} for x in detected]}))
             return 0
         if args.command=="send":
             folder=Path(args.session).resolve(strict=True)
@@ -154,12 +208,24 @@ def main(argv=None):
         if args.command=="meeting":
             if not args.consent:
                 raise PermissionError("Use --consent only after informing/obtaining participant permission")
-            src=[_source(x) for x in args.mic]
+            if args.two_claps and not args.clap_sync:
+                raise ValueError("--two-claps requires --clap-sync")
+            src=[_source(x) for x in args.mic] if args.mic else discover_mics(limit=args.max_mics)
+            if not src:
+                raise RuntimeError("No working USB/Bluetooth microphone discovered; "
+                    "connect microphones or provide explicit --mic sources")
+            print("Meeting microphone count:",len(src),flush=True)
+            for selected in src:
+                print(f"  {selected.speaker}: {selected.pulse_source}",flush=True)
             folder,_=Recorder(ssd,src,args.seconds).record()
             print("Recorded channels on SSD:",folder,flush=True)
         else:
             folder=Path(args.session)
-        result=process_session(ssd,folder,cfg,args.title,recipient=args.recipient)
+        if args.two_claps and not args.clap_sync:
+            raise ValueError("--two-claps requires --clap-sync")
+        result=process_session(ssd,folder,cfg,args.title,recipient=args.recipient,
+            calibrate=args.clap_sync,require_two_claps=args.two_claps,
+            show_channels=not args.no_channel_view)
         print(json.dumps(result,indent=2))
         return 0
     except (StorageSafetyError,ValueError,PermissionError,RuntimeError,OSError,
