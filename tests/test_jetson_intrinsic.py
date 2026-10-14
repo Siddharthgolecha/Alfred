@@ -184,6 +184,26 @@ class MeetingOutputTests(GuardedStorageTests):
             with self.assertRaises(ValueError):
                 reasoner.summarize(segments)
 
+    def test_bluetooth_send_reuses_existing_pdf_and_verifies_hash(self):
+        from alfred.jetson.cli import main
+        folder=self.guard.directory("meetings")/"send-session"
+        folder.mkdir()
+        (folder/"capture_manifest.json").write_text(json.dumps({"channels":{}}))
+        pdf=folder/"minutes.pdf"
+        pdf.write_bytes(b"%PDF simulated minutes")
+        qr,manifest=create_qr_handoff(pdf,folder,adapter="00:11:22:33:44:55")
+        argv=["--ssd",str(self.root),"send","--session",str(folder),
+              "--recipient","11:22:33:44:55:66"]
+        with patch("alfred.jetson.cli.GuardedSSD",return_value=self.guard),\
+             patch("alfred.jetson.cli.send_bluetooth_opp",return_value={
+                "transport":"bluetooth_opp"}) as send:
+            self.assertEqual(main(argv),0)
+            send.assert_called_once_with(pdf.resolve(),"11:22:33:44:55:66")
+            # Tampering with the PDF invalidates the QR manifest checksum.
+            pdf.write_bytes(b"%PDF tampered")
+            self.assertEqual(main(argv),2)
+            self.assertEqual(send.call_count,1)
+
     def test_end_to_end_resume_with_mock_whistle_reasoner(self):
         folder=self.guard.directory("meetings")/"meeting-one"
         folder.mkdir()
