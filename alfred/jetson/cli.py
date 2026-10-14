@@ -99,6 +99,10 @@ def build_parser():
     record.add_argument("--consent",action="store_true",
                         help="Confirm recording permission/participant notice")
     record.add_argument("--recipient",help="Explicit paired+trusted OPP recipient MAC")
+    send=sub.add_parser("send",help="Send existing PDF to a paired trusted Bluetooth OPP receiver")
+    send.add_argument("--session",required=True)
+    send.add_argument("--recipient",required=True,
+                      help="Already paired and trusted receiver MAC (recipient must accept)")
     resume=sub.add_parser("resume",help="Finish a previous captured session")
     resume.add_argument("--session",required=True)
     resume.add_argument("--title",default="Meeting Minutes")
@@ -125,6 +129,22 @@ def main(argv=None):
                 print(json.dumps({"source":src.get("name"),"description":
                     (src.get("properties") or {}).get("device.description"),
                     "recordable_candidate":ok,"reason":why}))
+            return 0
+        if args.command=="send":
+            folder=Path(args.session).resolve(strict=True)
+            # Reuse the original session and checksum; do not spend RAM
+            # retranscribing/replanning just to push an existing PDF.
+            _manifest(folder,ssd)
+            pdf=(folder/"minutes.pdf").resolve(strict=True)
+            qr=(folder/"handoff.json").resolve(strict=True)
+            if pdf.parent!=folder or qr.parent!=folder or not pdf.is_file():
+                raise StorageSafetyError("No valid existing meeting PDF for Bluetooth handoff")
+            import hashlib
+            digest=hashlib.sha256(pdf.read_bytes()).hexdigest()
+            if json.loads(qr.read_text(encoding="utf-8")).get("sha256")!=digest:
+                raise StorageSafetyError("PDF changed since QR generation; transfer refused")
+            result=send_bluetooth_opp(pdf,args.recipient)
+            print(json.dumps(result,indent=2))
             return 0
         cfg=load_config(Path(args.config) if Path(args.config).exists() else None)
         if args.command=="meeting":
