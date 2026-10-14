@@ -1,0 +1,44 @@
+# DeepSeek Harness sdk-minimal v0.1.5rc1; applied after profile defaults.
+# Fail closed if audit of these exact row IDs fails on SDK upgrade.
+# The runtime is an unprivileged *read-only model*; Alfred owns tool execution.
+- id: persistent-bash
+  disabled: true
+- id: persistent-pwsh
+  disabled: true
+- id: terminal-bash
+  disabled: true
+- id: terminal-pwsh
+  disabled: true
+- id: pty
+  disabled: true
+- id: subprocess
+  disabled: true
+- id: sandbox-policy
+  disabled: true
+- id: sandbox
+  disabled: true
+- id: filesystem
+  disabled: true
+- id: tool-fs
+  disabled: true
+- id: attachment-local
+  disabled: true
+- id: working-directory
+  disabled: true
+- id: tool-working-directory
+  disabled: true
+- id: mcp-resources
+  disabled: true
+- id: jobs
+  disabled: true
+- id: plugin-package-inventory-deepseek
+  disabled: true
+- id: session-log-deepseek
+  disabled: true
+- id: compaction-basic
+  disabled: true
+- id: image-offload
+  disabled: true
+# Keep sdk-app-startup, sdk-jsonrpc-server, llm-deepseek, session,
+# tools (empty registry), agent-loop, and JSONL session persistence.
+# Each launch uses a private disposable Harness home; no full sdk profile.

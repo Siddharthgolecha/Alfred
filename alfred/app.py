@@ -20,10 +20,11 @@ from .config import data_path, load_config
 from .models import Cactus, LlamaSupervisor, Qwen
 from .lifecycle import ChildProcesses, ShutdownSocket, request_close
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools
-from .system2 import System2
+from .system2 import System2, parse_plan
 from .wakeword import WakeWordGate, AcousticWakeDetector
 from .cognitive import (SessionLedger, Decision, Observation, Escalation,
                         ApprovalReference, Completion, Diagnostic)
+from .cognitive.harness_sdk import LocalHarness, HarnessUnavailable
 
 LOG = logging.getLogger(__name__)
 
@@ -61,6 +62,16 @@ class Alfred:
         self.supervisor = LlamaSupervisor(cfg["qwen"],runtime["logs"])
         self.qwen = Qwen(cfg["qwen"],self.supervisor)
         self.system2 = System2(self.qwen,self.tools,self.store,runtime)
+        # Optional read-only Harness route, never a new tool authority/server.
+        self.harness = None
+        if runtime.get("harness_enabled", False):
+            model = cfg["qwen"]["model"] or cfg["qwen"]["expected_model"]
+            try:
+                self.harness = LocalHarness(
+                    self.supervisor.url if hasattr(self.supervisor, "url") else cfg["qwen"]["url"],
+                    model, timeout=runtime["harness_timeout_seconds"])
+            except HarnessUnavailable:
+                LOG.warning("Safe harness unavailable; using legacy Qwen path")
         if not runtime.get("telemetry",False):
             import os
             os.environ.setdefault("NEEDLE_TELEMETRY","0")
@@ -93,6 +104,32 @@ class Alfred:
     def reason(self, text, allow_actions=True):
         if not self.cfg["qwen"]["enabled"]:
             return {"message":"Qwen System 2 is disabled","results":[]}
+        # The Harness only proposes; Python System2 remains the sole execution
+        # and local approval authority. A failed SDK inference may safely fall
+        # back BEFORE any tool is handed to System2. Never wrap execution in
+        # that fallback handler: a partially completed action is not retryable.
+        if self.harness is not None and self.session_id is not None:
+            try:
+                self.supervisor.ensure_running()  # existing model service only
+                if not allow_actions:
+                    return self.harness.run(text, self.session_id)
+                proposed = self.harness.plan(
+                    text, self.session_id, tools=TOOL_SCHEMAS,
+                    allowed_services=self.tools.services,
+                    named_tasks=self.tools.tasks.keys(),
+                    max_steps=self.cfg["runtime"]["max_plan_steps"])
+            except (HarnessUnavailable, OSError, TimeoutError, RuntimeError):
+                LOG.warning("Harness inference unavailable before execution; falling back to System2")
+                return self.system2.reason(text, allow_actions=allow_actions)
+            # Invalid, spoofed or malformed SDK plans are a hard rejection,
+            # not a second chance to reinterpret their action-bearing text.
+            message, steps, save_as = parse_plan(
+                proposed, text, self.tools,
+                self.cfg["runtime"]["max_plan_steps"])
+            # Deliberately OUTSIDE the retry block. If a tool runs and then
+            # raises, the caller reports failure without a second execution.
+            return self.system2.execute_or_stage(
+                steps, message, save_as, allow_actions=True)
         return self.system2.reason(text,allow_actions=allow_actions)
 
     def _start_task(self, source, input_chars):
@@ -285,6 +322,7 @@ class Alfred:
         # Stop startup/restart attempts before waiting for the watchdog.
         for component, action in (
             ("audio capture", self.audio.close),
+            ("harness subprocess", self.harness.close if self.harness else lambda: None),
             ("inference backend", self.supervisor.close),
             ("task and speech subprocesses", self.processes.close),
             ("scheduler", self.scheduler.stop),

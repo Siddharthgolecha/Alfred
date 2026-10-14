@@ -31,7 +31,8 @@ DEFAULT = {
         "needle_confidence_floor": 0.7, "max_plan_steps": 5,
         "approval_ttl_seconds": 180,
         "tts": False, "voice_alerts": False, "telemetry": False,
-        "cognitive_diagnostics": False
+        "cognitive_diagnostics": False,
+        "harness_enabled": False, "harness_timeout_seconds": 45
     }
 }
 
@@ -111,6 +112,10 @@ def load_config(path=None):
         raise ValueError("qwen.ctx_size invalid")
     if not 10 <= int(q["supervisor_poll_seconds"]) <= 3600:
         raise ValueError("qwen.supervisor_poll_seconds must be 10..3600")
+    if type(cfg["runtime"]["harness_enabled"]) is not bool:
+        raise ValueError("harness_enabled must be a boolean")
+    if type(cfg["runtime"]["harness_timeout_seconds"]) is not int or not 5 <= cfg["runtime"]["harness_timeout_seconds"] <= 120:
+        raise ValueError("harness_timeout_seconds must be 5..120")
     if type(cfg["runtime"]["cognitive_diagnostics"]) is not bool:
         raise ValueError("cognitive_diagnostics must be a boolean")
     if not 0.0 < float(cfg["runtime"]["needle_confidence_floor"]) <= 1.0:
