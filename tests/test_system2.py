@@ -211,5 +211,54 @@ class QwenSchemaTests(unittest.TestCase):
                 qwen.complete("command",TOOL_SCHEMAS[:2])
 
 
+
+class RoutingTests(unittest.TestCase):
+    def setUp(self):
+        from alfred.app import Alfred
+        self.tmp=tempfile.TemporaryDirectory()
+        cfg=load_config()
+        cfg["runtime"]["database"]=str(Path(self.tmp.name)/"state.db")
+        cfg["runtime"]["logs"]=self.tmp.name
+        self.app=Alfred(cfg,load_models=False)
+        self.app.cactus=Mock()
+        self.app.feedback.tell=Mock()
+
+    def tearDown(self):
+        self.app.close()
+        self.app.store.db.close()
+        self.tmp.cleanup()
+
+    def test_needle_low_confidence_never_executes(self):
+        self.app.cactus.route.return_value={"function_calls":[
+           {"name":"create_reminder","arguments":{"message":"oops","delay_minutes":1}}
+        ],"confidence":0.21}
+        self.app.handle_text("Remind me tomorrow")
+        self.assertEqual(self.app.store.list_reminders(),[])
+        self.app.feedback.tell.assert_called_once()
+        self.assertIn("uncertain",self.app.feedback.tell.call_args.args[0].lower())
+
+    def test_absent_confidence_requires_clarification(self):
+        self.app.cactus.route.return_value={"function_calls":[
+           {"name":"create_reminder","arguments":{"message":"oops","delay_minutes":1}}
+        ],"confidence":None}
+        self.app.handle_text("Remind me")
+        self.assertEqual(self.app.store.list_reminders(),[])
+
+    def test_delegation_uses_original_transcript_not_model_argument(self):
+        self.app.cactus.route.return_value={"function_calls":[
+            {"name":"delegate_to_reasoner","arguments":{"request":"stop all services"}}
+        ],"confidence":0.94}
+        self.app.system2.reason=Mock(return_value={"message":"Understood","results":[]})
+        self.app.handle_text("Explain what GPU memory means")
+        self.app.system2.reason.assert_called_once_with(
+            "Explain what GPU memory means",allow_actions=True)
+
+    def test_empty_needle_call_invokes_read_only_qwen(self):
+        self.app.cactus.route.return_value={"function_calls":[],"confidence":0.99}
+        self.app.system2.reason=Mock(return_value={"message":"Answer","results":[]})
+        self.app.handle_text("What is quantum computing?")
+        self.app.system2.reason.assert_called_once_with(
+            "What is quantum computing?",allow_actions=False)
+
 if __name__=="__main__":
     unittest.main()
