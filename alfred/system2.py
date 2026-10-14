@@ -211,8 +211,22 @@ class System2:
             raise ValueError("Call reason() with the original utterance")
         if len(calls)==1 and calls[0].get("name")=="run_workflow":
             workflow_name=calls[0].get("arguments",{}).get("name","")
-            # Snapshot the saved workflow before approval; do not fetch a
-            # potentially changed definition after the user approves.
+            # Phase 4 graph workflows have locally approved immutable digests.
+            # Stage the digest in the existing one-shot trusted CLI approval,
+            # never as a remotely executable tool argument.
+            try:
+                entry=self.tools.workflow_engine.get(workflow_name)
+            except ValueError:
+                entry=None
+            if entry is not None:
+                item={"tool":"run_workflow","args":{
+                    "name":workflow_name,"approved_digest":entry["digest"]}}
+                proposal=self.approvals.propose([item])
+                self.store.event("workflow_approval_requested",{
+                    "id":proposal["approval_id"],"name":workflow_name})
+                return {"message":"Awaiting local approval to start graph workflow",
+                        "approval":proposal}
+            # Preserve existing Phase 2 legacy linear saved workflows.
             saved=self.store.get_workflow(workflow_name)
             return self.execute_or_stage(saved, message=f"Run saved workflow {workflow_name}",
                                          force_approval=True)
@@ -223,7 +237,21 @@ class System2:
         """Invoke ONLY from a trusted local CLI, not through the voice registry."""
         item=self.approvals.claim(approval_id)
         try:
-            steps=preflight(item["steps"],self.tools,self.cfg.get("max_plan_steps",5))
+            requested=item["steps"]
+            if (item["save_as"] is None and len(requested)==1 and
+                requested[0].get("tool")=="run_workflow" and
+                isinstance(requested[0].get("args"),dict) and
+                "approved_digest" in requested[0]["args"]):
+                meta=requested[0]["args"]
+                if set(meta)!={"name","approved_digest"}:
+                    raise ValueError("Unrecognized graph approval metadata")
+                graph=self.tools.workflow_engine.get(meta["name"])
+                if graph["digest"]!=meta["approved_digest"]:
+                    raise ValueError("Workflow changed since voice approval request")
+                result=self.tools.workflow_engine.start(meta["name"])
+                self.approvals.finish(approval_id,result=result)
+                return result
+            steps=preflight(requested,self.tools,self.cfg.get("max_plan_steps",5))
             if item["save_as"]:
                 # Saving is a write: the plan is not executed by saving it.
                 result=self.store.save_workflow(item["save_as"],steps)
