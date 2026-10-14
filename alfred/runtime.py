@@ -278,6 +278,8 @@ class Tools:
         self.tasks = cfg.get("named_tasks",{})
         from .automations import Automations
         self.automations=Automations(store)
+        from .workflow_engine import WorkflowEngine
+        self.workflow_engine=WorkflowEngine(store,self)
 
     def execute(self,name,args,from_plan=False):
         validate(name,args,allow_delegate=not from_plan)
@@ -390,3 +392,8 @@ class Scheduler:
             except Exception as exc:
                 LOG.exception("Phase 3 scheduler iteration failed: %s",exc)
                 self.store.event("automation_tick_error",{"error":str(exc)})
+            try:
+                self.tools.workflow_engine.tick()
+            except Exception as exc:
+                LOG.exception("Phase 4 workflow scheduler failed: %s",exc)
+                self.store.event("workflow_tick_error",{"error":str(exc)})
