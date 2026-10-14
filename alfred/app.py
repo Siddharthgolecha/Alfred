@@ -44,6 +44,9 @@ class Alfred:
         self.audio = AudioManager(cfg["audio"])
         self.supervisor = LlamaSupervisor(cfg["qwen"],runtime["logs"])
         self.qwen = Qwen(cfg["qwen"],self.supervisor)
+        if not runtime.get("telemetry",False):
+            import os
+            os.environ.setdefault("NEEDLE_TELEMETRY","0")
         self.cactus = Cactus(TOOL_SCHEMAS) if load_models else None
         self.scheduler = Scheduler(self.store,self.tools,self._remind)
 
