@@ -60,6 +60,19 @@ jobs:
           python -m pip install --disable-pip-version-check "pydantic>=2.12,<3"
           python -m pip install --no-deps /tmp/alfred-harness-wheels/deepseek_harness_runtime_bin-0.1.5rc1-py3-none-manylinux_2_28_x86_64.whl
           python -m pip install --no-deps /tmp/alfred-harness-wheels/deepseek_harness_sdk-0.1.5rc1-py3-none-any.whl
+      - name: Verify Alfred wheel carries safe Cordis overlay
+        run: |
+          python -m pip wheel --no-deps -w /tmp/alfred-harness-wheels .
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+          wheels=list(Path("/tmp/alfred-harness-wheels").glob("alfred_jetson-*.whl"))
+          assert len(wheels)==1, wheels
+          with zipfile.ZipFile(wheels[0]) as z:
+              assert "alfred/cognitive/alfred_safe.patch.yml" in z.namelist(), (
+                  "Wheel missing mandatory security overlay")
+          print("Installed-wheel Cordis overlay presence verified")
+          PY
       - name: Genuine SDK Cordis runtime and local stub-model smoke
         env:
           PYTHONPATH: .
