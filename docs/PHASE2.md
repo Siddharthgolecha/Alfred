@@ -6,10 +6,11 @@ Phase 1 (Bluetooth/direct capture, Whistle, Needle, local llama-server, basic to
 
 1. **Needle remains System 1.** Simple and explicit read-only operations or reminders can execute immediately via Python. All other actions use the shared \`System2\` preflight and approval policy.
 2. **Qwen is System 2.** For complex commands, Needle delegates, or an unsupported simple intent may be answered read-only. Qwen receives actual JSON tool parameter schemas *and* configured approved service/task identifiers. It generates JSON plans through llama.cpp \`response_format.type=json_schema\`.
-3. **Python owns side effects.** Model plans are inert data. Every step undergoes strict allowlist checks, valid argument types and values, safe condition references and service/task permissions *before executing any step*. Tools always execute within the existing user privileges; no arbitrary shell execution.
-4. **Local authorization for sensitive writes.** Sensitive actions are staged as pending proposals in SQLite. The user must approve them through a terminal on the Jetson using \`alfred --approve <ID>\`, or reject using \`--reject <ID>\`. The approval CLI is deliberately absent from the model's tool schema and is **never** exposed as a voice command. Default expiry is 180 seconds; approval is single-use.
-5. **Default offline-first.** The Qwen server stays loopback-only and is adopted or started as in Phase 1. A Qwen failure must not prevent Needle's basic operations.
-6. **Data minimization.** Raw mic audio and plaintext transcripts are not saved by default. Pending proposals store the step arguments until acted on or expired; these may contain personal text (such as reminder content). Keep the local SQLite directory private.
+3. **Grounded follow-up explanations.** For explicitly explanatory requests, Qwen can take a second read-only pass over the completed diagnostic tool results. That pass returns a bounded answer string only: no tools are available, and no side effects can be triggered by the explanation.
+4. **Python owns side effects.** Model plans are inert data. Every step undergoes strict allowlist checks, valid argument types and values, safe condition references and service/task permissions *before executing any step*. Tools always execute within the existing user privileges; no arbitrary shell execution.
+5. **Local authorization for sensitive writes.** Sensitive actions are staged as pending proposals in SQLite. The user must approve them through a terminal on the Jetson using \`alfred --approve <ID>\`, or reject using \`--reject <ID>\`. The approval CLI is deliberately absent from the model's tool schema and is **never** exposed as a voice command. Default expiry is 180 seconds; approval is single-use.
+6. **Default offline-first.** The Qwen server stays loopback-only and is adopted or started as in Phase 1. A Qwen failure must not prevent Needle's basic operations.
+7. **Data minimization.** Raw mic audio and plaintext transcripts are not saved by default. Pending proposals store the step arguments until acted on or expired; these may contain personal text (such as reminder content). Keep the local SQLite directory private.
 
 ## Permission matrix
 
@@ -26,6 +27,8 @@ Phase 1 (Bluetooth/direct capture, Whistle, Needle, local llama-server, basic to
 | Save a Qwen-generated workflow | No | Required |
 
 When Needle returns no supported calls, Qwen may answer in *read-only mode*. If Qwen suggests a mutating action in that mode, Alfred refuses it instead of silently removing that step and falsely announcing success.
+
+Needle confidence defaults to 0.7 for direct calls. Uncalibrated (missing) or lower-confidence action selections are refused with a request to repeat or clarify; the threshold is adjustable in config after real Jetson evaluations.
 
 ## Local commands
 
