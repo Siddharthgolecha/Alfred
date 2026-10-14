@@ -156,7 +156,7 @@ class MeetingOutputTests(GuardedStorageTests):
         self.assertIn("QR is handoff metadata",manifest["note"])
 
     def test_pdf_path_escape_blocked(self):
-        outside=self.root/"elsewhere"
+        outside=self.root.parent/("outside-"+self.root.name)
         with self.assertRaises(StorageSafetyError):
             save_meeting_pdf(self.guard,outside,example_minutes(),[])
 
