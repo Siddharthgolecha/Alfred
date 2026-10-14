@@ -14,7 +14,7 @@ DEFAULT = {
         "read_timeout_seconds": 5
     },
     "qwen": {
-        "backend": "auto", "url": "http://127.0.0.1:8080", "binary": "",
+        "backend": "auto", "url": "", "binary": "",
         "model": "", "model_path": "", "expected_model": "Qwen3.5-4B",
         "ctx_size": 4096, "gpu_layers": 99, "startup_timeout_seconds": 120,
         "max_tokens": 500, "enabled": True, "supervisor_poll_seconds": 30
@@ -50,14 +50,16 @@ def load_config(path=None):
     q["binary"] = os.environ.get("ALFRED_QWEN_BINARY",
                                 os.environ.get("ALFRED_LLAMA_SERVER", q["binary"]))
     q["model"] = os.environ.get("ALFRED_QWEN_MODEL", q["model"])
-    q["backend"] = os.environ.get("ALFRED_QWEN_BACKEND", q["backend"]).lower().replace("-", "_")
+    q["backend"] = (os.environ.get("ALFRED_QWEN_BACKEND", q["backend"])
+                    .lower().replace("-", "_").replace(".", "_"))
+    q["backend"] = {"lmstudio": "lm_studio", "lms": "lm_studio"}.get(q["backend"], q["backend"])
     if q["backend"] not in ("auto", "llama_cpp", "llama_server", "ollama", "lm_studio"):
         raise ValueError("qwen.backend must be auto/llama_cpp/llama_server/ollama/lm_studio")
     # A binary (or URL port) can select the provider without extra configuration.
     from .backends import backend_kind, DEFAULT_PORTS
     selected = backend_kind(q)
     explicit_url = (
-        bool(path and "url" in json.loads(Path(path).read_text(encoding="utf-8")).get("qwen", {}))
+        bool(path and json.loads(Path(path).read_text(encoding="utf-8")).get("qwen", {}).get("url"))
         or "ALFRED_QWEN_URL" in os.environ or "ALFRED_LLAMA_URL" in os.environ
     )
     default_url = f"http://127.0.0.1:{DEFAULT_PORTS[selected]}"

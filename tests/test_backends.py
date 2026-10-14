@@ -29,6 +29,21 @@ class BackendConfigTests(unittest.TestCase):
         self.assertEqual(backend_kind(q), "llama_server")
         self.assertEqual(q["url"], "http://127.0.0.1:8888")
 
+    def test_provider_selection_works_with_unset_example_url(self):
+        example = json.loads((Path(__file__).parent.parent / "config.example.json").read_text())
+        example["qwen"]["backend"] = "ollama"
+        example["qwen"]["model"] = "qwen3.5:4b"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps(example))
+            qwen = load_config(path)["qwen"]
+        self.assertEqual(qwen["url"], "http://127.0.0.1:11434")
+        self.assertEqual(backend_kind(qwen), "ollama")
+
+    def test_backend_aliases(self):
+        self.assertEqual(self._load({"backend": "llama.cpp"})["backend"], "llama_cpp")
+        self.assertEqual(self._load({"backend": "lm-studio"})["backend"], "lm_studio")
+
     def test_url_and_binary_inference(self):
         self.assertEqual(backend_kind(self._load({"binary": "ollama"})), "ollama")
         self.assertEqual(self._load({"binary": "ollama"})["url"], "http://127.0.0.1:11434")

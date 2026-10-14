@@ -26,7 +26,8 @@ DEFAULT_BINARIES = {"llama_cpp": "llama", "llama_server": "llama-server",
 
 def backend_kind(cfg):
     """Resolve explicit type, executable/path, or well-known loopback port."""
-    choice = str(cfg.get("backend", "auto")).lower().replace("-", "_")
+    choice = str(cfg.get("backend", "auto")).lower().replace("-", "_").replace(".", "_")
+    choice = {"lmstudio": "lm_studio", "lms": "lm_studio"}.get(choice, choice)
     if choice != "auto":
         if choice not in DEFAULT_PORTS:
             raise ValueError(f"Unsupported inference backend: {choice}")
@@ -136,7 +137,9 @@ class ModelSupervisor:
             # of its repo:quant reference; only accept a matching single model.
             if (self.backend in ("llama_cpp", "llama_server") and
                     len(available) == 1 and expected and
-                    _canonical(expected) in _canonical(available[0])):
+                    _canonical(expected) in _canonical(available[0]) and
+                    (":" not in requested or _canonical(requested.rsplit(":", 1)[-1])
+                     in _canonical(available[0]))):
                 return available[0]
             raise RuntimeError(f"{self.backend}: model '{requested}' is unavailable; served models: {available}. "
                                "Install/load the model or adjust qwen.model")
