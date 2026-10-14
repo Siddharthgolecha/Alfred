@@ -33,7 +33,8 @@ DEFAULT = {
         "tts": False, "voice_alerts": False, "telemetry": False,
         "cognitive_diagnostics": False,
         "harness_enabled": False, "harness_timeout_seconds": 45,
-        "needle_loop_enabled": False, "needle_max_decisions": 3,
+        "needle_loop_enabled": False, "escalation_enabled": False,
+        "needle_max_decisions": 3,
         "needle_max_tools": 3, "needle_context_ttl_seconds": 120
     }
 }
@@ -115,6 +116,8 @@ def load_config(path=None):
     if not 10 <= int(q["supervisor_poll_seconds"]) <= 3600:
         raise ValueError("qwen.supervisor_poll_seconds must be 10..3600")
     ncfg = cfg["runtime"]
+    if type(ncfg["escalation_enabled"]) is not bool:
+        raise ValueError("escalation_enabled must be a boolean")
     if type(ncfg["needle_loop_enabled"]) is not bool:
         raise ValueError("needle_loop_enabled must be a boolean")
     if type(ncfg["needle_max_decisions"]) is not int or not 1 <= ncfg["needle_max_decisions"] <= 3:
