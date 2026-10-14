@@ -90,13 +90,25 @@ class Alfred:
             response=self.cactus.route(text)
             calls=response.get("function_calls") or []
             confidence=response.get("confidence")
-            if response.get("suppressed_calls") or response.get("validation",{}).get("ungrounded"):
+            validation = response.get("validation") or {}
+            if response.get("suppressed_calls") or (
+                isinstance(validation, dict) and validation.get("ungrounded")
+            ):
                 self.feedback.tell("I couldn't safely determine that command. Please clarify.")
                 return
             floor=float(self.cfg["runtime"]["needle_confidence_floor"])
-            if calls and confidence is not None and confidence < floor:
+            if calls and (confidence is None or not isinstance(confidence,(float,int))
+                          or confidence < floor):
+                self.store.event("route_uncertain",{
+                    "confidence": confidence, "call_count": len(calls)})
                 self.feedback.tell("Command uncertain. Please repeat or be more specific.")
                 return
+            self.store.event("route", {
+                "model":"needle3", "confidence":confidence,
+                "call_count":len(calls),
+                "delegated":bool(not calls or (len(calls)==1 and
+                    calls[0].get("name")=="delegate_to_reasoner"))
+            })
             if not calls:
                 # An unsupported Needle command may still be an ordinary Q&A question.
                 # Qwen here is strictly read-only, regardless of what it proposes.
