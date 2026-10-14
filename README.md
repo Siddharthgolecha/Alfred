@@ -183,11 +183,16 @@ For safety and privacy, raw audio is not saved and the database logs **transcrip
 ## Graceful shutdown
 
 An interactive **Ctrl+C** or systemd **SIGTERM** stops the audio capture subprocess,
-reminder/workflow threads, model watchdog, and **only the inference process Alfred
-started**. Alfred kills its own llama.cpp/llama-server/Ollama process group if a
+in-progress approved named-task/TTS subprocesses, reminder/workflow threads,
+model watchdog, and **only the inference process Alfred started**. Alfred kills its own llama.cpp/llama-server/Ollama process group if a
 graceful stop times out. A pre-existing server discovered at the same endpoint is
 **never terminated**. LM Studio is stopped via `lms server stop` only if Alfred
 started it, not if it was adopted.
+
+After the wake word is authorized, saying **"Alfred, close"** or **"Hey Alfred,
+stop listening"** shuts down the voice agent locally, without asking Needle or
+Qwen to execute a command. Background speech saying "close" alone is ignored
+when wake-word detection is enabled.
 
 To close an already-running Alfred voice instance (and an independently started
 `--scheduler-only` instance) from another terminal, run:
