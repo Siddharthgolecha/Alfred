@@ -242,6 +242,13 @@ def main(argv=None):
                        help="Execute up to three ready graph workflow steps")
     group.add_argument("--workflow-reconcile",type=int,metavar="RUN_ID",
                        help="Explicitly mark an uncertain in-flight step interrupted")
+    group.add_argument("--workflow-schedule",metavar="NAME:MINUTES",
+                       help="Schedule a locally approved read-only graph on an interval")
+    group.add_argument("--workflow-triggers",action="store_true",
+                       help="List recurring read-only workflow triggers")
+    group.add_argument("--workflow-trigger-pause",type=int,metavar="TRIGGER_ID")
+    group.add_argument("--workflow-trigger-resume",type=int,metavar="TRIGGER_ID")
+    group.add_argument("--workflow-trigger-cancel",type=int,metavar="TRIGGER_ID")
 
     args=parser.parse_args(argv)
     path=Path(args.config)
@@ -260,7 +267,11 @@ def main(argv=None):
     if (args.workflow_draft or args.workflow_approve or args.workflow_list
             or args.workflow_start or args.workflow_runs
             or args.workflow_status is not None or args.workflow_cancel is not None
-            or args.workflow_tick or args.workflow_reconcile is not None):
+            or args.workflow_tick or args.workflow_reconcile is not None
+            or args.workflow_schedule or args.workflow_triggers
+            or args.workflow_trigger_pause is not None
+            or args.workflow_trigger_resume is not None
+            or args.workflow_trigger_cancel is not None):
         app=Alfred(cfg,load_models=False)
         try:
             engine=app.tools.workflow_engine
@@ -284,6 +295,19 @@ def main(argv=None):
                 result=engine.cancel(args.workflow_cancel)
             elif args.workflow_reconcile is not None:
                 result=engine.reconcile_interrupted(args.workflow_reconcile)
+            elif args.workflow_schedule:
+                parts=args.workflow_schedule.rsplit(":",1)
+                if len(parts)!=2:
+                    raise ValueError("Workflow schedule format must be NAME:MINUTES")
+                result=engine.schedule_readonly(parts[0],int(parts[1]))
+            elif args.workflow_triggers:
+                result=engine.list_triggers()
+            elif args.workflow_trigger_pause is not None:
+                result=engine.change_trigger(args.workflow_trigger_pause,"pause")
+            elif args.workflow_trigger_resume is not None:
+                result=engine.change_trigger(args.workflow_trigger_resume,"resume")
+            elif args.workflow_trigger_cancel is not None:
+                result=engine.change_trigger(args.workflow_trigger_cancel,"cancel")
             else:
                 result=engine.tick()
             print(json.dumps(result,indent=2,default=str))
