@@ -18,7 +18,7 @@ from .console import TranscriptDisplay
 from .routing import adjust_status_calls
 from .config import data_path, load_config
 from .models import Cactus, LlamaSupervisor, Qwen
-from .lifecycle import ShutdownSocket, request_close
+from .lifecycle import ChildProcesses, ShutdownSocket, request_close
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools
 from .system2 import System2
 from .wakeword import WakeWordGate, AcousticWakeDetector
@@ -26,8 +26,9 @@ from .wakeword import WakeWordGate, AcousticWakeDetector
 LOG = logging.getLogger(__name__)
 
 class Feedback:
-    def __init__(self,enable_tts=False):
+    def __init__(self,enable_tts=False,processes=None):
         self.tts = enable_tts
+        self.processes = processes
         self.speaking = threading.Event()
 
     def tell(self,message):
@@ -35,7 +36,8 @@ class Feedback:
         if self.tts and shutil.which("spd-say"):
             self.speaking.set()
             try:
-                subprocess.run(["spd-say","-w",str(message)[:300]],timeout=25,check=False)
+                runner = self.processes.run if self.processes else subprocess.run
+                runner(["spd-say","-w",str(message)[:300]],timeout=25,check=False)
             except (OSError,subprocess.TimeoutExpired) as exc:
                 LOG.warning("Speech output failed: %s",exc)
             finally:
@@ -46,8 +48,9 @@ class Alfred:
         self.cfg = cfg
         runtime = cfg["runtime"]
         self.store = Store(runtime["database"])
-        self.tools = Tools(runtime,self.store)
-        self.feedback = Feedback(runtime["tts"])
+        self.processes = ChildProcesses()
+        self.tools = Tools(runtime,self.store,processes=self.processes)
+        self.feedback = Feedback(runtime["tts"],processes=self.processes)
         self.audio = AudioManager(cfg["audio"])
         self.wake_word = WakeWordGate(cfg["wake_word"])
         self.supervisor = LlamaSupervisor(cfg["qwen"],runtime["logs"])
@@ -211,6 +214,7 @@ class Alfred:
         for component, action in (
             ("audio capture", self.audio.close),
             ("inference backend", self.supervisor.close),
+            ("task and speech subprocesses", self.processes.close),
             ("scheduler", self.scheduler.stop),
         ):
             try:
