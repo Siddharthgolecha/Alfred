@@ -9,7 +9,9 @@
     "speech_rms": 0.013,
     "end_silence_frames": 2,
     "max_utterance_seconds": 25,
-    "auto_fallback": true
+    "auto_fallback": true,
+    "probe_timeout_seconds": 5,
+    "read_timeout_seconds": 5
   },
   "qwen": {
     "url": "http://127.0.0.1:8080",
