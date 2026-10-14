@@ -105,6 +105,23 @@ class Phase3Tests(unittest.TestCase):
         with self.assertRaises(ValueError):
             next_daily_time("09:00","Not/A_Real_Zone")
 
+    def test_cancel_discards_pending_undelivered_notification(self):
+        job=self.auto.remind_daily("Silenced", "10:00", "Asia/Kolkata")
+        self._due(job["id"])
+        # Simulate delivery failure; outbox stores a pending retry.
+        self.auto.tick(self.tools,lambda event: (_ for _ in ()).throw(RuntimeError("offline")))
+        with self.store.lock:
+            self.assertEqual(self.store.db.execute(
+                "SELECT count(*) FROM automation_outbox WHERE status='pending'"
+                ).fetchone()[0],1)
+        self.assertTrue(self.auto.change(job["id"],"cancel")["changed"])
+        with self.store.lock:
+            self.assertEqual(self.store.db.execute(
+                "SELECT count(*) FROM automation_outbox WHERE status='pending'"
+                ).fetchone()[0],0)
+        self.auto.tick(self.tools,self.deliveries.append)
+        self.assertEqual(self.deliveries,[])
+
     def test_daily_pause_resume_cancel_and_list(self):
         job=self.auto.remind_daily("Tea","18:30","Asia/Kolkata")
         id=job["id"]
