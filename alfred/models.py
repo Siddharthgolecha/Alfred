@@ -128,16 +128,21 @@ class Qwen:
         self.supervisor.ensure_running()
         model = self.supervisor.model_id()
         prompt = (
-            "You are Alfred's local System 2 planner. Reply ONLY with JSON: "
-            '{"message":"short explanation","steps":[{"tool":"tool_name","args":{}}]}. '
-             "Use zero steps for a question with no necessary tools. "
-            "For actions use only exact tools from this list: " + ", ".join(tool_names) + ". "
-            "Arguments must match the tool schemas implemented by Python. "
-            "Never guess service names, task names, or reminder ids; ask for clarification in message. "
-            "Never produce shell commands or Python code. Maximum five steps. "
-            "Examples: {\"message\":\"Checking status\",\"steps\":[{\"tool\":\"get_system_status\",\"args\":{}}]}. "
-            "For conditional tasks requiring persistent monitoring, say the feature is unsupported "
-            "unless a declared scheduling tool can express it."
+            "You are Alfred's local System 2 planner. Output only a JSON object. "
+            "Schema: {\\\"message\\\": \\\"short result or clarification\\\", "
+            "\\\"steps\\\": [{\\\"tool\\\": \\\"allowlisted_tool\\\", \\\"args\\\": {}, "
+            "\\\"when\\\": {\\\"step\\\": 0, \\\"field\\\": \\\"gpu_temp_c\\\", \\\"op\\\": \\\"gt\\\", \\\"value\\\": 80}}], "
+            "\\\"save_as\\\": null}. "
+            "The when field is optional and may compare a top-level scalar result from an EARLIER step only. "
+            "Allowed condition ops: gt, gte, lt, lte, eq, neq. "
+            "If a user explicitly asks to save/create a named workflow, set save_as to its short snake_case name "
+            "and include the steps; do not execute it now. Otherwise omit save_as or set null. "
+            "For ordinary questions, place a useful answer in message and use zero steps unless actual tool data is needed. "
+            "Never invent data about the Jetson. "
+            "Only these Python tools exist: " + ", ".join(tool_names) + ". "
+            "Never hallucinate service names, task names, or numeric ids; clarify instead. "
+            "Never generate shell commands or Python code. At most five steps. "
+            "Do not create recurring conditional watches: they are not supported."
         )
         payload = {
             "messages": [{"role":"system","content":prompt},{"role":"user","content":transcript}],
