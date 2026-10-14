@@ -3,7 +3,7 @@
 Offline-first, continuous English voice automation on **NVIDIA Jetson Orin Nano 8GB** (JetPack 7.2.1 / CUDA 13.2).
 
 **Microphone → Cactus Whistle streaming STT → Cactus Needle 3 tool router → validated Python tools.**
-Needle can delegate complex commands to a **Qwen 3.5 4B Bartowski Q4_K_M GGUF** model hosted by local **llama.cpp**. The app adopts a healthy existing `llama-server`, or starts it if absent.
+Needle can delegate complex commands to a **Qwen 3.5 4B Bartowski Q4_K_M GGUF** model using **llama.cpp (`llama serve`)**, **llama-server**, **Ollama**, or **LM Studio**. Alfred adopts a compatible local server or starts the configured backend if absent.
 
 ## Phase 2 planning and approvals
 
@@ -30,7 +30,7 @@ Phase 4 introduces [approved, persistent workflow DAGs](docs/PHASE4.md), conditi
 - Strict allowlists for `systemctl --user` services and fixed named script argv; **no arbitrary shell**.
 - System diagnostics, SQLite reminders, recurring read-only status polls, Qwen multi-step plans, saved named workflows.
 - Lightweight optional local speech feedback using `spd-say`.
-- `llama-server` `/health` checking, model-id sanity check, managed startup and periodic watchdog recovery, process logging, no duplicate spawn onto an occupied port.
+- Backend-aware model discovery, local health checks and managed startup for `llama serve`, legacy `llama-server`, Ollama and LM Studio; no duplicate spawn onto an occupied port.
 
 **Not yet hardware-validated:** Bluetooth audio profile support on your particular JetPack image, the native Cactus ARM64 binaries, speed/memory on Jetson, and spoken feedback. Run the checklist below directly on the board.
 
@@ -51,7 +51,27 @@ pip install -e '.[test]'
 cp config.example.json config.json
 ```
 
-**Config:** set `qwen.model_path` to the absolute GGUF location, and `qwen.binary` to your `llama-server` executable (or put it in PATH). Example model: Bartowski **Qwen3.5-4B-Q4_K_M.gguf**. For an existing server set `qwen.url` to its local listen address (e.g. `http://127.0.0.1:8080`). The model path is required only if Alfred must start the server itself. The watchdog checks health every `qwen.supervisor_poll_seconds` (default 30) while Alfred runs. Optional environment overrides: `ALFRED_GGUF`, `ALFRED_LLAMA_SERVER`, `ALFRED_LLAMA_URL`.
+**Config:** choose `qwen.backend` = `auto` (default), `llama_cpp`, `llama_server`, `ollama`, or `lm_studio`. In auto mode, Alfred recognizes the configured `qwen.binary` name/path, or the standard Ollama/LM Studio port when no binary is specified. Set `qwen.model` to a Hugging Face `repo:quant` for `llama serve -hf`, or the exact installed model ID for Ollama/LM Studio. For GGUF files use `qwen.model_path`; symlinks into the Hugging Face cache work. `qwen.binary` can be an executable, a PATH name, or a llama.cpp build/source directory. `qwen.url` can be blank for provider defaults, or a loopback HTTP origin (no `/v1`). Blank URLs default to ports 8080 (llama.cpp/llama-server), 11434 (Ollama), or 1234 (LM Studio). All inference is local and Alfred never terminates an existing service. The watchdog polls every `qwen.supervisor_poll_seconds`. Environment overrides: `ALFRED_QWEN_BACKEND`, `ALFRED_QWEN_BINARY`, `ALFRED_QWEN_MODEL`, `ALFRED_QWEN_URL`; legacy `ALFRED_GGUF`, `ALFRED_LLAMA_SERVER`, and `ALFRED_LLAMA_URL` still work.
+
+Provider examples (only the `qwen` keys that differ):
+
+```json
+{ "qwen": { "backend": "llama_cpp", "binary": "llama", "model": "bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M" } }
+```
+
+For `llama serve -hf`, the Hugging Face model is downloaded/cached on first startup; an existing cache is reused. The exact repository/tag should match the published model. Use `model_path` instead if running strictly offline.
+
+```json
+{ "qwen": { "backend": "llama_server", "binary": "/path/to/llama.cpp/build/bin/llama-server", "model_path": "/path/to/model.gguf" } }
+```
+```json
+{ "qwen": { "backend": "ollama", "model": "qwen3.5:4b" } }
+```
+```json
+{ "qwen": { "backend": "lm_studio", "model": "your-loaded-model-id" } }
+```
+
+Ollama models must already be installed (`ollama pull <name>`); Alfred never downloads them or substitutes another model. LM Studio requires its `lms` CLI and a previously downloaded model; when starting a new server Alfred runs `lms server start` and `lms load <model> --yes`. With an existing endpoint, Alfred only adopts a model if the requested ID matches (or the default expected-model filter selects exactly one). If a port is occupied by another service or the model cannot be verified, Alfred fails rather than replacing it. `qwen.expected_model` only filters the automatic model selection when `qwen.model` is omitted.
 
 ```bash
 # Populate the native model caches before going offline:
@@ -65,8 +85,8 @@ python -m unittest discover -s tests -v
 python -m alfred --config config.json --doctor
 # Exit code 2 means no usable mic; source names by themselves are not enough.
 
-# Ensure llama.cpp is healthy; if absent, start it detached:
-python -m alfred --config config.json --ensure-llama
+# Ensure the selected backend is running (legacy --ensure-llama also works):
+python -m alfred --config config.json --ensure-backend
 
 # Try one command in text mode:
 python -m alfred --config config.json --text "Show my system status"
@@ -80,10 +100,10 @@ If using `llama.cpp` on Orin with CUDA, a typical native build is:
 ```bash
 cmake -S llama.cpp -B llama.cpp/build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=87
 cmake --build llama.cpp/build --config Release -j4
-# Set qwen.binary to the resulting llama.cpp/build/bin/llama-server
+# Set qwen.binary to the llama.cpp directory (auto-detect) or its build/bin/llama-server
 ```
 
-Start with context 4096, parallelism 1; change `qwen.gpu_layers` downward if 8GB shared RAM becomes constrained. Alfred **does not terminate** a server already running on the configured port. If that port serves a different model, it refuses Qwen requests rather than overwriting the process.
+Start with context 4096, parallelism 1; change `qwen.gpu_layers` downward if 8GB shared RAM becomes constrained. `llama serve` and `llama-server` get these GPU/context settings; Ollama and LM Studio manage their own runtime settings. For an already-running server, Alfred does not change its memory allocation or loaded models.
 
 ## Missing microphone / misleading "Built-in Audio" (bug-fix)
 
@@ -171,7 +191,7 @@ journalctl --user -u alfred -f
 - [ ] `--doctor` prints the Bluetooth and direct sources.
 - [ ] Direct mode functions with a USB/analog microphone.
 - [ ] Auto mode switches Sony → direct on disconnect, direct → Sony on reconnect.
-- [ ] `--ensure-llama` adopts an existing process or launches an absent one from the configured GGUF.
+- [ ] `--ensure-backend` adopts or starts the chosen local inference service and verifies the selected model.
 - [ ] `/v1/models` shows the intended Qwen model; `nvidia-smi` is generally not the standard Jetson monitoring method—use `tegrastats`.
 - [ ] Cactus native engine loads Needle and Whistle, and streaming transcription produces words.
 - [ ] Voice actions are routed correctly; nothing executes on pending text.
