@@ -155,6 +155,18 @@ class NeedleAgentLoop:
             "budget": "The bounded Needle task limit was reached. Please start a new request.",
             "cancelled": "The authorized task was cancelled before another tool call.",
         }
+        if observed:
+            # The *next* proposal failed, not any previously returned read.
+            # Retain the actual stop cause for audit, but disclose the
+            # completed prefix instead of disguising it as a total failure.
+            return LoopOutcome({
+                "message": "Partial results: " + words[why]
+                           + " Earlier read-only results were returned; "
+                             "no further tools were run.",
+                "results": outputs,
+                "partial": True,
+                "halt_reason": why,
+            }, tuple(accepted), why, tuple(observed))
         return LoopOutcome({"message": words[why], "results": outputs},
                            tuple(accepted), why, tuple(observed))
 
