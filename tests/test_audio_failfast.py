@@ -57,11 +57,12 @@ class SourceClassificationTests(unittest.TestCase):
         entry=dict(BUILTIN, ports=[])
         self.assertFalse(source_status(entry)[0])
 
-    def test_built_in_with_positive_port_is_candidate_not_verified(self):
+    def test_built_in_with_positive_port_not_automatically_trusted(self):
         entry=dict(BUILTIN,ports=[{"name":"analog-input-mic","available":"yes"}])
         ok,reason=source_status(entry)
-        self.assertTrue(ok)
-        self.assertIn("probe",reason)
+        self.assertFalse(ok)
+        self.assertIn("auto-trusted",reason)
+        self.assertTrue(source_status(entry,explicitly_selected=True)[0])
 
     def test_explicit_direct_source_still_needs_probe(self):
         self.cfg["mode"]="direct"
