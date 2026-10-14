@@ -161,7 +161,7 @@ class System2:
             proposal=self.approvals.propose(steps,save_as)
             self.store.event("approval_requested",{"id":proposal["approval_id"],
                          "actions":proposal["actions"]})
-            return {"message":message or "Awaiting local approval", "approval":proposal}
+            return {"message":"Awaiting local approval. "+message[:300], "approval":proposal}
         if not steps:
             return {"message":message or "No tool action required","results":[]}
         results=self.tools.run_plan(steps)
@@ -171,7 +171,9 @@ class System2:
         # Tool schemas, not just tool names, are provided to the planner.
         tool_catalog=[s for s in TOOL_SCHEMAS if s["name"] not in
                       ("delegate_to_reasoner","run_workflow")]
-        plan=self.qwen.complete(utterance,tool_catalog)
+        plan=self.qwen.complete(utterance, tool_catalog,
+                                allowed_services=self.tools.services,
+                                named_tasks=self.tools.tasks.keys())
         message,steps,save_as=parse_plan(plan,utterance,self.tools,
                                         self.cfg.get("max_plan_steps",5))
         return self.execute_or_stage(steps,message,save_as,allow_actions)
