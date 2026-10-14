@@ -177,19 +177,30 @@ class WorkflowEngine:
                     result_json TEXT, error TEXT, elapsed_ms INTEGER,
                     PRIMARY KEY(run_id,step_id));
             """)
-            # A previous process may have crashed during a side effect.
-            # Never silently replay an uncertain invocation after restart.
-            unfinished=store.db.execute(
-                "SELECT DISTINCT run_id FROM workflow_step_runs WHERE state='running'"
-            ).fetchall()
-            for row in unfinished:
-                store.db.execute("UPDATE workflow_step_runs SET state='interrupted',"
-                                 "error='Interrupted during execution; manual review required'"
-                                 " WHERE run_id=? AND state='running'",(row["run_id"],))
-                store.db.execute("UPDATE workflow_runs SET state='interrupted',"
-                                 "finished_at=?,error='Interrupted step; no automatic replay'"
-                                 " WHERE id=? AND state IN ('queued','running')",
-                                 (int(time.time()),row["run_id"]))
+            # Running work is NOT auto-replayed after restart. Explicit
+            # operator reconciliation is required; starting a second Alfred
+            # process must not mistakenly interrupt an active first process.
+
+    def reconcile_interrupted(self,runid):
+        """Explicit local CLI acknowledgement after inspecting possible effects."""
+        with self.store.lock,self.store.db:
+            run=self.store.db.execute("SELECT state FROM workflow_runs WHERE id=?",(runid,)).fetchone()
+            if run is None or run["state"] not in ("queued","running"):
+                return {"changed":False}
+            running=self.store.db.execute(
+                "SELECT step_id FROM workflow_step_runs WHERE run_id=? AND state='running'",
+                (runid,)).fetchall()
+            if not running:
+                return {"changed":False}
+            self.store.db.execute(
+                "UPDATE workflow_step_runs SET state='interrupted',"
+                "error='Interrupted during execution; inspect effects manually' "
+                "WHERE run_id=? AND state='running'",(runid,))
+            self.store.db.execute(
+                "UPDATE workflow_runs SET state='interrupted',finished_at=?,"
+                "error='Possible in-flight effect; no automatic replay' WHERE id=?",
+                (int(time.time()),runid))
+        return {"changed":True,"interrupted_steps":[r["step_id"] for r in running]}
 
     def draft(self,spec):
         valid=validate_graph(spec,self.tools)
@@ -309,6 +320,10 @@ class WorkflowEngine:
                 rows=self.store.db.execute(
                     "SELECT * FROM workflow_step_runs WHERE run_id=?",(run["id"],)).fetchall()
                 states={r["step_id"]:r for r in rows}
+                if any(r["state"]=="running" for r in rows):
+                    # Another worker may be executing. Never run another step
+                    # until the active step completes or is reconciled.
+                    continue
                 if any(r["state"] in ("failed","interrupted") for r in rows):
                     self.store.db.execute(
                         "UPDATE workflow_runs SET state='failed',finished_at=?,"
@@ -410,7 +425,5 @@ class WorkflowEngine:
             outcomes.append({"run_id":runid,"step":node["id"],"state":state,
                              "error":error})
             self.store.event("workflow_step",outcomes[-1])
-        # Completion requires a later tick after final step; acceptable
-        # since the scheduler polls every two seconds.
-        self._next() if False else None
+        # Completion is finalized on the next scheduler tick.
         return outcomes
