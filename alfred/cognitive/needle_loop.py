@@ -13,7 +13,8 @@ import re
 import time
 
 from .contracts import Decision, Observation
-from ..system2 import VOICE_ALLOWED, preflight
+from ..system2 import preflight
+from ..runtime import validate
 
 # Never feed commands, transcripts, user/tool strings or arbitrary JSON to
 # Needle as observations. A number cannot carry a prompt injection.
@@ -188,6 +189,19 @@ class NeedleAgentLoop:
             # still System2's existing concrete allowlist and plan policy.
             if any(x["name"] not in READONLY for x in calls):
                 if decisions > 1:
+                    return self._stop("unsafe", accepted, observed, outputs)
+                try:
+                    for x in calls:
+                        validate(x["name"], x.get("arguments") or {},
+                                 allow_delegate=False)
+                    # A graph workflow has its own digest-based approval path;
+                    # all other actions undergo ordinary System2 preflight.
+                    if not any(x["name"] == "run_workflow" for x in calls):
+                        preflight([{"tool":x["name"],"args":x.get("arguments") or {}}
+                                   for x in calls], self.system2.tools, self.max_tools)
+                    elif len(calls) != 1:
+                        return self._stop("unsafe", accepted, observed, outputs)
+                except (ValueError, KeyError, TypeError, PermissionError):
                     return self._stop("unsafe", accepted, observed, outputs)
                 # Preserve one-shot System2 policy, including run_workflow
                 # digest staging and approval; DO NOT expose to Needle again.
