@@ -22,8 +22,7 @@ METRICS = frozenset({
     "available", "gpu_temp_c", "uptime_seconds", "root_free_gib"
 })
 READONLY = frozenset({
-    "get_gpu_status", "get_system_status", "list_services",
-    "list_reminders", "list_schedules", "list_workflows", "list_automations",
+    "get_gpu_status", "get_system_status",
 })
 PRONOUN = re.compile(r"^\s*(?:check|show|read|get)\s+(?:it|that)(?:\s+again)?\s*[.!?]*\s*$", re.I)
 MULTISTEP = re.compile(r"\b(?:then|afterwards|after that|next|depending on|based on)\b", re.I)
@@ -43,8 +42,17 @@ class LoopOutcome:
     observed: tuple
 
 
+def _arguments(call):
+    """Missing arguments means no-argument tool; a PRESENT value must be a dict."""
+    if "arguments" not in call:
+        return {}
+    if type(call["arguments"]) is not dict:
+        raise ValueError("Malformed Needle arguments")
+    return call["arguments"]
+
+
 def _fingerprint(call):
-    return json.dumps({"name": call["name"], "arguments": call.get("arguments") or {}},
+    return json.dumps({"name": call["name"], "arguments": _arguments(call)},
                       sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
@@ -111,7 +119,8 @@ class NeedleAgentLoop:
             raise ValueError("needle decisions must be 1..3")
         if type(max_tools) is not int or not 1 <= max_tools <= 3:
             raise ValueError("needle tool calls must be 1..3")
-        if type(confidence_floor) not in (float, int) or not 0 < confidence_floor <= 1:
+        if (type(confidence_floor) not in (float, int)
+                or not math.isfinite(confidence_floor) or not 0 < confidence_floor <= 1):
             raise ValueError("invalid confidence floor")
         self.system2 = system2
         self.feedback = feedback
@@ -170,12 +179,14 @@ class NeedleAgentLoop:
                                     "results": outputs}, tuple(accepted), "completed", tuple(observed))
             confidence = response.get("confidence")
             if (type(confidence) not in (float, int)
-                    or not math.isfinite(confidence) or confidence < self.floor):
+                    or not math.isfinite(confidence)
+                    or not self.floor <= confidence <= 1):
                 return self._stop("uncertain", accepted, observed, outputs)
             if len(accepted) + len(calls) > self.max_tools:
                 return self._stop("budget", accepted, observed, outputs)
             if not all(isinstance(x, dict) and type(x.get("name")) is str and
-                       isinstance(x.get("arguments") or {}, dict) for x in calls):
+                       ("arguments" not in x or type(x["arguments"]) is dict)
+                       for x in calls):
                 return self._stop("unsafe", accepted, observed, outputs)
             try:
                 signatures = [_fingerprint(x) for x in calls]
@@ -192,12 +203,12 @@ class NeedleAgentLoop:
                     return self._stop("unsafe", accepted, observed, outputs)
                 try:
                     for x in calls:
-                        validate(x["name"], x.get("arguments") or {},
+                        validate(x["name"], _arguments(x),
                                  allow_delegate=False)
                     # A graph workflow has its own digest-based approval path;
                     # all other actions undergo ordinary System2 preflight.
                     if not any(x["name"] == "run_workflow" for x in calls):
-                        preflight([{"tool":x["name"],"args":x.get("arguments") or {}}
+                        preflight([{"tool":x["name"],"args":_arguments(x)}
                                    for x in calls], self.system2.tools, self.max_tools)
                     elif len(calls) != 1:
                         return self._stop("unsafe", accepted, observed, outputs)
@@ -209,7 +220,7 @@ class NeedleAgentLoop:
                 accepted.extend(calls)
                 return LoopOutcome(result, tuple(accepted), "protected", tuple(observed))
             try:
-                preflight([{"tool": x["name"], "args": x.get("arguments") or {}}
+                preflight([{"tool": x["name"], "args": _arguments(x)}
                            for x in calls], self.system2.tools, self.max_tools)
             except (ValueError, PermissionError, KeyError, TypeError):
                 return self._stop("unsafe", accepted, observed, outputs)
@@ -225,11 +236,20 @@ class NeedleAgentLoop:
             for call in calls:
                 self._record(Observation(call["name"], "returned"))
                 observed.append(call["name"])
-            if not permit_feedback:
+            if not permit_feedback or not all(call["name"] in READONLY for call in calls):
+                # Safe but non-chainable listings execute once through System2
+                # and do not feed opaque lists/objects into the model.
                 return LoopOutcome({"message":result.get("message","Completed"),
                                     "results":outputs}, tuple(accepted), "completed", tuple(observed))
             if decisions >= self.max_decisions or len(accepted) >= self.max_tools:
-                return self._stop("budget", accepted, observed, outputs)
+                # A validated tool has ALREADY succeeded. Report it truthfully
+                # as partial; never mark execution as a rejected/failed task.
+                return LoopOutcome({
+                    "message": "Partial results: validated read-only tools ran, "
+                               "but the bounded feedback limit was reached. "
+                               "Any further requested checks remain unverified.",
+                    "results": outputs, "partial": True},
+                    tuple(accepted), "partial", tuple(observed))
             if self.cancelled():
                 return self._stop("cancelled", accepted, observed, outputs)
             # Model sees ONLY bounded scalar telemetry; arbitrary result strings
