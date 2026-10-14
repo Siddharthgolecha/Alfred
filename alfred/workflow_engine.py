@@ -176,6 +176,12 @@ class WorkflowEngine:
                     retry_at INTEGER NOT NULL DEFAULT 0,
                     result_json TEXT, error TEXT, elapsed_ms INTEGER,
                     PRIMARY KEY(run_id,step_id));
+                CREATE TABLE IF NOT EXISTS workflow_triggers(
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL, digest TEXT NOT NULL,
+                    interval_minutes INTEGER NOT NULL, next_at INTEGER NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('active','paused','cancelled')),
+                    last_run_id INTEGER);
             """)
             # Running work is NOT auto-replayed after restart. Explicit
             # operator reconciliation is required; starting a second Alfred
@@ -273,6 +279,112 @@ class WorkflowEngine:
                 [(runid,node["id"]) for node in spec["steps"]])
         self.store.event("workflow_started",{"run_id":runid,"name":name})
         return {"run_id":runid,"name":name,"state":"queued"}
+
+    def schedule_readonly(self,name,interval_minutes):
+        """Only explicitly approved, strictly read-only graphs may recur."""
+        if type(interval_minutes) is not int or not 1<=interval_minutes<=10080:
+            raise ValueError("Workflow trigger interval must be 1..10080 minutes")
+        entry=self.get(name)
+        if any(n["tool"] not in READ_ONLY for n in entry["spec"]["steps"]):
+            raise PermissionError("Recurring graphs must contain read-only tools only")
+        now=int(time.time())
+        with self.store.lock,self.store.db:
+            current=self.store.db.execute(
+                "SELECT digest,state FROM workflow_graphs WHERE name=?",(name,)).fetchone()
+            if current["digest"]!=entry["digest"] or current["state"]!="approved":
+                raise ValueError("Graph changed while scheduling")
+            cur=self.store.db.execute(
+                "INSERT INTO workflow_triggers(name,digest,interval_minutes,next_at,state)"
+                " VALUES(?,?,?,?,'active')",
+                (name,entry["digest"],interval_minutes,now+interval_minutes*60))
+        return {"trigger_id":cur.lastrowid,"name":name,"interval_minutes":interval_minutes}
+
+    def list_triggers(self):
+        with self.store.lock:
+            rows=self.store.db.execute(
+                "SELECT id,name,digest,interval_minutes,next_at,state,last_run_id"
+                " FROM workflow_triggers ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+    def change_trigger(self,trigger_id,action):
+        if type(trigger_id) is not int or trigger_id<1 or action not in ("pause","resume","cancel"):
+            raise ValueError("Invalid trigger ID or action")
+        start={"pause":"active","resume":"paused","cancel":"active"}[action]
+        finish={"pause":"paused","resume":"active","cancel":"cancelled"}[action]
+        with self.store.lock,self.store.db:
+            row=self.store.db.execute(
+                "SELECT state,interval_minutes FROM workflow_triggers WHERE id=?",
+                (trigger_id,)).fetchone()
+            if row is None:
+                return {"changed":False}
+            if action=="cancel" and row["state"]=="paused":
+                start="paused"
+            if row["state"]!=start:
+                return {"changed":False}
+            next_at=int(time.time())+row["interval_minutes"]*60 if action=="resume" else None
+            if next_at is None:
+                cur=self.store.db.execute(
+                    "UPDATE workflow_triggers SET state=? WHERE id=? AND state=?",
+                    (finish,trigger_id,start))
+            else:
+                cur=self.store.db.execute(
+                    "UPDATE workflow_triggers SET state=?,next_at=? WHERE id=? AND state=?",
+                    (finish,next_at,trigger_id,start))
+        return {"changed":bool(cur.rowcount),"state":finish}
+
+    def _enqueue_due_triggers(self):
+        """Transactional trigger claim, version pinning, and catch-up coalescing."""
+        now=int(time.time())
+        with self.store.lock,self.store.db:
+            rows=self.store.db.execute(
+                "SELECT * FROM workflow_triggers WHERE state='active' AND next_at<=?"
+                " ORDER BY next_at,id LIMIT 12",(now,)).fetchall()
+            for trig in rows:
+                next_at=now+trig["interval_minutes"]*60
+                cur=self.store.db.execute(
+                    "UPDATE workflow_triggers SET next_at=? WHERE id=?"
+                    " AND state='active' AND next_at=?",
+                    (next_at,trig["id"],trig["next_at"]))
+                if not cur.rowcount:
+                    continue
+                record=self.store.db.execute(
+                    "SELECT spec_json,digest,state FROM workflow_graphs WHERE name=?",
+                    (trig["name"],)).fetchone()
+                if (record is None or record["state"]!="approved"
+                    or record["digest"]!=trig["digest"]):
+                    self.store.db.execute(
+                        "UPDATE workflow_triggers SET state='paused' WHERE id=?",(trig["id"],))
+                    continue
+                spec=json.loads(record["spec_json"])
+                # Re-check every time; changed allowlists or definitions cannot
+                # cause an unapproved side effect to run on a timer.
+                try:
+                    validate_graph(spec,self.tools)
+                except (ValueError,PermissionError):
+                    self.store.db.execute(
+                        "UPDATE workflow_triggers SET state='paused' WHERE id=?",(trig["id"],))
+                    continue
+                if any(step["tool"] not in READ_ONLY for step in spec["steps"]):
+                    self.store.db.execute(
+                        "UPDATE workflow_triggers SET state='paused' WHERE id=?",(trig["id"],))
+                    continue
+                # Avoid concurrent instances of the same recurring graph.
+                previous=trig["last_run_id"]
+                if previous:
+                    last=self.store.db.execute(
+                        "SELECT state FROM workflow_runs WHERE id=?",(previous,)).fetchone()
+                    if last and last["state"] in ("queued","running"):
+                        continue
+                run=self.store.db.execute(
+                    "INSERT INTO workflow_runs(name,digest,spec_json,state,started_at)"
+                    " VALUES(?,?,?,'queued',?)",
+                    (trig["name"],trig["digest"],record["spec_json"],now))
+                self.store.db.executemany(
+                    "INSERT INTO workflow_step_runs(run_id,step_id,state) VALUES(?,?,'pending')",
+                    [(run.lastrowid,x["id"]) for x in spec["steps"]])
+                self.store.db.execute(
+                    "UPDATE workflow_triggers SET last_run_id=? WHERE id=?",
+                    (run.lastrowid,trig["id"]))
 
     def cancel(self,runid):
         if type(runid) is not int or runid<1:
@@ -376,6 +488,7 @@ class WorkflowEngine:
         return None
 
     def tick(self,max_actions=MAX_RUNS_PER_TICK):
+        self._enqueue_due_triggers()
         outcomes=[]
         for _ in range(min(MAX_RUNS_PER_TICK,max(1,int(max_actions)))):
             item=self._next()
