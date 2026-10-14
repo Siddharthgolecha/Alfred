@@ -116,11 +116,35 @@ class ContinuationTests(unittest.TestCase):
                          {"tool":"get_gpu_status",
                           "metrics":{"available":True,"gpu_temp_c":65.0}})
         self.assertEqual(result["results"][1],{"uptime_seconds":321})
-        self.assertEqual(result["executed_tools"],["get_system_status"])
+        self.assertEqual(result["tool_outcomes"],
+                         [{"tool":"get_system_status","outcome":"returned"}])
         self.assertEqual(result["handoff"]["task_id"],TID)
         passed=self.qwen.complete.call_args.kwargs["handoff"]
         self.assertIs(passed.__class__,EscalationEnvelope)
         self.assertEqual(passed.session_id,SID)
+
+    def test_conditional_skip_is_not_misreported_as_executed(self):
+        self.qwen.complete.return_value=plan([
+            {"tool":"get_system_status","args":{}},
+            {"tool":"list_services","args":{}, "when":{
+                "step":0,"field":"uptime_seconds","op":"gt","value":999999}}])
+        with patch.object(self.tools,"run_plan",return_value=[
+                {"uptime_seconds":42},{"skipped":True}]) as run:
+            out=self.sys.continue_handoff(self.h())
+        run.assert_called_once()
+        self.assertEqual(out["tool_outcomes"],[
+            {"tool":"get_system_status","outcome":"returned"},
+            {"tool":"list_services","outcome":"blocked"}])
+
+    def test_side_effects_cannot_be_resumed_even_if_already_completed(self):
+        for tool,args in [
+            ("run_named_task",{"name":"safe"}),
+            ("control_service",{"name":"safe.service","action":"restart"})]:
+            with self.subTest(tool=tool):
+                with self.assertRaises(PermissionError):
+                    build_handoff(SID,TID,"Run a task then explain","incomplete",
+                                  calls=[{"name":tool,"arguments":args}],
+                                  results=[{"returncode":0}],max_tools=3)
 
     def test_readonly_handoff_cannot_elevate_or_queue_approval(self):
         self.qwen.complete.return_value=plan([{"tool":"run_named_task","args":{"name":"safe"}}])
