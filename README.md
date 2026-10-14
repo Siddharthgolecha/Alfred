@@ -97,6 +97,22 @@ echo $?   # 0: functional microphone / 2: no valid input
 
 \`--text\` and \`--ensure-llama\` do not need a microphone and remain available for diagnostics.
 
+## Live Whistle transcripts and GPU status routing
+
+While listening in an interactive terminal, Alfred shows Whistle's *pending* transcript on a single updating `Whistle (live):` line, then prints the confirmed `Whistle (final):` utterance as a separate line. In a redirected/non-interactive console, it emits each distinct partial update on a new line. **Only final confirmed speech is sent to Needle and tools; pending text never executes actions.**
+
+For example:
+
+```text
+Whistle (live): could you show
+Whistle (live): could you show gpu status
+Whistle (final): could you show GPU status
+```
+
+Alfred also guards explicit GPU status/temperature/usage requests against Needle accidentally selecting `get_system_status`. It uses `get_gpu_status` for GPU-only status and retains `get_system_status` if both system and GPU diagnostics are asked for. The correction only applies to non-mutating status-tool choices: reminders, service operations and reasoning requests are never silently rewritten.
+
+**Privacy note:** CLI partial/final transcripts are intentionally visible; if Alfred runs under a service manager that journals stdout, that manager may retain these lines. Disable or redirect stdout logging if recording utterances is not appropriate. Alfred's own SQLite event table does not persist transcript text.
+
 ## Pair and select Sony WI-C100
 
 1. Put WI-C100 in pairing mode. It is a Bluetooth neckband headset; its USB-C port is for charging, not a wired microphone.
