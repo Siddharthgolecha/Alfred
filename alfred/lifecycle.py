@@ -9,6 +9,7 @@ import signal
 import socket
 import stat
 import struct
+import subprocess
 import threading
 import time
 
@@ -140,3 +141,82 @@ def request_close(logdir, role, wait_seconds=15):
     if path.exists():
         raise TimeoutError(f"Alfred {role} did not finish shutting down within {wait_seconds}s")
     return True
+
+
+class ChildProcesses:
+    """Track short-lived Alfred subprocesses so worker shutdown cannot orphan them.
+
+    Only children spawned through this registry can be terminated. This does
+    not affect deliberately started user services or externally owned servers.
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._stopping = threading.Event()
+        self._children = set()
+
+    @staticmethod
+    def _signal(process, sig):
+        if process.poll() is not None:
+            return
+        try:
+            if os.getpgid(process.pid) == process.pid:
+                os.killpg(process.pid, sig)
+            else:
+                process.send_signal(sig)
+        except ProcessLookupError:
+            pass
+
+    @classmethod
+    def _stop_child(cls, process, grace=2):
+        if process.poll() is None:
+            try:
+                cls._signal(process, signal.SIGTERM)
+                process.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                cls._signal(process, signal.SIGKILL)
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    LOG.warning("Unable to reap Alfred child PID %s", process.pid)
+            except OSError as exc:
+                LOG.warning("Unable to stop Alfred child PID %s: %s", process.pid, exc)
+
+    def run(self, argv, *, timeout, capture_output=False, text=False, check=False):
+        """A cancellable subset of subprocess.run for approved local commands."""
+        with self._lock:
+            if self._stopping.is_set():
+                raise RuntimeError("Alfred is shutting down; refusing new subprocess")
+            process = subprocess.Popen(
+                argv, stdin=subprocess.DEVNULL, start_new_session=True,
+                stdout=subprocess.PIPE if capture_output else None,
+                stderr=subprocess.PIPE if capture_output else None,
+                text=text,
+            )
+            self._children.add(process)
+        try:
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self._stop_child(process)
+                raise
+            done = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+            if check:
+                done.check_returncode()
+            return done
+        finally:
+            with self._lock:
+                self._children.discard(process)
+
+    def close(self):
+        self._stopping.set()
+        with self._lock:
+            children = tuple(self._children)
+        # Stop all children before waiting on any one of them.
+        for process in children:
+            try:
+                self._signal(process, signal.SIGTERM)
+            except OSError as exc:
+                LOG.warning("Unable to signal Alfred child PID %s: %s", process.pid, exc)
+        for process in children:
+            self._stop_child(process, grace=2)
