@@ -2,8 +2,14 @@
 
 Offline-first, continuous English voice automation on **NVIDIA Jetson Orin Nano 8GB** (JetPack 7.2.1 / CUDA 13.2).
 
-**Microphone → Cactus Whistle streaming STT → Cactus Needle 3 tool router → validated Python tools.**
+**Microphone → wake-word activation → Cactus Whistle STT → Cactus Needle 3 tool router → validated Python tools.**
 Needle can delegate complex commands to a **Qwen 3.5 4B Bartowski Q4_K_M GGUF** model using **llama.cpp (`llama serve`)**, **llama-server**, **Ollama**, or **LM Studio**. Alfred adopts a compatible local server or starts the configured backend if absent.
+
+## Wake word — "Alfred"
+
+Voice commands now require an explicit wake phrase by default. Say **"Alfred, show GPU status"** or **"Hey Alfred"** followed within eight seconds by **"show GPU status"**. Unaddressed background speech is never sent to Needle, Qwen, or tool execution. A standalone wake permits only one follow-up command.
+
+Default `wake_word.mode="transcript"` uses Whistle to recognize the wake phrase without additional dependencies. For lower idle compute, optional `wake_word.mode="openwakeword"` uses a **user-supplied ONNX wake model** to detect the phrase before running Whistle. No pretrained "Alfred" acoustic model is bundled. Both modes are configurable in `config.example.json`; details and setup are in [Wake-word activation](docs/WAKE_WORD.md). CLI `--text` and scheduled tasks continue without a wake phrase.
 
 ## Phase 2 planning and approvals
 
@@ -25,7 +31,8 @@ Phase 4 introduces [approved, persistent workflow DAGs](docs/PHASE4.md), conditi
 - `auto` / `bluetooth` / `direct` selection; auto prefers the Sony mic and falls back to a direct microphone.
 - BlueZ + PipeWire-Pulse/PulseAudio discovery, profile switching, explicit source capture with `parec`, reconnection attempts if a MAC address is configured.
 - Fail-fast microphone health check: reject unconfirmed Jetson "Built-in Audio" inputs, reject monitor sources and unavailable ports, require actual timed PCM delivery before loading the models.
-- 16 kHz mono PCM capture, tunable RMS VAD, incremental Whistle transcription; **only finalized utterances** can trigger tools.
+- 16 kHz mono PCM capture, tunable RMS VAD, incremental Whistle transcription; **only wake-authorized, finalized utterances** can trigger tools.
+- Default "Alfred" wake phrase, single bounded follow-up, and optional local openWakeWord ONNX pre-transcription detection.
 - Needle 3 structured calls; no direct execution by the model; Python validates each action and its arguments.
 - Strict allowlists for `systemctl --user` services and fixed named script argv; **no arbitrary shell**.
 - System diagnostics, SQLite reminders, recurring read-only status polls, Qwen multi-step plans, saved named workflows.
