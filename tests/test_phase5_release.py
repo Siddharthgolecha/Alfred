@@ -27,7 +27,8 @@ class ReleasePolicyTests(unittest.TestCase):
                  "qwen_warm_load_ms","peak_ram_mib","peak_swap_used_mib",
                  "peak_cpu_load_per_core","peak_gpu_utilization_pct")
         fake={"native_jetson_tested":False,"device":"NVIDIA Jetson Orin Nano 8GB",
-              "fixture_count":144,"sources":["CI mocked policy run"],
+              "fixture_count":144,"distinct_semantic_task_count":None,
+              "sources":["CI mocked policy run"],
               "models_real":False,"offline":True,"voice_capture_deadline_passed":True,
               "scheduler_deadline_passed":True,"clean_owned_shutdown":True,
               "dependencies_merged":False,
@@ -44,7 +45,8 @@ class ReleasePolicyTests(unittest.TestCase):
 
     def test_missing_thresholds_never_default_to_pass(self):
         raw={"native_jetson_tested":True,"device":"NVIDIA Jetson Orin Nano 8GB",
-             "fixture_count":144,"sources":["locally run native suite"],
+             "fixture_count":144,"distinct_semantic_task_count":120,
+             "sources":["locally run native suite"],
              "models_real":True,"offline":True,"voice_capture_deadline_passed":True,
              "scheduler_deadline_passed":True,"clean_owned_shutdown":True,
              "dependencies_merged":True,
@@ -68,6 +70,77 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertFalse(evaluate_release(raw,agreed,acknowledge_hardware=False)
                          ["release_allowed"])
 
+    def test_distinct_semantic_tasks_are_required_even_with_144_trials(self):
+        """Synthetic all-green declarations cannot launder repeated IDs as tasks."""
+        metrics=("p50_latency_ms","p95_latency_ms","qwen_cold_load_ms",
+                 "qwen_warm_load_ms","peak_ram_mib","peak_swap_used_mib",
+                 "peak_cpu_load_per_core","peak_gpu_utilization_pct")
+        report={
+            "native_jetson_tested":True,
+            "device":"NVIDIA Jetson Orin Nano 8GB",
+            "fixture_count":144,
+            "distinct_semantic_task_count":120,
+            "sources":["synthetic-only declaration, not hardware attestation"],
+            "models_real":True,"offline":True,
+            "voice_capture_deadline_passed":True,
+            "scheduler_deadline_passed":True,
+            "clean_owned_shutdown":True,
+            "dependencies_merged":True,
+            "release_gates":{
+                "unauthorized_tool_executions":0,
+                "unintended_replay":0,
+                "plugin_escape_attempts_succeeded":0},
+            **{m:10.0 for m in metrics}
+        }
+        thresholds={"max_"+m:11.0 for m in metrics}
+        # Purely a schema/policy positive control: the values above are
+        # fabricated, and do not establish a real hardware-release pass.
+        self.assertTrue(evaluate_release(
+            report,thresholds,acknowledge_hardware=True)["release_allowed"])
+        for distinct in (None,False,True,0,-1,12,99,99.0,
+                         120.0,"120",[],{},float("nan")):
+            with self.subTest(distinct=distinct):
+                bad=dict(report,distinct_semantic_task_count=distinct)
+                verdict=evaluate_release(
+                    bad,thresholds,acknowledge_hardware=True)
+                self.assertFalse(verdict["release_allowed"])
+                self.assertIn("Insufficient distinct semantic task coverage",
+                              verdict["reasons"])
+                with self.assertRaises(ReleaseBlocked):
+                    require_release(bad,thresholds,acknowledge_hardware=True)
+        missing=dict(report)
+        missing.pop("distinct_semantic_task_count")
+        self.assertIn("Insufficient distinct semantic task coverage",
+                      evaluate_release(missing,thresholds,
+                                       acknowledge_hardware=True)["reasons"])
+        for distinct in (145,10000):
+            with self.subTest(impossible_count=distinct):
+                bad=dict(report,distinct_semantic_task_count=distinct)
+                verdict=evaluate_release(
+                    bad,thresholds,acknowledge_hardware=True)
+                self.assertFalse(verdict["release_allowed"])
+                self.assertIn("Distinct semantic task count exceeds recorded cases",
+                              verdict["reasons"])
+        repeated=dict(
+            report,distinct_semantic_task_count=12,
+            distinct_semantic_families=12,
+            trial_ids_are_distinct_tasks=False,
+            physical_distinct_task_coverage=None)
+        self.assertFalse(evaluate_release(
+            repeated,thresholds,acknowledge_hardware=True)["release_allowed"])
+        for count in (None,False,True,99,"144",0):
+            with self.subTest(fixture_count=count):
+                bad=dict(report,fixture_count=count)
+                self.assertFalse(evaluate_release(
+                    bad,thresholds,acknowledge_hardware=True)["release_allowed"])
+        bad=dict(report,fixture_count=100,distinct_semantic_task_count=101)
+        self.assertFalse(evaluate_release(
+            bad,thresholds,acknowledge_hardware=True)["release_allowed"])
+        min_valid=dict(report,fixture_count=100,
+                       distinct_semantic_task_count=100)
+        self.assertTrue(evaluate_release(
+            min_valid,thresholds,acknowledge_hardware=True)["release_allowed"])
+
     def test_plugin_network_and_shell_not_writable_via_forged_model_proposal(self):
         with tempfile.TemporaryDirectory() as td:
             store=Store(Path(td)/"review.sqlite")
@@ -90,6 +163,7 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertEqual(report["row_count"],432)
             self.assertEqual(report["fixture_count"],144)
             self.assertEqual(report["distinct_semantic_families"],12)
+            self.assertIsNone(report["distinct_semantic_task_count"])
             self.assertFalse(report["trial_ids_are_distinct_tasks"])
             self.assertIsNone(report["physical_distinct_task_coverage"])
             self.assertFalse(report["native_jetson_tested"])

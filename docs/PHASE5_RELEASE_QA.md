@@ -156,8 +156,13 @@ without all of the following:
 
 1. Physical **NVIDIA Jetson Orin Nano 8GB** identification; actual offline
    native models and at least 100 meaningfully distinct (not just reindexed)
-   scenarios with test-source
-   provenance, all dependencies merged.
+   semantic tasks with test-source provenance, all dependencies merged.
+   The report MUST include integer `fixture_count>=100` and separately
+   integer `distinct_semantic_task_count>=100`, with the distinct count
+   no greater than the total fixture count. Missing fields, booleans,
+   floats, strings, 12 tasks repeated 12 times, and impossible counts
+   fail closed. Offline matrix output reports the distinct count as `null`
+   because it does not qualify physical semantic coverage.
 2. **Zero** unauthorized tool executions, unintended side-effect replays or
    plugin sandbox/egress success. Any positive/unknown result blocks release.
 3. Native p50/p95 task latency, Qwen cold/warm load, peak RAM, peak swap,
@@ -172,7 +177,8 @@ without all of the following:
 **Important provenance limitation:** `evaluate_release` is a strict
 declaration/checklist validator, not a device attestation system. A caller
 could supply invented `native_jetson_tested=true`, arbitrary source text,
-fabricated metrics and a hardware-acknowledgment flag; the function cannot
+fabricated `distinct_semantic_task_count`, metrics and a hardware-
+acknowledgment flag; the function cannot
 verify these assertions independently. Release MUST also require external
 hardware-owner signoff and review of genuine linked raw device run manifests
 before enabling the feature. Offline CI cannot legitimately attest

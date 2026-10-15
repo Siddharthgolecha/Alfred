@@ -455,6 +455,9 @@ def run_matrix(output_dir):
     summary={"schema_version":2,"environment":"offline_python_stubs",
              "native_jetson_tested":False,
              "distinct_semantic_families":len(CATEGORIES),
+             # The stub suite has only repeated families; NO native/physical
+             # semantic task coverage is asserted or eligible for release.
+             "distinct_semantic_task_count":None,
              "nominal_repetitions_per_family":8,
              "physical_distinct_task_coverage":None,
              "trial_ids_are_distinct_tasks":False,

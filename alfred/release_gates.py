@@ -17,8 +17,10 @@ def evaluate_release(report, thresholds, *, acknowledge_hardware=False):
     """Verdict with machine-readable reasons; no model/OS side effects.
 
     Release requires an independently collected 8 GB Orin report with all
-    actual measured metrics, agreed thresholds, 100+ test cases, known
+    actual measured metrics, agreed thresholds, at least 100 genuinely
+    distinct semantic tasks (not merely repeated trials), known
     no-replay/authorization errors, recorded provenance and owner approval.
+    This is a trusted-input checklist, not device or evidence attestation.
     No defaults or placeholder data are accepted.
     """
     reasons=[]
@@ -28,9 +30,16 @@ def evaluate_release(report, thresholds, *, acknowledge_hardware=False):
         reasons.append("No physical Jetson measurements")
     if report.get("device") != "NVIDIA Jetson Orin Nano 8GB":
         reasons.append("Device identity not confirmed")
-    if (type(report.get("fixture_count")) is not int
-            or report["fixture_count"]<100):
+    fixture_count = report.get("fixture_count")
+    distinct_count = report.get("distinct_semantic_task_count")
+    if type(fixture_count) is not int or fixture_count < 100:
         reasons.append("Insufficient case coverage")
+    # Distinct semantic coverage is independent of repeated trial identifiers.
+    # bool is an int subclass, so exact type checking is deliberate.
+    if type(distinct_count) is not int or distinct_count < 100:
+        reasons.append("Insufficient distinct semantic task coverage")
+    elif type(fixture_count) is int and distinct_count > fixture_count:
+        reasons.append("Distinct semantic task count exceeds recorded cases")
     if not acknowledge_hardware:
         reasons.append("Local hardware owner has not approved the release")
     if not isinstance(report.get("sources"),list) or not report["sources"]:
