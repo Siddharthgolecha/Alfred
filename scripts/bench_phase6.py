@@ -43,7 +43,7 @@ VERDICTS = frozenset(("pass", "fail", "unknown"))
 def _git_blob_sha1(data: bytes) -> str:
     """Hash exact frozen bytes like Git, independent of Git availability."""
     return hashlib.sha1(
-        b"blob " + str(len(data)).encode("ascii") + b"\\0" + data
+        b"blob " + str(len(data)).encode("ascii") + b"\0" + data
     ).hexdigest()
 
 
