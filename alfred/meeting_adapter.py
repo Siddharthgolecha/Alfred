@@ -393,7 +393,11 @@ class OfflineMeetingAdapter:
                               retained=retained,state="stopping")
             meeting["active"]=False
             meeting["state"]="stopping"
-            self._revoke_meeting_access(permit.meeting_id)
+            if not retained:
+                # Nonretained evidence must be inaccessible throughout purge.
+                # Retained recordings keep their existing task-bound permit
+                # after a successful stop, as before.
+                self._revoke_meeting_access(permit.meeting_id)
             # Providers must implement idempotent stop; recording may already
             # have ended before interruption, so never start it again.
             self._provider.stop_recording(permit.meeting_id)
