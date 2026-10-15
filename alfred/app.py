@@ -181,8 +181,24 @@ class Alfred:
         return self.system2.continue_handoff(
             envelope, harness=self.harness, supervisor=self.supervisor)
 
-    def _finish_handoff(self, task, result):
-        """Apply the existing approval state machine to the SAME task."""
+    def _finish_handoff(self, task, result, original):
+        """Consume typed handoff reads on the SAME task and finish safely.
+
+        Only System2's post-execution VerifiedRead channel can update context:
+        never infer reads from model text, proposed steps, or prefix summaries.
+        Strip the private channel before any user-facing serialization.
+        """
+        verified = result.pop("_verified_reads", ())
+        if (self.context.enabled and "approval" not in result
+                and result.get("status") != "incomplete"
+                and type(verified) is tuple):
+            for item in verified:
+                if (type(item) is VerifiedRead
+                        and not (isinstance(item.output, dict)
+                                 and item.output.get("skipped") is True)):
+                    self.context.observe(task.session_id, task.task_id,
+                                         original, item.tool, item.output,
+                                         confidence=1.0)
         if "approval" in result:
             proposal=result["approval"]
             self.sessions.append(task.task_id,
@@ -343,7 +359,7 @@ class Alfred:
                                      min(len(calls), 50)))
                 if self.cfg["runtime"]["escalation_enabled"]:
                     outcome=self._handoff(task, text, "uncertain",allow_actions=False)
-                    self._finish_handoff(task, outcome)
+                    self._finish_handoff(task, outcome, text)
                     return
                 self.sessions.append(task.task_id, Completion("rejected", "low_confidence"))
                 self.feedback.tell("Command uncertain. Please repeat or be more specific.")
@@ -365,7 +381,7 @@ class Alfred:
                 self.sessions.append(task.task_id, Decision("needle3", "rejected",
                                                              min(len(calls), 50)))
                 outcome=self._handoff(task, text, "unsupported", allow_actions=False)
-                self._finish_handoff(task, outcome)
+                self._finish_handoff(task, outcome, text)
                 return
             self.store.event("route", {
                 "model":"needle3", "confidence":confidence,
@@ -422,7 +438,7 @@ class Alfred:
                     outcome=self._handoff(
                         task,text,"incomplete",calls=calls,results=completed,
                         allow_actions=False,used_decisions=used_decisions)
-                    self._finish_handoff(task,outcome)
+                    self._finish_handoff(task, outcome, text)
                     return
                 if (loop_outcome.stop not in ("completed", "protected", "partial")
                         and not loop_outcome.result.get("partial", False)):
@@ -440,7 +456,7 @@ class Alfred:
             elif not calls:
                 if self.cfg["runtime"]["escalation_enabled"]:
                     outcome=self._handoff(task,text,"unsupported",allow_actions=False)
-                    self._finish_handoff(task,outcome)
+                    self._finish_handoff(task, outcome, text)
                     return
                 self.sessions.append(task.task_id,
                                      Escalation("needle3", "qwen", "unsupported"))
@@ -448,7 +464,7 @@ class Alfred:
             elif len(calls)==1 and calls[0].get("name")=="delegate_to_reasoner":
                 if self.cfg["runtime"]["escalation_enabled"]:
                     outcome=self._handoff(task,text,"delegated",allow_actions=True)
-                    self._finish_handoff(task,outcome)
+                    self._finish_handoff(task, outcome, text)
                     return
                 self.sessions.append(task.task_id,
                                      Escalation("needle3", "qwen", "delegated"))
