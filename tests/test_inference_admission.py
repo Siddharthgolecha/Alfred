@@ -316,6 +316,19 @@ class IntegrationAdmissionTests(unittest.TestCase):
         start_qwen.assert_not_called()
         plan.assert_not_called()
 
+    def test_handoff_cannot_bypass_admission_by_omitting_gate(self):
+        from alfred.cognitive.escalation import build_handoff
+        app=self.app
+        h=build_handoff("a"*32,"b"*32,"Check GPU","unsupported",
+                        allow_actions=False,max_tools=3)
+        with patch.object(app.supervisor,"ensure_running") as start, \
+             patch.object(app.harness,"plan") as propose:
+            result=app.system2.continue_handoff(
+                h,supervisor=app.supervisor,harness=app.harness)
+        self.assertEqual(result["status"],"incomplete")
+        start.assert_not_called()
+        propose.assert_not_called()
+
     def test_handoff_safe_pressure_one_start_one_plan(self):
         from alfred.cognitive.escalation import build_handoff
         app=self.app

@@ -248,11 +248,12 @@ class System2:
             if harness is None:
                 raise RuntimeError("Required DeepSeek Harness is missing")
             if supervisor is not None:
-                # Do not cold-load the native Qwen server outside admission.
-                # The Harness's plan() -> run() acquires a *separate* slot.
-                from contextlib import nullcontext
-                with (admission.claim("qwen")
-                      if admission is not None else nullcontext()):
+                # A live Qwen supervisor cannot bypass the required gate even
+                # if a caller forgets to provide it. No work starts in that
+                # case; callers must explicitly supply their shared admission.
+                if admission is None:
+                    raise RuntimeError("Missing inference admission for Qwen cold start")
+                with admission.claim("qwen"):
                     supervisor.ensure_running()
             plan = harness.plan(
                 handoff.request,handoff.session_id,tools=catalog,
