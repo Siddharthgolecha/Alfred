@@ -98,6 +98,58 @@ class AdmissionUnitTests(unittest.TestCase):
             pass
         self.assertEqual(a.snapshot()["granted"],2)
 
+    def test_bounded_whistle_priority_fifo_with_three_contenders(self):
+        a=gate(wait=1200)
+        held=threading.Event()
+        release=threading.Event()
+        outcomes=[]
+        rejected=[]
+        def hold():
+            with a.claim("needle"):
+                held.set()
+                release.wait(2)
+        running=threading.Thread(target=hold)
+        running.start()
+        self.assertTrue(held.wait(1))
+        def background():
+            try:
+                with a.claim("qwen"):
+                    outcomes.append("qwen")
+            except AdmissionRejected as exc:
+                rejected.append(("qwen",str(exc)))
+        q=threading.Thread(target=background)
+        q.start()
+        def await_depth(depth):
+            until=time.monotonic()+1
+            while a.snapshot()["queue_depth"]<depth and time.monotonic()<until:
+                time.sleep(.003)
+            self.assertEqual(a.snapshot()["queue_depth"],depth)
+        await_depth(1)
+        def voice(name):
+            try:
+                with a.claim("whistle"):
+                    outcomes.append(name)
+            except AdmissionRejected as exc:
+                rejected.append((name,str(exc)))
+        v1=threading.Thread(target=voice,args=("w1",))
+        v2=threading.Thread(target=voice,args=("w2",))
+        v3=threading.Thread(target=voice,args=("w3",))
+        v1.start()
+        await_depth(2)
+        v2.start()
+        await_depth(3)
+        v3.start()
+        v3.join(1)
+        self.assertFalse(v3.is_alive())
+        self.assertEqual(rejected[0][0],"w3")
+        self.assertEqual(a.snapshot()["queue_depth"],3)
+        release.set()
+        for t in (running,v1,v2,q):
+            t.join(2)
+            self.assertFalse(t.is_alive())
+        self.assertEqual(outcomes,["w1","w2","qwen"])
+        self.assertEqual(a.snapshot()["queue_depth"],0)
+
     def test_optional_diagnostics_shed_under_capture_or_pressure(self):
         a=gate()
         self.assertTrue(a.allow_optional_diagnostics())
@@ -199,6 +251,33 @@ class IntegrationAdmissionTests(unittest.TestCase):
                 q.complete("Explain current status",[])
             request.assert_not_called()
         self.assertEqual(self.app.system2.approvals.pending(),[])
+
+    def test_watchdog_during_capture_sleeps_and_stops_promptly(self):
+        # The scheduler starts independently; no real model/server is needed.
+        self.app.cfg["qwen"]["enabled"]=True
+        self.app.cfg["qwen"]["supervisor_poll_seconds"]=1
+        self.app.scheduler.start=Mock()
+        self.app.supervisor.ensure_running=Mock(return_value=True)
+        self.app.supervisor.status=Mock(return_value={"health":"ready"})
+        self.app.admission.set_capture_active(True)
+        real_wait=self.app._watchdog_stop.wait
+        with patch.object(self.app._watchdog_stop,"wait",wraps=real_wait) as wait:
+            self.app.start_services()
+            time.sleep(.12)
+            self.assertTrue(self.app._watchdog_thread.is_alive())
+            self.assertGreaterEqual(wait.call_count,1)
+            self.assertLessEqual(wait.call_count,2,
+                                 "watchdog spun instead of deferring capture")
+            self.app.supervisor.ensure_running.assert_not_called()
+            self.app.admission.set_capture_active(False)
+            deadline=time.monotonic()+2
+            while self.app.supervisor.ensure_running.call_count==0 and time.monotonic()<deadline:
+                time.sleep(.02)
+            self.app.supervisor.ensure_running.assert_called_once()
+            stopped=time.monotonic()
+            self.app.close()
+            self.assertFalse(self.app._watchdog_thread.is_alive())
+            self.assertLess(time.monotonic()-stopped,.8)
 
     def test_no_second_managed_backend_spawn_under_admission(self):
         with patch.object(self.app.supervisor,"ensure_running",return_value=True) as ensure:
