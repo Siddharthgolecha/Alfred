@@ -27,6 +27,8 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Needle fast-path P50/P95 (mock inference, paired baseline)
         run: PYTHONPATH=. python tests/bench_needle_fastpath.py
+      - name: Scoped context overhead P50/P95 (mock inference, paired baseline)
+        run: PYTHONPATH=. python tests/bench_context_fastpath.py
       - name: Phase 5 release matrix (144 fixtures x 3 stub modes; fail on replay)
         run: PYTHONPATH=.:tests python tests/phase5_qa.py --out artifacts/phase5-offline
       - name: Upload raw OFFLINE STUB Phase 5 comparison results

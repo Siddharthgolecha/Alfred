@@ -22,6 +22,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
+      - name: Enforce main-only synchronization
+        # A manual workflow_dispatch can specify --ref on another branch/tag.
+        # Fail closed before loading a helper or granting target checkout credentials.
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$WORKFLOW_REF" != "refs/heads/main" ]]; then
+            echo "::error::Sync is only allowed from refs/heads/main (got $WORKFLOW_REF)"
+            exit 1
+          fi
+
+      - name: Check out trusted sync helper from main
+        uses: actions/checkout@v4
+        with:
+          # Always use the trusted default-branch helper, regardless of dispatch SHA.
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Stage sync helper outside the worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/sync_main_into_jetson.sh
+          cp scripts/sync_main_into_jetson.sh "$RUNNER_TEMP/alfred-sync-main-into-jetson.sh"
+
       - name: Check out intrinsic_jetson without discarding its history
         uses: actions/checkout@v4
         with:
@@ -38,7 +66,7 @@ jobs:
         id: merge
         continue-on-error: true
         shell: bash
-        run: bash scripts/sync_main_into_jetson.sh
+        run: bash "$RUNNER_TEMP/alfred-sync-main-into-jetson.sh"
 
       - name: Configure Python 3.10
         if: steps.merge.outcome == 'success' && steps.merge.outputs.noop != 'true'
@@ -88,13 +116,42 @@ jobs:
           # Compare-and-swap semantics: a concurrent branch update rejects this push.
           git push origin HEAD:refs/heads/intrinsic_jetson
 
-      - name: Create blocking issue on conflict, test failure or rejected push
+      - name: Verify published Jetson contains latest main
+        id: verify
+        if: >-
+          steps.merge.outcome == 'success' &&
+          (steps.merge.outputs.noop == 'true' || steps.push.outcome == 'success')
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main intrinsic_jetson
+          git merge-base --is-ancestor refs/remotes/origin/main refs/remotes/origin/intrinsic_jetson
+          echo "Verified remote intrinsic_jetson includes current origin/main"
+
+      - name: Close resolved sync blockers only after remote verification
+        if: steps.verify.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 1000 \
+            --json number,title \
+            --jq '.[] | select(.title | startswith("[sync] main to intrinsic_jetson blocked")) | .number' |
+          while IFS= read -r issue_number; do
+            [[ -n "$issue_number" ]] || continue
+            gh issue close "$issue_number" -R "$GITHUB_REPOSITORY" --reason completed \
+              --comment "Resolved: verified remote intrinsic_jetson contains the latest origin/main. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          done
+
+      - name: Create or update the single sync-blocker issue
         if: >-
           always() &&
           (steps.merge.outcome == 'failure' ||
            steps.py310.outcome == 'failure' ||
            steps.py312.outcome == 'failure' ||
-           steps.push.outcome == 'failure')
+           steps.push.outcome == 'failure' ||
+           steps.verify.outcome == 'failure')
         env:
           GH_TOKEN: ${{ github.token }}
           MAIN_SHA: ${{ github.sha }}
@@ -103,19 +160,15 @@ jobs:
           PY310_STATE: ${{ steps.py310.outcome }}
           PY312_STATE: ${{ steps.py312.outcome }}
           PUSH_STATE: ${{ steps.push.outcome }}
+          VERIFY_STATE: ${{ steps.verify.outcome }}
         shell: bash
         run: |
           set -euo pipefail
-          title="[sync] main to intrinsic_jetson blocked at $MAIN_SHA"
-          found="$(gh issue list -R "$GITHUB_REPOSITORY" --state open                      --search "$MAIN_SHA in:title" --json number                      --jq '.[0].number // empty' || true)"
-          if [[ -n "$found" ]]; then
-            echo "Already tracked by issue #$found"
-            exit 0
-          fi
+          title="[sync] main to intrinsic_jetson blocked"
           {
             echo "## Automatic branch sync blocked"
             echo
-            echo "main SHA: \`$MAIN_SHA\`"
+            echo "Triggering main SHA: \`$MAIN_SHA\`"
             echo "Workflow run: $RUN_URL"
             echo
             echo "| Stage | Result |"
@@ -124,12 +177,29 @@ jobs:
             echo "| Python 3.10 | $PY310_STATE |"
             echo "| Python 3.12 | $PY312_STATE |"
             echo "| push | $PUSH_STATE |"
+            echo "| verify remote ancestry | $VERIFY_STATE |"
             echo
             echo "Remote intrinsic_jetson was **not force-pushed or rewritten**."
-            echo "Inspect the workflow logs; fix conflicts/tests on an ordinary branch/PR,"
-            echo "then rerun the sync workflow. Never use -X ours/theirs to discard Jetson changes."
+            echo "Check the logs and resolve real conflicts or test failures via normal review."
+            echo "Never use -X ours/theirs or force-push to hide conflicts."
           } > /tmp/alfred-sync-issue.md
-          gh issue create -R "$GITHUB_REPOSITORY" --title "$title"               --label "maestaris:task" --label "priority:P0"               --body-file /tmp/alfred-sync-issue.md
+          # Consolidate old SHA-specific reports (including issue #21) into one incident.
+          matches="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --limit 1000 \
+            --json number,title \
+            --jq '.[] | select(.title | startswith("[sync] main to intrinsic_jetson blocked")) | .number')"
+          found="$(printf '%s\n' "$matches" | sed '/^$/d' | sort -n | head -n 1)"
+          if [[ -n "$found" ]]; then
+            gh issue edit "$found" -R "$GITHUB_REPOSITORY" --title "$title" --body-file /tmp/alfred-sync-issue.md
+            echo "Updated existing sync-blocker issue #$found"
+            while IFS= read -r issue_number; do
+              [[ -n "$issue_number" && "$issue_number" != "$found" ]] || continue
+              gh issue close "$issue_number" -R "$GITHUB_REPOSITORY" --reason "not planned" \
+                --comment "Duplicate automated sync failure; tracking the current blocker in #$found."
+            done <<< "$matches"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" \
+              --label "priority:P0" --body-file /tmp/alfred-sync-issue.md
+          fi
 
       - name: Fail closed if sync could not be completed
         if: >-
@@ -137,7 +207,8 @@ jobs:
           (steps.merge.outcome == 'failure' ||
            steps.py310.outcome == 'failure' ||
            steps.py312.outcome == 'failure' ||
-           steps.push.outcome == 'failure')
+           steps.push.outcome == 'failure' ||
+           steps.verify.outcome == 'failure')
         run: |
           echo "Safe sync blocked. Check the linked workflow and generated issue."
           exit 1
