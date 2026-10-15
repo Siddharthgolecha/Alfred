@@ -168,10 +168,13 @@ class Alfred:
                 f"Local approval required for {proposal['actions']}. "
                 f"On the Jetson, run: alfred --approve {proposal['approval_id']}")
         elif result.get("status") == "incomplete":
-            # An unavailable model does not transform a partial observation
-            # into success. Previously executed tools remain visible.
-            self.sessions.append(task.task_id, Completion("failed", "disabled"
-                if not self.cfg["qwen"]["enabled"] else "exception"))
+            # Failed model responses cannot count as successful no-ops.
+            # Keep prior read-only results visible and use a typed ledger
+            # failure without persisting untrusted model/error text.
+            reason = ("invalid_plan" if result.get("error") == "invalid_plan"
+                      else "disabled" if not self.cfg["qwen"]["enabled"]
+                      else "exception")
+            self.sessions.append(task.task_id, Completion("failed", reason))
             self.feedback.tell(json.dumps(result,default=str)[:1800])
         else:
             for item in result.get("tool_outcomes", ()):
