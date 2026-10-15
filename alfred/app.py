@@ -142,11 +142,15 @@ class Alfred:
                     allowed_services=self.tools.services,
                     named_tasks=self.tools.tasks.keys(),
                     max_steps=self.cfg["runtime"]["max_plan_steps"],
-                    context=context)
+                    **({"context":context} if context and (
+                        context.get("slots") or context.get("task_observations")
+                        or context.get("user_approved_facts")) else {}))
             except (HarnessUnavailable, OSError, TimeoutError, RuntimeError):
                 LOG.warning("Harness inference unavailable before execution; falling back to System2")
                 return self.system2.reason(text, allow_actions=allow_actions,
-                                           context=context)
+                                           **({"context":context} if context and (
+                                              context.get("slots") or context.get("task_observations")
+                                              or context.get("user_approved_facts")) else {}))
             # Invalid, spoofed or malformed SDK plans are a hard rejection,
             # not a second chance to reinterpret their action-bearing text.
             message, steps, save_as = parse_plan(
@@ -156,7 +160,10 @@ class Alfred:
             # raises, the caller reports failure without a second execution.
             return self.system2.execute_or_stage(
                 steps, message, save_as, allow_actions=True)
-        return self.system2.reason(text,allow_actions=allow_actions,context=context)
+        return self.system2.reason(text,allow_actions=allow_actions,
+                                   **({"context":context} if context and (
+                                      context.get("slots") or context.get("task_observations")
+                                      or context.get("user_approved_facts")) else {}))
 
     def _start_task(self, source, input_chars):
         """One durable ID per authorized request, reused for every decision."""
