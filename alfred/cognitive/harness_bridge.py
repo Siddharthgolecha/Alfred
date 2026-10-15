@@ -109,8 +109,9 @@ def frame_for_contract(contract: Contract) -> bytes:
     """Only ALFRED-authored typed ledger events may cross this boundary."""
     if not isinstance(contract, Contract):
         raise HarnessProtocolError("Expected canonical cognitive contract")
-    contract.validate()
-    return encode_frame(contract.kind, asdict(contract))
+    # Pydantic v2 validates at construction time; no separate validate() call needed.
+    kind = type(contract).model_fields["kind"].default
+    return encode_frame(kind, contract.model_dump(exclude={"kind"}))
 
 
 @dataclass(frozen=True)

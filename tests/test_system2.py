@@ -536,7 +536,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(len(tasks),1)
         self.assertEqual(tasks[0]["state"],"failed")
         events=self.app.sessions.events(tasks[0]["id"])
-        self.assertEqual(events[-1],Completion("failed","invalid_plan"))
+        self.assertEqual(events[-1],Completion(outcome="failed",reason="invalid_plan"))
         self.assertEqual(self.app.store.list_schedules(),[])
         self.assertEqual(self.app.system2.approvals.pending(),[])
         self.app.feedback.tell.assert_called_once()
@@ -551,7 +551,7 @@ class RoutingTests(unittest.TestCase):
         self.app.handle_text("Create a schedule")
         task_id=self.app.sessions.list_tasks(self.app.session_id)[0]["id"]
         self.assertEqual(self.app.sessions.events(task_id)[-1],
-                         Completion("failed","invalid_plan"))
+                         Completion(outcome="failed",reason="invalid_plan"))
         self.assertEqual(self.app.store.list_schedules(),[])
 
     def test_empty_needle_call_invokes_read_only_qwen(self):
@@ -563,12 +563,12 @@ class RoutingTests(unittest.TestCase):
 
 class PlannerCliTests(unittest.TestCase):
     def test_reason_cli_records_failure_and_returns_nonzero(self):
-        from alfred.app import _main
+        from alfred.cli import _main
         with tempfile.TemporaryDirectory() as tmp:
             cfg=load_config()
             cfg["runtime"]["database"]=str(Path(tmp)/"store.db")
             cfg["runtime"]["logs"]=tmp
-            with patch("alfred.app.load_config",return_value=cfg), patch(
+            with patch("alfred.cli.load_config",return_value=cfg), patch(
                      "alfred.app.Alfred.require_cognitive_runtime"), patch(
                      "alfred.app.Alfred.reason",return_value={
                          "status":"incomplete","error":"invalid_plan",
@@ -584,7 +584,7 @@ class PlannerCliTests(unittest.TestCase):
                 self.assertEqual(len(rows),1)
                 self.assertEqual(rows[0]["state"],"failed")
                 event=SessionLedger(store).events(rows[0]["id"])[-1]
-                self.assertEqual(event,Completion("failed","invalid_plan"))
+                self.assertEqual(event,Completion(outcome="failed",reason="invalid_plan"))
                 self.assertEqual(store.list_schedules(),[])
                 self.assertEqual(store.db.execute("SELECT COUNT(*) FROM approvals").fetchone()[0],0)
             finally:
