@@ -32,6 +32,8 @@ Voice and CLI requests from the same configured owner/mode can use one session.
 
 1. **Ephemeral task observations:** at most three *verified read-only* tool
    results for that task, held only in memory, discarded at task completion.
+   The task's initial owner/mode/session scope is immutable for cleanup;
+   switching scope during a task cannot prolong its task observations.
    `_bounded_metrics` keeps finite allowlisted numeric/boolean telemetry.
    For `list_services`, only a count can be represented. No output strings,
    shell stdout, transcript, arbitrary JSON, or model-generated action is
@@ -52,7 +54,10 @@ Voice and CLI requests from the same configured owner/mode can use one session.
    can write these automatically; only trusted local CLI (`--memory-set`) or
    a programmatic call with `local_approval=True` does so. Disabled
    persistence stores these only in memory; optional persistence writes to
-   the existing SQLite database. Credentials/policy/command-like *keys*,
+   the existing SQLite database. SQLite uses a cross-process `BEGIN IMMEDIATE`
+   transaction to atomically count and insert facts, so concurrent local CLI
+   writers cannot exceed eight entries. Existing legacy excess facts are
+   displayed rather than silently hidden, and new keys are refused. Credentials/policy/command-like *keys*,
    oversized values, control characters, obvious shell-like instructions
    and credential patterns are rejected. This is a limited filter, not a
    proof against every prompt injection. These facts are
@@ -65,6 +70,14 @@ invoke a model to guess missing data. **An optional future local-Qwen summary
 needs a separately reviewed, explicitly enabled feature**; issue #16 does
 not create summaries or remember model inferences as authority. This is
 deliberate: unverified LLM summaries must not silently become trusted facts.
+
+System2 attaches a private, typed `VerifiedRead` record to each actually
+returned allowlisted read, correlated to its **preflighted executed tool step**,
+not to Needle's original proposal or a model-authored claim. Alfred consumes
+and strips this private channel before displaying results. Skipped, denied,
+staged or failed Qwen steps cannot populate context. An unsupported Needle
+request or explicit Qwen delegation may populate slots only through completed
+System2 reads that match a user-explicit measurement request.
 
 Needle receives only a small typed slot packet when useful, and direct
 pronoun resolution happens in Python **without any Qwen call**. Qwen and the
@@ -125,7 +138,11 @@ ambiguous read-only references, action-pronoun rejection, topic invalidation,
 distinct sessions/owners/meeting mode, explicit fact deletion/approval,
 database permission/restart, concurrent task windows, malicious result
 injection, missing/forged/low-confidence readings, deterministic size budget,
-Needle no-Qwen fast path, optional Qwen context packet and defaults.
+Needle no-Qwen fast path, optional Qwen context packet and defaults,
+Qwen-performed verified reads, skipped/denied plan rejection, cross-scope
+completion cleanup, and concurrent two-connection fact-cap enforcement.
+The shutdown acceptance suite additionally tests a bind-then-interrupt
+failure before the socket-ownership flag is set.
 Existing #13/#14 Python 3.10/3.12 and pinned Harness SDK/Cordis smoke
 are inherited through CI.
 
