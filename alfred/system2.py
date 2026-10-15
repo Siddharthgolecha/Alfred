@@ -13,6 +13,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
+from .models import QwenPlanResponseError
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, validate_plan
 
 LOG = logging.getLogger(__name__)
@@ -194,6 +195,17 @@ class System2:
         return {"message":message or "Completed","results":results,
                 "_verified_reads":verified}
 
+    @staticmethod
+    def _incomplete_plan():
+        # Explicit failure metadata prevents a failed inference from being
+        # recorded as a successful "no action" completion in the task ledger.
+        return {"status": "incomplete", "error": "invalid_plan",
+                "message": (
+                    "I couldn't interpret that request as a valid plan, so no "
+                    "actions were taken or scheduled. Please try again with a "
+                    "specific action and time or interval."
+                ), "results": []}
+
     def reason(self, utterance, allow_actions=True, *, context=None):
         # Tool schemas, not just tool names, are provided to the planner.
         tool_catalog=[s for s in TOOL_SCHEMAS if s["name"] not in
@@ -201,11 +213,21 @@ class System2:
         opts={"context":context} if context and (
             context.get("slots") or context.get("task_observations")
             or context.get("user_approved_facts")) else {}
-        plan=self.qwen.complete(utterance, tool_catalog,
-                                allowed_services=self.tools.services,
-                                named_tasks=self.tools.tasks.keys(),**opts)
-        message,steps,save_as=parse_plan(plan,utterance,self.tools,
-                                        self.cfg.get("max_plan_steps",5))
+        try:
+            plan=self.qwen.complete(utterance, tool_catalog,
+                                    allowed_services=self.tools.services,
+                                    named_tasks=self.tools.tasks.keys(),**opts)
+        except QwenPlanResponseError as exc:
+            # Generation retries never confer authorization; a failed
+            # structured response is a failed, non-executed plan.
+            LOG.warning("System 2 plan unavailable: %s", exc)
+            return self._incomplete_plan()
+        try:
+            message,steps,save_as=parse_plan(plan,utterance,self.tools,
+                                            self.cfg.get("max_plan_steps",5))
+        except (ValueError, PermissionError) as exc:
+            LOG.warning("System 2 plan rejected by preflight: %s", exc)
+            return self._incomplete_plan()
         outcome = self.execute_or_stage(steps,message,save_as,allow_actions)
         # Only a completed, read-only plan may generate a second explanation.
         # No output from this second inference is interpreted as a tool call.
