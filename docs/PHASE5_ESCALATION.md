@@ -83,6 +83,35 @@ the older, separate `Store.event("tool",...)` system stores raw tool results and
 is not migrated by issue #15; do not mistake the cognitive-ledger privacy
 guarantee for a global no-logging claim.
 
+## Shared tool budget across Needle and Qwen
+
+`runtime.max_plan_steps` accepts **1–10** for ordinary System 2 plans.
+For a version-1 cross-model handoff, Alfred explicitly caps the *global*
+completed-plus-proposed tool-call budget at **five**:
+`min(runtime.max_plan_steps, 5)`. Already executed Needle reads consume
+slots from this same total; Qwen receives only the remainder. For example,
+the default `needle_max_tools=3` permits three Needle reads followed by at
+most two additional Qwen reads when `max_plan_steps>=5`. Configured values
+6–10 never invalidate a handoff or extend the v1 protocol cap. The
+`needle_max_decisions=3` limit is a separate bound on native Needle
+decision/feedback turns, not on Qwen reasoning turns. A lower configured
+total cannot be silently enlarged to replay already executed reads;
+unsupported over-budget histories must fail closed. Explanations with zero
+additional tools can still use Qwen when no tool budget remains.
+
+## Retention and live voice session ownership
+
+An Alfred voice process can own a session even when it is idle between
+commands and all its recorded tasks are complete. Explicit retention
+pruning excludes any session with a verified live or indeterminate owner;
+there is no time-only ownership expiry. Selection and deletion use the
+same SQLite write-transaction serialization as recovery, so a concurrent
+owner cannot be pruned after claiming the session. Once ownership is
+explicitly released after safe shutdown, or its PID/start identity is
+confirmed dead, finished sessions older than the requested cutoff may
+be pruned. Sessions with running tasks remain protected even if the
+previous owner died, until explicit recovery closes those traces.
+
 ## Restart and uncertain side effects
 
 After an application restart, the model conversation and private transient
@@ -125,7 +154,7 @@ unavailability, SDK→Qwen pre-execution transport fallback, malformed or
 repeated-key SDK proposal hard rejection without replanning, native feedback
 failure after a returned read, no fallback after a partial side effect,
 same task/session ledger correlation, live process conflict rejection and
-interrupted dead-owner session recovery, and a **real local HTTP /v1/chat/completions protocol smoke** using a
+interrupted dead-owner session recovery, live-owned idle retention protection, capped 6/10-step planner configuration, and a **real local HTTP /v1/chat/completions protocol smoke** using a
 deterministic stub server. That protocol smoke uses a stub instead of live
 Qwen weights; the separate CI `harness-sdk-smoke` job executes the pinned
 genuine SDK/Cordis process, but native Jetson/Needle weights are still untested.
