@@ -90,7 +90,7 @@ class SessionSlots:
             raise ValueError("Invalid session slot TTL")
         self.ttl = ttl_seconds
         self.clock = clock
-        self._slots = {}
+        self._slots: dict[str, object] = {}
 
     def clear(self, session_id=None):
         if session_id is None:

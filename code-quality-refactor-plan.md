@@ -229,7 +229,7 @@ Beyond structural splits and Pydantic adoption, the codebase has accumulated tec
 
 ### Sub-Task 10 — Comprehensive static analysis pass (`mypy`) and final test suite update
 
-**Status**: [ ] pending
+**Status**: [x] done
 
 **Intent**  
 With all code changes complete, run `mypy --strict` across the entire `alfred/` package to catch any remaining annotation gaps introduced during the refactor, and ensure the full test suite passes cleanly on the refactored codebase.

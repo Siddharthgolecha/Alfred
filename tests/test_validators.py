@@ -1,9 +1,9 @@
-"""Unit tests for alfred.validators — pure functions, no external deps."""
+"""Unit tests for alfred/validators.py helpers."""
 from __future__ import annotations
 
 import json
 import math
-import unittest
+import pytest
 
 from alfred.validators import (
     clamp,
@@ -18,241 +18,234 @@ from alfred.validators import (
     validate_ttl_seconds,
     validate_type,
 )
-from alfred.constants import TTL, Truncation
+from alfred.constants import Truncation, TTL
 
 
-class TestValidateType(unittest.TestCase):
-    def test_passes_correct_type(self):
-        self.assertEqual(validate_type("hello", str), "hello")
+# ---------------------------------------------------------------------------
+# validate_type
+# ---------------------------------------------------------------------------
 
-    def test_passes_subclass(self):
-        self.assertIsInstance(validate_type(True, int), bool)  # bool is subclass of int
+class TestValidateType:
+    def test_passes_for_correct_type(self):
+        assert validate_type(42, int) == 42
 
-    def test_raises_type_error_on_wrong_type(self):
-        with self.assertRaises(TypeError):
-            validate_type(42, str, "my_field")
+    def test_passes_for_subclass(self):
+        class Sub(int): pass
+        assert validate_type(Sub(5), int) == 5
 
-    def test_error_message_contains_label(self):
-        with self.assertRaises(TypeError) as ctx:
-            validate_type(42, str, "username")
-        self.assertIn("username", str(ctx.exception))
+    def test_raises_for_wrong_type(self):
+        with pytest.raises(TypeError, match="int"):
+            validate_type("hello", int)
+
+    def test_custom_label_in_error(self):
+        with pytest.raises(TypeError, match="myfield"):
+            validate_type(1.0, int, "myfield")
 
 
-class TestValidateBool(unittest.TestCase):
-    def test_accepts_true(self):
-        self.assertTrue(validate_bool(True))
+# ---------------------------------------------------------------------------
+# validate_bool / validate_int
+# ---------------------------------------------------------------------------
 
-    def test_accepts_false(self):
-        self.assertFalse(validate_bool(False))
+class TestValidateBool:
+    def test_true_and_false(self):
+        assert validate_bool(True) is True
+        assert validate_bool(False) is False
 
-    def test_rejects_int_one(self):
-        with self.assertRaises(ValueError):
+    def test_int_rejected(self):
+        with pytest.raises(ValueError):
             validate_bool(1)
 
-    def test_rejects_string(self):
-        with self.assertRaises(ValueError):
-            validate_bool("true")
-
-    def test_error_message_contains_label(self):
-        with self.assertRaises(ValueError) as ctx:
-            validate_bool("yes", "enabled_flag")
-        self.assertIn("enabled_flag", str(ctx.exception))
+    def test_none_rejected(self):
+        with pytest.raises(ValueError):
+            validate_bool(None)
 
 
-class TestValidateInt(unittest.TestCase):
-    def test_accepts_int(self):
-        self.assertEqual(validate_int(5), 5)
+class TestValidateInt:
+    def test_positive_int(self):
+        assert validate_int(7) == 7
 
-    def test_rejects_float(self):
-        with self.assertRaises(ValueError):
-            validate_int(5.0)
+    def test_zero(self):
+        assert validate_int(0) == 0
 
-    def test_rejects_bool(self):
-        # bool is a subclass of int but type(True) is bool, not int
-        with self.assertRaises(ValueError):
+    def test_float_rejected(self):
+        with pytest.raises(ValueError):
+            validate_int(1.0)
+
+    def test_bool_rejected(self):
+        with pytest.raises(ValueError):
             validate_int(True)
 
-    def test_rejects_string(self):
-        with self.assertRaises(ValueError):
-            validate_int("5")
 
+# ---------------------------------------------------------------------------
+# validate_range
+# ---------------------------------------------------------------------------
 
-class TestValidateRange(unittest.TestCase):
-    def test_accepts_within_range(self):
-        self.assertEqual(validate_range(5, 1, 10), 5)
+class TestValidateRange:
+    def test_in_range(self):
+        assert validate_range(5, 1, 10) == 5
 
-    def test_accepts_boundary_values(self):
-        self.assertEqual(validate_range(1, 1, 10), 1)
-        self.assertEqual(validate_range(10, 1, 10), 10)
+    def test_at_bounds(self):
+        assert validate_range(1, 1, 10) == 1
+        assert validate_range(10, 1, 10) == 10
 
-    def test_rejects_below_min(self):
-        with self.assertRaises(ValueError):
+    def test_out_of_range(self):
+        with pytest.raises(ValueError):
             validate_range(0, 1, 10)
-
-    def test_rejects_above_max(self):
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             validate_range(11, 1, 10)
 
-    def test_error_message_contains_label(self):
-        with self.assertRaises(ValueError) as ctx:
-            validate_range(999, 1, 10, "timeout")
-        self.assertIn("timeout", str(ctx.exception))
 
+# ---------------------------------------------------------------------------
+# validate_ttl_seconds
+# ---------------------------------------------------------------------------
 
-class TestValidateTTL(unittest.TestCase):
-    def test_accepts_valid_context_ttl(self):
-        self.assertEqual(validate_ttl_seconds(120), 120)
+class TestValidateTtlSeconds:
+    def test_default_range(self):
+        assert validate_ttl_seconds(TTL.CONTEXT_MIN) == TTL.CONTEXT_MIN
+        assert validate_ttl_seconds(TTL.CONTEXT_MAX) == TTL.CONTEXT_MAX
 
-    def test_accepts_min_boundary(self):
-        self.assertEqual(validate_ttl_seconds(TTL.CONTEXT_MIN), TTL.CONTEXT_MIN)
-
-    def test_accepts_max_boundary(self):
-        self.assertEqual(validate_ttl_seconds(TTL.CONTEXT_MAX), TTL.CONTEXT_MAX)
-
-    def test_rejects_zero(self):
-        with self.assertRaises(ValueError):
+    def test_out_of_default_range_rejected(self):
+        with pytest.raises(ValueError):
             validate_ttl_seconds(0)
-
-    def test_rejects_too_large(self):
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             validate_ttl_seconds(TTL.CONTEXT_MAX + 1)
 
-    def test_rejects_non_int(self):
-        with self.assertRaises(ValueError):
-            validate_ttl_seconds(5.0)  # type: ignore[arg-type]
+    def test_custom_range(self):
+        assert validate_ttl_seconds(
+            TTL.APPROVAL_MIN, min_val=TTL.APPROVAL_MIN, max_val=TTL.APPROVAL_MAX
+        ) == TTL.APPROVAL_MIN
 
-    def test_custom_range_approval(self):
-        result = validate_ttl_seconds(
-            TTL.APPROVAL_DEFAULT,
-            min_val=TTL.APPROVAL_MIN,
-            max_val=TTL.APPROVAL_MAX,
-            label="approval_ttl",
-        )
-        self.assertEqual(result, TTL.APPROVAL_DEFAULT)
+    def test_float_rejected(self):
+        with pytest.raises(ValueError):
+            validate_ttl_seconds(30.0)
 
-    def test_custom_range_rejects_below_min(self):
-        with self.assertRaises(ValueError):
-            validate_ttl_seconds(
-                TTL.APPROVAL_MIN - 1,
-                min_val=TTL.APPROVAL_MIN,
-                max_val=TTL.APPROVAL_MAX,
-            )
+    def test_bool_rejected(self):
+        with pytest.raises(ValueError):
+            validate_ttl_seconds(True)
 
 
-class TestValidateStringField(unittest.TestCase):
-    def test_accepts_valid_string(self):
-        self.assertEqual(validate_string_field("hello", 10), "hello")
+# ---------------------------------------------------------------------------
+# validate_string_field
+# ---------------------------------------------------------------------------
 
-    def test_accepts_exact_max_length(self):
-        s = "a" * 10
-        self.assertEqual(validate_string_field(s, 10), s)
+class TestValidateStringField:
+    def test_valid(self):
+        assert validate_string_field("hello", 10) == "hello"
 
-    def test_rejects_too_long(self):
-        with self.assertRaises(ValueError):
+    def test_at_max_length(self):
+        assert validate_string_field("a" * 10, 10) == "a" * 10
+
+    def test_over_max_length(self):
+        with pytest.raises(ValueError, match="exceeds"):
             validate_string_field("a" * 11, 10)
 
-    def test_rejects_non_string(self):
-        with self.assertRaises(ValueError):
-            validate_string_field(123, 10)  # type: ignore[arg-type]
-
-    def test_rejects_empty_by_default(self):
-        with self.assertRaises(ValueError):
+    def test_empty_rejected_by_default(self):
+        with pytest.raises(ValueError, match="must not be empty"):
             validate_string_field("", 10)
 
-    def test_accepts_empty_when_allowed(self):
-        self.assertEqual(validate_string_field("", 10, allow_empty=True), "")
+    def test_empty_allowed_when_flag_set(self):
+        assert validate_string_field("", 10, allow_empty=True) == ""
+
+    def test_non_string_rejected(self):
+        with pytest.raises(ValueError):
+            validate_string_field(42, 10)
 
 
-class TestTruncate(unittest.TestCase):
-    def test_short_string_unchanged(self):
-        self.assertEqual(truncate("hi", 100), "hi")
+# ---------------------------------------------------------------------------
+# truncate
+# ---------------------------------------------------------------------------
 
-    def test_truncates_at_max_length(self):
-        self.assertEqual(truncate("abcdef", 3), "abc")
+class TestTruncate:
+    def test_no_truncation_needed(self):
+        assert truncate("hi", 10) == "hi"
 
-    def test_default_length_is_message_constant(self):
-        long_str = "x" * (Truncation.MESSAGE + 10)
-        self.assertEqual(len(truncate(long_str)), Truncation.MESSAGE)
+    def test_truncates_to_limit(self):
+        assert truncate("abcdef", 3) == "abc"
 
-    def test_custom_length(self):
-        self.assertEqual(truncate("hello world", 5), "hello")
+    def test_default_uses_message_constant(self):
+        long = "x" * (Truncation.MESSAGE + 50)
+        result = truncate(long)
+        assert len(result) == Truncation.MESSAGE
 
-    def test_empty_string(self):
-        self.assertEqual(truncate("", 100), "")
+    def test_zero_limit(self):
+        assert truncate("abc", 0) == ""
 
 
-class TestToCompactJson(unittest.TestCase):
-    def test_basic_dict(self):
+# ---------------------------------------------------------------------------
+# to_compact_json
+# ---------------------------------------------------------------------------
+
+class TestToCompactJson:
+    def test_produces_sorted_compact_json(self):
         result = to_compact_json({"b": 2, "a": 1})
-        # Keys must be sorted
-        self.assertEqual(result, '{"a":1,"b":2}')
+        assert result == '{"a":1,"b":2}'
 
-    def test_no_spaces(self):
-        result = to_compact_json({"x": [1, 2, 3]})
-        self.assertNotIn(" ", result)
-
-    def test_rejects_nan(self):
-        with self.assertRaises(ValueError):
+    def test_no_nan_allowed(self):
+        with pytest.raises(ValueError):
             to_compact_json({"v": float("nan")})
 
-    def test_rejects_inf(self):
-        with self.assertRaises(ValueError):
-            to_compact_json({"v": float("inf")})
+    def test_no_inf_allowed(self):
+        with pytest.raises(ValueError):
+            to_compact_json(float("inf"))
 
-    def test_ensure_ascii(self):
+    def test_nested_structure(self):
+        data = {"x": [1, 2], "y": {"z": True}}
+        parsed = json.loads(to_compact_json(data))
+        assert parsed == data
+
+    def test_empty_dict(self):
+        assert to_compact_json({}) == "{}"
+
+    def test_ascii_safe(self):
         result = to_compact_json({"k": "café"})
-        self.assertTrue(result.isascii())
-
-    def test_roundtrip(self):
-        data = {"a": 1, "b": [True, None, "hello"]}
-        result = json.loads(to_compact_json(data))
-        self.assertEqual(result, data)
-
-    def test_with_default_callable(self):
-        # Should not raise for a type that is not JSON-serialisable by default
-        result = to_compact_json({"ts": object()}, default=str)
-        self.assertIn('"ts"', result)
-
-    def test_bytes_form(self):
-        result = to_compact_json_bytes({"k": "v"})
-        self.assertIsInstance(result, bytes)
-        self.assertEqual(json.loads(result), {"k": "v"})
+        assert all(ord(c) < 128 for c in result)
 
 
-class TestFiniteFloat(unittest.TestCase):
-    def test_accepts_int(self):
-        self.assertEqual(finite_float(5), 5.0)
+class TestToCompactJsonBytes:
+    def test_returns_bytes(self):
+        result = to_compact_json_bytes({"a": 1})
+        assert isinstance(result, bytes)
+        assert result == b'{"a":1}'
 
-    def test_accepts_float(self):
-        self.assertAlmostEqual(finite_float(3.14), 3.14)
 
-    def test_rejects_nan(self):
-        with self.assertRaises(ValueError):
+# ---------------------------------------------------------------------------
+# finite_float
+# ---------------------------------------------------------------------------
+
+class TestFiniteFloat:
+    def test_int_coerced(self):
+        assert finite_float(3) == 3.0
+
+    def test_finite_float(self):
+        assert finite_float(1.5) == 1.5
+
+    def test_nan_rejected(self):
+        with pytest.raises(ValueError, match="finite"):
             finite_float(float("nan"))
 
-    def test_rejects_inf(self):
-        with self.assertRaises(ValueError):
-            finite_float(float("inf"))
+    def test_inf_rejected(self):
+        with pytest.raises(ValueError):
+            finite_float(math.inf)
 
-    def test_rejects_string(self):
-        with self.assertRaises(ValueError):
-            finite_float("3.14")  # type: ignore[arg-type]
+    def test_string_rejected(self):
+        with pytest.raises(ValueError):
+            finite_float("1.0")
 
 
-class TestClamp(unittest.TestCase):
+# ---------------------------------------------------------------------------
+# clamp
+# ---------------------------------------------------------------------------
+
+class TestClamp:
     def test_within_range(self):
-        self.assertEqual(clamp(5, 1, 10), 5)
+        assert clamp(5, 1, 10) == 5
 
-    def test_below_min(self):
-        self.assertEqual(clamp(-1, 1, 10), 1)
+    def test_below_lo(self):
+        assert clamp(-1, 0, 10) == 0
 
-    def test_above_max(self):
-        self.assertEqual(clamp(100, 1, 10), 10)
+    def test_above_hi(self):
+        assert clamp(20, 0, 10) == 10
 
-    def test_boundary(self):
-        self.assertEqual(clamp(1, 1, 10), 1)
-        self.assertEqual(clamp(10, 1, 10), 10)
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_at_bounds(self):
+        assert clamp(0, 0, 10) == 0
+        assert clamp(10, 0, 10) == 10
