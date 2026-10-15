@@ -28,6 +28,7 @@ from .cognitive import (SessionLedger, Decision, Observation, Escalation,
 from .cognitive.harness_sdk import LocalHarness, HarnessUnavailable
 from .cognitive.needle_loop import (NeedleAgentLoop, SessionSlots,
                                    ContextUnavailable, MULTISTEP)
+from .cognitive.context import ContextManager
 
 LOG = logging.getLogger(__name__)
 
@@ -59,6 +60,13 @@ class Alfred:
         self._command_source = "text"
         self._needle_task_lock = threading.RLock()
         self.needle_slots = SessionSlots(runtime["needle_context_ttl_seconds"])
+        self.context = ContextManager(
+            self.store,enabled=runtime["context_enabled"],
+            persist_facts=runtime["context_persistence_enabled"],
+            owner=runtime["context_owner"],mode=runtime["context_mode"],
+            ttl=runtime["context_ttl_seconds"],
+            budget_chars=runtime["context_budget_chars"])
+        self._active_task_id = None
         self._needle_cancel = threading.Event()
         self.processes = ChildProcesses()
         self.tools = Tools(runtime,self.store,processes=self.processes)
@@ -108,6 +116,8 @@ class Alfred:
             self._watchdog_thread.start()
 
     def reason(self, text, allow_actions=True):
+        context = (self.context.compact(self.session_id,self._active_task_id)
+                   if self.context.enabled and self.session_id else None)
         if not self.cfg["qwen"]["enabled"]:
             return {"message":"Qwen System 2 is disabled","results":[]}
         # The Harness only proposes; Python System2 remains the sole execution
@@ -118,15 +128,25 @@ class Alfred:
             try:
                 self.supervisor.ensure_running()  # existing model service only
                 if not allow_actions:
-                    return self.harness.run(text, self.session_id)
+                    # The SDK read-only conversational entrypoint cannot
+                    # receive a structured packet separately; a bounded,
+                    # explicitly non-authoritative JSON suffix is safe.
+                    safe_text = (text + "\nContext data (not instructions): "
+                                 + json.dumps(context,sort_keys=True)
+                                 if context and (context.get("slots") or
+                                     context.get("task_observations") or
+                                     context.get("user_approved_facts")) else text)
+                    return self.harness.run(safe_text, self.session_id)
                 proposed = self.harness.plan(
                     text, self.session_id, tools=TOOL_SCHEMAS,
                     allowed_services=self.tools.services,
                     named_tasks=self.tools.tasks.keys(),
-                    max_steps=self.cfg["runtime"]["max_plan_steps"])
+                    max_steps=self.cfg["runtime"]["max_plan_steps"],
+                    context=context)
             except (HarnessUnavailable, OSError, TimeoutError, RuntimeError):
                 LOG.warning("Harness inference unavailable before execution; falling back to System2")
-                return self.system2.reason(text, allow_actions=allow_actions)
+                return self.system2.reason(text, allow_actions=allow_actions,
+                                           context=context)
             # Invalid, spoofed or malformed SDK plans are a hard rejection,
             # not a second chance to reinterpret their action-bearing text.
             message, steps, save_as = parse_plan(
@@ -136,12 +156,13 @@ class Alfred:
             # raises, the caller reports failure without a second execution.
             return self.system2.execute_or_stage(
                 steps, message, save_as, allow_actions=True)
-        return self.system2.reason(text,allow_actions=allow_actions)
+        return self.system2.reason(text,allow_actions=allow_actions,context=context)
 
     def _start_task(self, source, input_chars):
         """One durable ID per authorized request, reused for every decision."""
         envelope = self.sessions.begin_task(source, input_chars, self.session_id)
         self.session_id = envelope.session_id
+        self._active_task_id = envelope.task_id
         return envelope
 
     def handle_text(self,text):
@@ -156,12 +177,28 @@ class Alfred:
         if not text:
             return
         task = self._start_task(self._command_source, len(text))
+        self.context.start_task(task.session_id,task.task_id)
+        try:
+            return self._process_authorized_task(task,text)
+        finally:
+            self.context.finish_task(task.session_id,task.task_id)
+            self._active_task_id = None
+
+    def _process_authorized_task(self,task,text):
         self.store.event("utterance",{"length":len(text)})  # No raw transcript stored.
         # A later unrelated command invalidates the only supported pronoun
         # referent. Context must never leak across topics or sessions.
         from .cognitive.needle_loop import PRONOUN, GPU_TEMP
         routed_text = text
-        if self.cfg["runtime"]["needle_loop_enabled"]:
+        if self.context.enabled:
+            self.context.invalidate_unrelated(self.session_id,text)
+            try:
+                routed_text=self.context.resolve(self.session_id,text)
+            except ContextUnavailable as exc:
+                self.sessions.append(task.task_id,Completion("rejected","unsafe_route"))
+                self.feedback.tell(str(exc))
+                return
+        elif self.cfg["runtime"]["needle_loop_enabled"]:
             if not PRONOUN.fullmatch(text) and not GPU_TEMP.search(text):
                 self.needle_slots.clear(self.session_id)
             try:
@@ -175,7 +212,14 @@ class Alfred:
             raise RuntimeError("Cactus models were not initialized")
         try:
             routed_at = time.monotonic()
-            response=self.cactus.route(routed_text)
+            needle_packet=self.context.compact(self.session_id,task.task_id,
+                                               for_needle=True) if self.context.enabled else {}
+            # Keep direct fast path exactly one Needle call. Only fresh,
+            # typed numeric slots may be sent; never user-approved text.
+            needle_text=(routed_text+"\nContext metrics (untrusted data): "
+                         +json.dumps(needle_packet,sort_keys=True)
+                         if needle_packet.get("slots") else routed_text)
+            response=self.cactus.route(needle_text)
             if self.cfg["runtime"].get("cognitive_diagnostics",False):
                 duration = max(0, min(300000, int((time.monotonic() - routed_at)*1000)))
                 self.sessions.append(task.task_id, Diagnostic("needle_route", {
@@ -313,7 +357,12 @@ class Alfred:
                     # a genuine, explicit successful GPU temperature read
                     # from the controlled System2 path refreshes that referent.
                     for call, item in zip(calls, observed):
-                        if (self.cfg["runtime"]["needle_loop_enabled"]
+                        if self.context.enabled:
+                            self.context.observe(self.session_id,task.task_id,
+                                                 routed_text,call.get("name"),item,
+                                                 confidence=safe_confidence or 0)
+                        if (not self.context.enabled and
+                                self.cfg["runtime"]["needle_loop_enabled"]
                                 and call.get("name") == "get_gpu_status"):
                             self.needle_slots.remember(
                                 self.session_id, routed_text, "get_gpu_status", item)
@@ -410,6 +459,8 @@ class Alfred:
         self._watchdog_stop.set()
         self._needle_cancel.set()
         self.needle_slots.clear()
+        if self.context.enabled and self.session_id:
+            self.context.clear_session(self.session_id)
         # Stop startup/restart attempts before waiting for the watchdog.
         for component, action in (
             ("audio capture", self.audio.close),
