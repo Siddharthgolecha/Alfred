@@ -51,6 +51,8 @@ class InferenceAdmission:
 
     KINDS=frozenset(("needle","needle_feedback","whistle","qwen",
                      "qwen_explain","harness"))
+    MAX_VOICE_WAITERS=2
+    MAX_OTHER_WAITERS=1
 
     def __init__(self, *, enabled=False, min_available_mib=512,
                  max_swap_used_mib=1024, max_cpu_load_per_core=3.,
@@ -129,11 +131,16 @@ class InferenceAdmission:
         with self._cond:
             if self._closed:
                 raise AdmissionRejected("Inference admission shut down")
-            # No expensive model may queue unboundedly. Whistle is permitted
-            # a reserved priority slot; it must never wait behind new Qwen.
-            if len(self._queue)>=1 and kind!="whistle":
+            # Fixed per-priority admission slots. A burst of simultaneous
+            # Whistle callers must not accumulate unbounded Python threads.
+            # The single background slot is kept separate from two reserved
+            # voice waiters. Every accepted priority class remains FIFO.
+            voice=sum(k=="whistle" for _,k in self._queue)
+            other=len(self._queue)-voice
+            if ((kind=="whistle" and voice>=self.MAX_VOICE_WAITERS)
+                or (kind!="whistle" and other>=self.MAX_OTHER_WAITERS)):
                 self._counts["rejected"]+=1
-                raise AdmissionRejected("Expensive inference queue full")
+                raise AdmissionRejected("Inference priority queue full")
             self._queue.append((ticket,kind))
             if len(self._queue)>1:
                 self._counts["queued"]+=1
@@ -142,11 +149,18 @@ class InferenceAdmission:
                 while True:
                     if self._closed:
                         raise AdmissionRejected("Inference admission shut down")
+                    # Whistle wins the next free slot over queued background
+                    # turns, but never overtakes an earlier Whistle ticket.
+                    # Bounded deadlines prevent indefinite background waits.
+                    first_voice=next((t for t,k in self._queue
+                                      if k=="whistle"),None)
+                    first_other=next((t for t,k in self._queue
+                                      if k!="whistle"),None)
                     eligible=(self._owner is None and (
-                        kind=="whistle" or not self._capture)
-                        and (kind=="whistle" or not any(
-                            k=="whistle" for t,k in self._queue)))
-                    if eligible and (kind=="whistle" or self._queue[0][0] is ticket):
+                        first_voice is ticket if kind=="whistle"
+                        else (not self._capture and first_voice is None
+                              and first_other is ticket)))
+                    if eligible:
                         try:
                             pressure=self._pressure(kind)
                         except AdmissionRejected:
