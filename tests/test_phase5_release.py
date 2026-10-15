@@ -94,6 +94,24 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertEqual(len(raw),432)
             self.assertIn("offline_python_stubs",(Path(td)/"report.json").read_text())
             self.assertTrue((Path(td)/"fixtures.json").exists())
+            baseline=[r for r in raw if r["mode"]==MODES[0]]
+            unified=[r for r in raw if r["mode"]==MODES[2]]
+            self.assertEqual(len(unified),144)
+            self.assertTrue(all(r["gate_enabled"]=="0" for r in baseline))
+            self.assertTrue(all(r["gate_enabled"]=="1" for r in unified))
+            self.assertGreater(sum(int(r["gate_granted"]) for r in unified),0)
+            self.assertGreater(sum(int(r["gate_whistle_calls"]) for r in unified),0)
+            for case in ("ram","swap","cpu"):
+                overloaded=[r for r in unified if r["gate_resource_case"]==case]
+                self.assertEqual(len(overloaded),12)
+                self.assertTrue(all(int(r["gate_pressure"])>=1 for r in overloaded))
+            contested=[r for r in unified if r["gate_capture_contended"]=="1"]
+            self.assertEqual(len(contested),12)
+            self.assertTrue(all(int(r["gate_rejected"])>=1 for r in contested))
+            self.assertGreater(sum(int(r["gate_needle_attempts"]) for r in unified),0)
+            summary=report["measurements"][MODES[2]]
+            self.assertEqual(summary["admission_pressure_refusals"],
+                             sum(int(r["gate_pressure"]) for r in unified))
 
 
 if __name__=="__main__":
