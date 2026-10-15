@@ -593,8 +593,11 @@ class OfflineMeetingAdapter:
         if type(permit) is not MeetingPermit:
             raise PermissionError("Permit required")
         with self._lock:
-            self._permits.pop((permit.task_id,permit.meeting_id),None)
-            self._validated_minutes.pop((permit.task_id,permit.meeting_id),None)
+            key=(permit.task_id,permit.meeting_id)
+            if self._permits.get(key) is not permit:
+                raise PermissionError("Only the exact trusted meeting permit can be revoked")
+            self._permits.pop(key,None)
+            self._validated_minutes.pop(key,None)
 
     def clear_session(self, session_id, owner):
         valid_id(session_id)
