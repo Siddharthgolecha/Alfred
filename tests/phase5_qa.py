@@ -20,7 +20,7 @@ from unittest.mock import Mock,patch
 
 from alfred.app import Alfred
 from alfred.config import load_config
-from alfred.inference_admission import linux_resources
+from alfred.inference_admission import linux_resources, AdmissionRejected
 
 
 CATEGORIES=(
@@ -77,21 +77,81 @@ def route(case):
             "function_calls":calls}
 
 
+class AdmittedStub:
+    """Offline inference stand-in that enters the REAL admission queue."""
+    def __init__(self,admission,kind):
+        self.admission=admission
+        self.kind=kind
+        self.mock=Mock()
+        self.attempt_count=0
+
+    def __call__(self,*args,**kwargs):
+        self.attempt_count+=1
+        with self.admission.claim(self.kind):
+            return self.mock(*args,**kwargs)
+
+    @property
+    def return_value(self):
+        return self.mock.return_value
+
+    @return_value.setter
+    def return_value(self,value):
+        self.mock.return_value=value
+
+    @property
+    def side_effect(self):
+        return self.mock.side_effect
+
+    @side_effect.setter
+    def side_effect(self,value):
+        self.mock.side_effect=value
+
+    @property
+    def call_count(self):
+        return self.mock.call_count
+
+    def reset_mock(self):
+        self.mock.reset_mock()
+
+
+class AdmittedCactus:
+    def __init__(self,admission):
+        self.route=AdmittedStub(admission,"needle")
+        self.route_feedback=AdmittedStub(admission,"needle_feedback")
+        self.transcribe_stream=AdmittedStub(admission,"whistle")
+
+
 class FakeHarness:
-    def __init__(self, case):
+    def __init__(self, case, admission=None):
         self.case=case
+        self.admission=admission
         self.run_calls=0
         self.plan_calls=0
+
     def run(self,text,session_id):
         self.run_calls+=1
+        if self.admission is None:
+            return self._respond()
+        with self.admission.claim("harness"):
+            return self._respond()
+
+    def _respond(self):
         if self.case["scenario"]=="offline_reasoner_failure":
             raise RuntimeError("local SDK not available")
         return {"message":"Offline stub response; no actions","results":[]}
+
     def plan(self,text,session_id,**kwargs):
         self.plan_calls+=1
+        if self.admission is None:
+            return self._proposal()
+        with self.admission.claim("harness"):
+            return self._proposal()
+
+    def _proposal(self):
         if self.case["scenario"]=="offline_reasoner_failure":
             raise RuntimeError("local SDK not available")
         return proposal(self.case)
+
     def close(self):
         pass
 
@@ -126,19 +186,52 @@ def run_matrix(output_dir):
             cfg["runtime"]["allowed_services"]=["safe.service"]
             cfg["runtime"]["needle_loop_enabled"]=(mode!=MODES[0])
             cfg["runtime"]["harness_enabled"]=False
+            # This must be enabled before Alfred constructs Qwen/Harness and
+            # binds their shared admission controller, never retrofitted.
+            unified=(mode==MODES[2])
+            cfg["runtime"]["resource_admission_enabled"]=unified
+            if unified:
+                cfg["runtime"]["resource_max_wait_ms"]=10
             app=Alfred(cfg,load_models=False)
             app.feedback.tell=Mock()
-            app.cactus=Mock()
+            app.cactus=(AdmittedCactus(app.admission) if unified else Mock())
             app.supervisor.ensure_running=Mock(return_value=True)
-            app.admission.sampler=lambda:{"available_mib":2048.,
-                            "swap_used_mib":0.,"cpu_load_per_core":.2}
-            if mode==MODES[2]:
-                app.admission.enabled=True
-            app.qwen.explain=Mock(return_value="Offline stub diagnosis")
+            resource={"available_mib":2048.,
+                      "swap_used_mib":0.,"cpu_load_per_core":.2}
+            app.admission.sampler=lambda:dict(resource)
+            if unified:
+                # Exercise actual Condition claim() and wrapper attachment
+                # for all native model families without loading a real model.
+                app.qwen.complete=AdmittedStub(app.admission,"qwen")
+                app.qwen.explain=AdmittedStub(app.admission,"qwen_explain")
+                app.qwen.explain.return_value="Offline stub diagnosis"
+                app.cactus.transcribe_stream.return_value="Offline Whistle stub"
+            else:
+                app.qwen.explain=Mock(return_value="Offline stub diagnosis")
             try:
                 for case in fixtures:
                     name=case["scenario"]
+                    variant=case["variant"]
                     app.needle_slots.clear()
+                    # Identical deterministic fixture IDs across policies.
+                    # Variants 8/9/10/11 add capture/RAM/swap/CPU pressure.
+                    capture=unified and variant==8
+                    resource={"available_mib":2048.,
+                              "swap_used_mib":0.,"cpu_load_per_core":.2}
+                    before_gate=app.admission.snapshot()
+                    if unified:
+                        # Whistle has a real admission wrapper, exercised
+                        # before voice capture moves into model routing.
+                        app.admission.set_capture_active(True)
+                        app.cactus.transcribe_stream(())
+                        app.admission.set_capture_active(False)
+                        if variant==9:
+                            resource["available_mib"]=100.
+                        elif variant==10:
+                            resource["swap_used_mib"]=5000.
+                        elif variant==11:
+                            resource["cpu_load_per_core"]=8.
+                        app.admission.set_capture_active(capture)
                     app.cactus.route.return_value=route(case)
                     app.cactus.route_feedback.reset_mock()
                     if name=="two_step_feedback":
@@ -160,12 +253,16 @@ def run_matrix(output_dir):
                         app.needle_slots.remember(app.session_id or "a"*32,
                             "Check GPU temperature","get_gpu_status",
                             {"available":True,"gpu_temp_c":55})
-                    app.qwen.complete=Mock(return_value=proposal(case))
-                    if name=="offline_reasoner_failure":
-                        app.qwen.complete.side_effect=OSError("offline local model")
-                    if mode==MODES[2]:
-                        app.harness=FakeHarness(case)
+                    if unified:
+                        app.qwen.complete.reset_mock()
+                        app.qwen.complete.return_value=proposal(case)
+                        app.qwen.complete.side_effect=(OSError("offline local model")
+                            if name=="offline_reasoner_failure" else None)
+                        app.harness=FakeHarness(case,admission=app.admission)
                     else:
+                        app.qwen.complete=Mock(return_value=proposal(case))
+                        if name=="offline_reasoner_failure":
+                            app.qwen.complete.side_effect=OSError("offline local model")
                         app.harness=None
                     count_before=app.store.db.execute(
                         "SELECT COUNT(*) FROM events WHERE category='tool'").fetchone()[0]
@@ -181,6 +278,8 @@ def run_matrix(output_dir):
                              "available":True,"uptime_seconds":640}):
                         app.handle_text(case["text"])
                     latency=(time.perf_counter_ns()-wall)/1e6
+                    app.admission.set_capture_active(False)
+                    after_gate=app.admission.snapshot()
                     after=linux_resources()
                     latest=app.store.db.execute(
                         "SELECT id,state FROM cognitive_tasks ORDER BY rowid DESC LIMIT 1"
@@ -223,7 +322,24 @@ def run_matrix(output_dir):
                         "cpu_load_per_core":after.get("cpu_load_per_core"),
                         "gpu_utilization_pct":None,
                         "qwen_cold_load_ms":None,"qwen_warm_load_ms":None,
-                        "sampler_before_available_mib":before.get("available_mib")
+                        "sampler_before_available_mib":before.get("available_mib"),
+                        "gate_enabled":int(app.admission.enabled),
+                        "gate_granted":after_gate["granted"]-before_gate["granted"],
+                        "gate_rejected":after_gate["rejected"]-before_gate["rejected"],
+                        "gate_pressure":after_gate["pressure"]-before_gate["pressure"],
+                        "gate_queued":after_gate["queued"]-before_gate["queued"],
+                        "gate_queue_depth":after_gate["queue_depth"],
+                        "gate_capture_contended":int(capture),
+                        "gate_resource_case":("ram" if variant==9 and unified else
+                                              "swap" if variant==10 and unified else
+                                              "cpu" if variant==11 and unified else
+                                              "nominal"),
+                        "gate_whistle_calls":(app.cactus.transcribe_stream.call_count
+                                              if unified else 0),
+                        "gate_needle_attempts":(app.cactus.route.attempt_count
+                                                if unified else 0),
+                        "gate_qwen_attempts":(app.qwen.complete.attempt_count
+                                              if unified else 0)
                     })
             finally:
                 app.close()
@@ -231,7 +347,7 @@ def run_matrix(output_dir):
              "native_jetson_tested":False,
              "fixture_count":len(fixtures),"mode_count":len(MODES),
              "row_count":len(rows),
-             "models":"Mocked Needle/Whistle, Qwen and Harness; real System2/tool policy/SQLite",
+             "models":"Admission-attached offline Needle/Whistle/Qwen/Harness stubs in unified mode; real Condition gate/System2/SQLite",
              "measurements":{},
              "release_gates":{
                  "unauthorized_tool_executions":sum(r["unauthorized_tool_executions"] for r in rows),
@@ -248,7 +364,15 @@ def run_matrix(output_dir):
             "p50_latency_ms":pct([r["duration_ms"] for r in rr],.5),
             "p95_latency_ms":pct([r["duration_ms"] for r in rr],.95),
             "qwen_cold_load_ms":None,"qwen_warm_load_ms":None,
-            "gpu_utilization_pct":None}
+            "gpu_utilization_pct":None,
+            "admission_grants":sum(r["gate_granted"] for r in rr),
+            "admission_pressure_refusals":sum(r["gate_pressure"] for r in rr),
+            "admission_queue_rejections":sum(r["gate_rejected"] for r in rr),
+            "admission_whistle_calls":sum(r["gate_whistle_calls"] for r in rr)}
+    if not (sum(r["gate_granted"] for r in rows if r["mode"]==MODES[2])>0
+            and sum(r["gate_pressure"] for r in rows if r["mode"]==MODES[2])>0
+            and sum(r["gate_needle_attempts"] for r in rows if r["mode"]==MODES[2])>0):
+        raise AssertionError("Unified QA did not exercise shared admission")
     with (output_dir/"fixtures.json").open("w") as f:
         json.dump(fixtures,f,indent=2,sort_keys=True)
     with (output_dir/"raw.csv").open("w",newline="") as f:
