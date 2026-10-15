@@ -19,6 +19,7 @@ from .console import TranscriptDisplay
 from .routing import adjust_status_calls
 from .config import data_path, load_config
 from .models import Cactus, LlamaSupervisor, Qwen
+from .inference_admission import InferenceAdmission, AdmissionRejected
 from .lifecycle import ChildProcesses, ShutdownSocket, request_close
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools
 from .system2 import System2, parse_plan
@@ -59,6 +60,12 @@ class Alfred:
         self._command_source = "text"
         self._needle_task_lock = threading.RLock()
         self.needle_slots = SessionSlots(runtime["needle_context_ttl_seconds"])
+        self.admission = InferenceAdmission(
+            enabled=runtime["resource_admission_enabled"],
+            min_available_mib=runtime["resource_min_available_mib"],
+            max_swap_used_mib=runtime["resource_max_swap_used_mib"],
+            max_cpu_load_per_core=runtime["resource_max_cpu_load_per_core"],
+            max_wait_ms=runtime["resource_max_wait_ms"])
         self._needle_cancel = threading.Event()
         self.processes = ChildProcesses()
         self.tools = Tools(runtime,self.store,processes=self.processes)
@@ -66,7 +73,9 @@ class Alfred:
         self.audio = AudioManager(cfg["audio"])
         self.wake_word = WakeWordGate(cfg["wake_word"])
         self.supervisor = LlamaSupervisor(cfg["qwen"],runtime["logs"])
-        self.qwen = Qwen(cfg["qwen"],self.supervisor)
+        self.qwen = (Qwen(cfg["qwen"],self.supervisor,admission=self.admission)
+                     if self.admission.enabled
+                     else Qwen(cfg["qwen"],self.supervisor))
         self.system2 = System2(self.qwen,self.tools,self.store,runtime)
         # Optional read-only Harness route, never a new tool authority/server.
         self.harness = None
@@ -75,13 +84,16 @@ class Alfred:
             try:
                 self.harness = LocalHarness(
                     self.supervisor.url if hasattr(self.supervisor, "url") else cfg["qwen"]["url"],
-                    model, timeout=runtime["harness_timeout_seconds"])
+                    model, timeout=runtime["harness_timeout_seconds"],
+                    **({"admission":self.admission} if self.admission.enabled else {}))
             except HarnessUnavailable:
                 LOG.warning("Safe harness unavailable; using legacy Qwen path")
         if not runtime.get("telemetry",False):
             import os
             os.environ.setdefault("NEEDLE_TELEMETRY","0")
-        self.cactus = Cactus(TOOL_SCHEMAS) if load_models else None
+        self.cactus = (Cactus(TOOL_SCHEMAS,admission=self.admission)
+                       if load_models and self.admission.enabled else
+                       Cactus(TOOL_SCHEMAS) if load_models else None)
         self.scheduler = Scheduler(self.store,self.tools,self._remind)
         self._watchdog_stop = threading.Event()
         self._watchdog_thread = None
@@ -98,7 +110,16 @@ class Alfred:
             def watchdog():
                 while not self._watchdog_stop.is_set():
                     try:
-                        self.supervisor.ensure_running()
+                        if self.admission.enabled:
+                            if self.admission.capture_active:
+                                # Never cold-start Qwen in the active voice
+                                # capture critical path. Next watchdog cycle
+                                # will retry once capture is idle.
+                                continue
+                            with self.admission.claim("qwen"):
+                                self.supervisor.ensure_running()
+                        else:
+                            self.supervisor.ensure_running()
                         LOG.info("Qwen available: %s", self.supervisor.status())
                     except Exception as exc:
                         LOG.warning("Qwen unavailable; will retry: %s", exc)
@@ -176,7 +197,8 @@ class Alfred:
         try:
             routed_at = time.monotonic()
             response=self.cactus.route(routed_text)
-            if self.cfg["runtime"].get("cognitive_diagnostics",False):
+            if (self.cfg["runtime"].get("cognitive_diagnostics",False)
+                    and self.admission.allow_optional_diagnostics()):
                 duration = max(0, min(300000, int((time.monotonic() - routed_at)*1000)))
                 self.sessions.append(task.task_id, Diagnostic("needle_route", {
                     "latency_ms":duration, "input_chars":len(text)}))
@@ -365,7 +387,11 @@ class Alfred:
                             hypothesis, acoustic_activation=acoustically_activated) is not None:
                         transcript_display.update(hypothesis)
 
-                transcript=self.cactus.transcribe_stream(chunks,on_partial=show_partial)
+                self.admission.set_capture_active(True)
+                try:
+                    transcript=self.cactus.transcribe_stream(chunks,on_partial=show_partial)
+                finally:
+                    self.admission.set_capture_active(False)
                 command=self.wake_word.consume(
                     transcript,acoustic_activation=acoustically_activated)
                 if command is None:
@@ -415,6 +441,7 @@ class Alfred:
         self._closed = True
         self._watchdog_stop.set()
         self._needle_cancel.set()
+        self.admission.close()
         self.needle_slots.clear()
         # Stop startup/restart attempts before waiting for the watchdog.
         for component, action in (
