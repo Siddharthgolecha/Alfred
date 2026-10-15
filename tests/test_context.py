@@ -123,6 +123,64 @@ class ContextFixtures(unittest.TestCase):
         # of the task; finished-task observations must NOT be retained.
         self.assertIn("gpu_temperature",self.ctx.compact(SID_A)["slots"])
 
+    def test_running_task_reads_original_scope_not_switched_owner_mode(self):
+        self.assertTrue(self.add_gpu())
+        self.ctx.set_explicit_fact("answer_style","scope_a",local_approval=True)
+        self.ctx.switch_scope("other_owner","meeting")
+        self.ctx.set_explicit_fact("answer_style","scope_b",local_approval=True)
+        self.ctx.start_task(SID_A,TASK_B)
+        self.assertTrue(self.ctx.observe(SID_A,TASK_B,"Check system status",
+                                         "get_system_status",{"uptime_seconds":120}))
+        # Although current owner/mode is B, A's in-flight packet, referent
+        # and preferences remain pinned to the scope from A's start_task.
+        packet=self.ctx.compact(SID_A,TASK_A)
+        self.assertEqual(packet["scope"],"assistant")
+        self.assertEqual(set(packet["slots"]),{"gpu_temperature"})
+        self.assertEqual(packet["user_approved_facts"]["answer_style"]["value"],
+                         "scope_a")
+        self.assertEqual(len(packet["task_observations"]),1)
+        self.assertEqual(self.ctx.resolve(SID_A,"check it again",task_id=TASK_A),
+                         "Show GPU temperature again")
+        self.assertEqual(self.ctx.resolve(SID_A,"check it again",task_id=TASK_B),
+                         "Get system status again")
+        self.assertEqual(self.ctx.compact(SID_A,TASK_B)["user_approved_facts"]
+                         ["answer_style"]["value"],"scope_b")
+        self.ctx.invalidate_unrelated(SID_A,"Tell a joke",task_id=TASK_A)
+        self.assertEqual(self.ctx.compact(SID_A,TASK_A)["slots"],{})
+        self.assertIn("system_status",self.ctx.compact(SID_A,TASK_B)["slots"])
+
+    def test_concurrent_scope_switch_cannot_mix_slots_or_facts(self):
+        self.assertTrue(self.add_gpu())
+        self.ctx.set_explicit_fact("answer_style","scope_a",local_approval=True)
+        self.ctx.switch_scope("other_owner","meeting")
+        self.ctx.set_explicit_fact("answer_style","scope_b",local_approval=True)
+        self.ctx.start_task(SID_A,TASK_B)
+        self.assertTrue(self.ctx.observe(SID_A,TASK_B,"Check system status",
+                                         "get_system_status",{"uptime_seconds":120}))
+        barrier=threading.Barrier(2)
+        errors=[]
+        def switcher():
+            barrier.wait(timeout=5)
+            for _ in range(150):
+                self.ctx.switch_scope("local","assistant")
+                self.ctx.switch_scope("other_owner","meeting")
+        def reader():
+            barrier.wait(timeout=5)
+            for _ in range(150):
+                a=self.ctx.compact(SID_A,TASK_A)
+                b=self.ctx.compact(SID_A,TASK_B)
+                if (a["scope"]!="assistant" or set(a["slots"])!={"gpu_temperature"}
+                    or a["user_approved_facts"]["answer_style"]["value"]!="scope_a"
+                    or b["scope"]!="meeting" or set(b["slots"])!={"system_status"}
+                    or b["user_approved_facts"]["answer_style"]["value"]!="scope_b"):
+                    errors.append((a,b))
+                    break
+        threads=[threading.Thread(target=switcher),threading.Thread(target=reader)]
+        for t in threads: t.start()
+        for t in threads: t.join(timeout=8)
+        self.assertFalse(any(t.is_alive() for t in threads))
+        self.assertEqual(errors,[])
+
     def test_reject_fabricated_or_untrusted_tool_observation(self):
         cases=[
             ("get_gpu_status",{"available":False,"gpu_temp_c":65}),
