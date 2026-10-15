@@ -154,6 +154,7 @@ class NeedleAgentLoop:
             "repeated": "Repeated tool request stopped without executing it again.",
             "budget": "The bounded Needle task limit was reached. Please start a new request.",
             "cancelled": "The authorized task was cancelled before another tool call.",
+            "feedback_unavailable": "Needle feedback inference failed after a completed read.",
         }
         if observed:
             # The *next* proposal failed, not any previously returned read.
@@ -286,5 +287,13 @@ class NeedleAgentLoop:
                 ]}
             except ValueError:
                 return self._stop("unsafe", accepted, observed, outputs)
-            response = self.feedback(json.dumps(feedback, sort_keys=True,
-                                               separators=(",", ":")))
+            try:
+                response = self.feedback(json.dumps(feedback, sort_keys=True,
+                                                   separators=(",", ":")))
+            except Exception:
+                # Inference may crash AFTER the read returned. Keep that
+                # observation visible, do not replay or attempt an action.
+                outcome = self._stop("feedback_unavailable", accepted, observed, outputs)
+                return LoopOutcome({**outcome.result, "status": "incomplete"},
+                                   outcome.accepted_calls, outcome.stop,
+                                   outcome.observed)

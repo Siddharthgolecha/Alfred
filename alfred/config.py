@@ -33,7 +33,16 @@ DEFAULT = {
         "tts": False, "voice_alerts": False, "telemetry": False,
         "cognitive_diagnostics": False,
         "harness_enabled": False, "harness_timeout_seconds": 45,
-        "needle_loop_enabled": False, "needle_max_decisions": 3,
+        "needle_loop_enabled": False, "escalation_enabled": False, "context_enabled": False,
+        "resource_admission_enabled": False,
+        "resource_min_available_mib": 512,
+        "resource_max_swap_used_mib": 1024,
+        "resource_max_cpu_load_per_core": 3.0,
+        "resource_max_wait_ms": 200,
+        "context_persistence_enabled": False,
+        "context_owner": "local", "context_mode": "assistant",
+        "context_ttl_seconds": 120, "context_budget_chars": 1200,
+        "needle_max_decisions": 3,
         "needle_max_tools": 3, "needle_context_ttl_seconds": 120
     }
 }
@@ -115,6 +124,28 @@ def load_config(path=None):
     if not 10 <= int(q["supervisor_poll_seconds"]) <= 3600:
         raise ValueError("qwen.supervisor_poll_seconds must be 10..3600")
     ncfg = cfg["runtime"]
+    from .inference_admission import InferenceAdmission
+    InferenceAdmission(
+        enabled=ncfg["resource_admission_enabled"],
+        min_available_mib=ncfg["resource_min_available_mib"],
+        max_swap_used_mib=ncfg["resource_max_swap_used_mib"],
+        max_cpu_load_per_core=ncfg["resource_max_cpu_load_per_core"],
+        max_wait_ms=ncfg["resource_max_wait_ms"])
+    if type(ncfg["escalation_enabled"]) is not bool:
+        raise ValueError("escalation_enabled must be a boolean")
+    if type(ncfg["context_enabled"]) is not bool or type(ncfg["context_persistence_enabled"]) is not bool:
+        raise ValueError("context toggles must be booleans")
+    if ncfg["context_persistence_enabled"] and not ncfg["context_enabled"]:
+        raise ValueError("context_persistence_enabled requires context_enabled")
+    if (type(ncfg["context_owner"]) is not str
+            or not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{0,31}",ncfg["context_owner"])):
+        raise ValueError("Invalid context owner")
+    if ncfg["context_mode"] not in ("assistant","meeting"):
+        raise ValueError("Invalid context mode")
+    if type(ncfg["context_ttl_seconds"]) is not int or not 1 <= ncfg["context_ttl_seconds"] <= 300:
+        raise ValueError("context_ttl_seconds must be 1..300")
+    if type(ncfg["context_budget_chars"]) is not int or not 256 <= ncfg["context_budget_chars"] <= 3200:
+        raise ValueError("context_budget_chars must be 256..3200")
     if type(ncfg["needle_loop_enabled"]) is not bool:
         raise ValueError("needle_loop_enabled must be a boolean")
     if type(ncfg["needle_max_decisions"]) is not int or not 1 <= ncfg["needle_max_decisions"] <= 3:
