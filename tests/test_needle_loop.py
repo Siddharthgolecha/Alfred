@@ -489,7 +489,11 @@ class AppWiringTests(unittest.TestCase):
                 self.app.handle_text("Check GPU temperature then check status")
                 self.app.system2.direct.assert_called_once()
                 last=self.app.sessions.list_tasks(self.app.session_id)[0]
-                self.assertEqual(last["state"],"completed")
+                expected="rejected" if final["function_calls"][0]["name"] == "run_named_task" else "completed"
+                self.assertEqual(last["state"],expected)
+                if expected=="rejected":
+                    self.assertEqual(self.app.sessions.events(last["id"])[-1].reason,
+                                     "unsafe_route")
                 kinds=[e.kind for e in self.app.sessions.events(last["id"])]
                 self.assertEqual(kinds,["task","decision","observation",
                                         "decision","completion"])
@@ -510,8 +514,11 @@ class AppWiringTests(unittest.TestCase):
         self.app.system2.direct.assert_called_once()
         self.app.cactus.route_feedback.assert_not_called()
         task=self.app.sessions.list_tasks(self.app.session_id)[0]
-        self.assertEqual(task["state"],"completed")
+        self.assertEqual(task["state"],"failed")
+        self.assertEqual(self.app.sessions.events(task["id"])[-1].reason,
+                         "shutdown")
         shown=json.loads(self.app.feedback.tell.call_args.args[0])
+        self.assertEqual(shown["status"],"incomplete")
         self.assertTrue(shown["partial"])
         self.assertEqual(shown["halt_reason"],"cancelled")
         self.assertEqual(shown["results"],[{"available":True,"gpu_temp_c":55}])
