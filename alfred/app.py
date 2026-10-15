@@ -21,7 +21,7 @@ from .config import data_path, load_config
 from .models import Cactus, LlamaSupervisor, Qwen
 from .lifecycle import ChildProcesses, ShutdownSocket, request_close
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools
-from .system2 import System2, parse_plan
+from .system2 import System2, VerifiedRead, parse_plan
 from .wakeword import WakeWordGate, AcousticWakeDetector
 from .cognitive import (SessionLedger, Decision, Observation, Escalation,
                         ApprovalReference, Completion, Diagnostic)
@@ -364,26 +364,52 @@ class Alfred:
                          f"On the Jetson, run: alfred --approve {approval['approval_id']}")
                 self.feedback.tell(message)
             else:
-                # Persist only tool names/outcomes, never arguments or results.
+                # Never correlate Qwen results with Needle's routing proposal:
+                # the real executed tool names come only from System2's
+                # typed, post-execution read channel. Remove before printing
+                # or returning context to either model.
+                verified = result.pop("_verified_reads", ())
+                trusted = (verified if isinstance(verified, tuple)
+                           and all(type(v) is VerifiedRead for v in verified) else ())
                 observed = result.get("results") or []
                 if isinstance(observed, list):
                     if loop_outcome is None:
-                        for call in calls[:len(observed)]:
-                            if call.get("name") in SCHEMA_BY_NAME and call["name"] != "delegate_to_reasoner":
-                                self.sessions.append(task.task_id, Observation(call["name"], "returned"))
-                    # Never use model text to construct a context slot. Only
-                    # a genuine, explicit successful GPU temperature read
-                    # from the controlled System2 path refreshes that referent.
-                    for call, item in zip(calls, observed):
+                        for item in trusted:
+                            self.sessions.append(task.task_id, Observation(item.tool, "returned"))
+                        if route == "direct" and not trusted:
+                            # Compatibility path for pre-typed legacy/fake
+                            # direct Needle results; never infer Qwen names.
+                            for call, value in zip(calls, observed):
+                                if (call.get("name") in SCHEMA_BY_NAME and
+                                    call["name"] != "delegate_to_reasoner" and
+                                    not (isinstance(value,dict) and value.get("skipped") is True)):
+                                    self.sessions.append(task.task_id, Observation(call["name"], "returned"))
+                    # Require locally returned read data and an explicit
+                    # user-requested category; no model-authored observation.
+                    for item in trusted:
                         if self.context.enabled:
                             self.context.observe(self.session_id,task.task_id,
-                                                 routed_text,call.get("name"),item,
-                                                 confidence=safe_confidence or 0)
+                                                 routed_text,item.tool,item.output,
+                                                 confidence=(safe_confidence or 0)
+                                                 if route == "direct" else 1.0)
                         if (not self.context.enabled and
                                 self.cfg["runtime"]["needle_loop_enabled"]
-                                and call.get("name") == "get_gpu_status"):
+                                and item.tool == "get_gpu_status"):
                             self.needle_slots.remember(
-                                self.session_id, routed_text, "get_gpu_status", item)
+                                self.session_id,routed_text,item.tool,item.output)
+                    if route == "direct" and not trusted:
+                        for call, value in zip(calls, observed):
+                            if (isinstance(value,dict) and value.get("skipped") is True):
+                                continue
+                            if self.context.enabled:
+                                self.context.observe(self.session_id,task.task_id,
+                                                     routed_text,call.get("name"),value,
+                                                     confidence=safe_confidence or 0)
+                            if (not self.context.enabled and
+                                    self.cfg["runtime"]["needle_loop_enabled"]
+                                    and call.get("name") == "get_gpu_status"):
+                                self.needle_slots.remember(
+                                    self.session_id,routed_text,"get_gpu_status",value)
                 outcome = ("disabled" if not self.cfg["qwen"]["enabled"] and route != "direct"
                            else "no_action" if not observed else "executed")
                 self.sessions.append(task.task_id,
