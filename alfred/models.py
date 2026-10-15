@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import shutil
@@ -60,6 +61,31 @@ PLAN_RESPONSE_SCHEMA = {
     "required": ["message","steps","save_as"],
     "additionalProperties": False
 }
+
+class QwenPlanResponseError(ValueError):
+    """The inference backend did not return a complete, schema-shaped plan."""
+
+
+def _unique_json_pairs(pairs):
+    """Refuse ambiguous object keys at every depth, not just top-level."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise QwenPlanResponseError("Duplicate JSON key in Qwen plan")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_constant(value):
+    raise QwenPlanResponseError("Non-finite JSON number in Qwen plan")
+
+
+def _finite_json_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise QwenPlanResponseError("Non-finite JSON number in Qwen plan")
+    return parsed
+
 
 class Qwen:
     """Schema-constrained System 2 planner across compatible local services."""
@@ -119,15 +145,87 @@ class Qwen:
         }
         if model:
             payload["model"] = model
-        out = request_json(self._endpoint() + "/v1/chat/completions",
-                           payload, timeout=90)
-        content = out["choices"][0]["message"].get("content") or ""
+        # Qwen3.5 can spend its entire generation budget thinking, and some
+        # llama.cpp versions fail to enforce JSON grammar in thinking mode.
+        # Both forms are best-effort for differently aged llama.cpp servers.
+        # Do not send backend-specific options to Ollama or LM Studio.
+        if getattr(self.supervisor, "backend", None) in ("llama_cpp", "llama_server"):
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+            payload["reasoning_effort"] = "none"
+
+        # A retry is generation-only: no returned text can become a tool call
+        # until it passes System2.parse_plan and preflight. Never reinterpret a
+        # failed plan as a successful schedule or silently discard its steps.
+        for attempt in range(2):
+            out = request_json(self._endpoint() + "/v1/chat/completions",
+                               payload, timeout=90)
+            try:
+                return self._parse_plan_response(out)
+            except QwenPlanResponseError as exc:
+                if attempt:
+                    raise QwenPlanResponseError(
+                        "Qwen could not produce a valid plan after one retry. "
+                        "No actions were executed; check the model chat template "
+                        "and qwen.max_tokens."
+                    ) from exc
+                LOG.warning("Invalid Qwen plan (%s); retrying once", exc)
+                payload["messages"][0]["content"] += (
+                    " RETRY: Your previous reply was incomplete or malformed. "
+                    "Return ONLY one JSON object with exactly these three keys: "
+                    'message (string), steps (array), save_as (string or null). '
+                    "For a missing schedule detail, ask in message and set "
+                    "steps=[] and save_as=null. No markdown or reasoning text."
+                )
+
+    @staticmethod
+    def _parse_plan_response(response):
+        """Validate the envelope and top-level fields before any action path."""
         try:
-            plan = json.loads(content)
-        except (TypeError,ValueError) as exc:
-            raise ValueError("Qwen did not return valid JSON (check llama.cpp chat template and token budget)") from exc
-        if not isinstance(plan,dict) or not isinstance(plan.get("steps"),list):
-            raise ValueError("Qwen response missing required plan fields")
+            choice = response["choices"][0]
+            finish_reason = choice.get("finish_reason")
+            content = choice["message"]["content"]
+        except (KeyError, IndexError, TypeError, AttributeError) as exc:
+            raise QwenPlanResponseError("Missing chat completion content") from exc
+        if finish_reason not in (None, "stop"):
+            raise QwenPlanResponseError("Qwen completion did not finish successfully")
+        if not isinstance(content, str) or not content.strip():
+            raise QwenPlanResponseError("Empty plan content (possibly thinking-only)")
+        try:
+            plan = json.loads(content, object_pairs_hook=_unique_json_pairs,
+                              parse_constant=_reject_nonfinite_constant,
+                              parse_float=_finite_json_float)
+        except (TypeError, ValueError) as exc:
+            raise QwenPlanResponseError("Malformed or ambiguous Qwen JSON plan") from exc
+        if (not isinstance(plan, dict)
+                or set(plan) != {"message", "steps", "save_as"}
+                or not isinstance(plan["message"], str)
+                or len(plan["message"]) > 800
+                or not isinstance(plan["steps"], list)
+                or len(plan["steps"]) > 5
+                or not (plan["save_as"] is None or isinstance(plan["save_as"], str))):
+            raise QwenPlanResponseError("Qwen response missing required plan fields")
+        for step in plan["steps"]:
+            if (not isinstance(step, dict)
+                    or not {"tool", "args"} <= set(step)
+                    or not set(step) <= {"tool", "args", "when"}
+                    or not isinstance(step["tool"], str)
+                    or not 1 <= len(step["tool"]) <= 128
+                    or not isinstance(step["args"], dict)):
+                raise QwenPlanResponseError("Malformed Qwen plan step structure")
+            if "when" in step:
+                when = step["when"]
+                if (not isinstance(when, dict)
+                        or set(when) != {"step", "field", "op", "value"}
+                        or type(when["step"]) is not int
+                        or when["step"] < 0
+                        or not isinstance(when["field"], str)
+                        or not isinstance(when["op"], str)
+                        or when["op"] not in ("gt", "gte", "lt", "lte", "eq", "neq")
+                        or type(when["value"]) not in (str, int, float, bool)):
+                    raise QwenPlanResponseError("Malformed Qwen step condition")
+        # Tool authorization, argument semantics, references and service
+        # allowlists remain exclusively in System2.parse_plan/preflight.
+        # An unauthorized but structurally valid tool is NOT regenerated.
         return plan
 
     def explain(self, user_request, observed_results):

@@ -163,7 +163,8 @@ class Completion(Contract):
         if self.outcome not in ("completed", "pending_approval", "rejected", "failed"):
             raise ValueError("Invalid completion outcome")
         if self.reason not in ("executed", "no_action", "needs_approval", "unsafe_route",
-                               "low_confidence", "exception", "disabled", "shutdown"):
+                               "low_confidence", "exception", "disabled", "shutdown",
+                               "invalid_plan"):
             raise ValueError("Invalid completion reason")
 
 
