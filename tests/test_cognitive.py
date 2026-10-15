@@ -138,12 +138,42 @@ class LedgerTests(unittest.TestCase):
         self.ledger.append(task.task_id, Completion("completed", "no_action"))
         running = self.ledger.begin_task("voice", 2)
         cutoff = int(time.time()) + 5
+        # Even completed sessions cannot be pruned while their owner is alive.
+        self.assertEqual(self.ledger.prune(cutoff), 0)
+        self.ledger.release_ownership()
         self.assertEqual(self.ledger.prune(cutoff), 1)
         self.assertEqual(self.ledger.list_tasks(running.session_id)[0]["state"], "running")
         self.assertEqual(self.store.db.execute(
             "SELECT category FROM events").fetchone()[0], "legacy")
         with self.assertRaises(ValueError):
             self.ledger.events(task.task_id)
+
+    def test_prune_does_not_delete_live_idle_session_between_commands(self):
+        first=self.ledger.begin_task("voice", 8)
+        self.ledger.append(first.task_id, Completion("completed", "no_action"))
+        cutoff=int(time.time()) + 10
+        # Live voice process is idle: no running tasks, but it owns the session.
+        self.assertEqual(self.ledger.prune(cutoff),0)
+        self.assertEqual(len(self.ledger.list_tasks(first.session_id)),1)
+        resumed=self.ledger.begin_task("voice", 12, first.session_id)
+        self.assertEqual(resumed.session_id,first.session_id)
+        self.ledger.append(resumed.task_id,Completion("completed","no_action"))
+        self.assertEqual(self.ledger.prune(cutoff),0)
+        self.ledger.release_ownership()
+        self.assertEqual(self.ledger.prune(cutoff),1)
+        with self.assertRaises(ValueError):
+            self.ledger.begin_task("voice",2,first.session_id)
+
+    def test_prune_dead_owner_after_completed_task(self):
+        finished=self.ledger.begin_task("text",6)
+        self.ledger.append(finished.task_id,Completion("completed","no_action"))
+        # Simulate a confirmed dead owner without an extra Linux process.
+        with self.store.db:
+            self.store.db.execute(
+                "UPDATE cognitive_session_owners SET owner_pid=? WHERE session_id=?",
+                (999999999,finished.session_id))
+        self.assertEqual(self.ledger.prune(int(time.time())+10),1)
+        self.assertEqual(self.ledger.list_tasks(finished.session_id),[])
 
     def test_concurrent_wal_clients_isolate_active_sessions(self):
         other = Store(self.database)
