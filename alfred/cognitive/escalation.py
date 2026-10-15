@@ -15,6 +15,7 @@ from .needle_loop import _feedback_metrics
 from ..runtime import validate
 
 VERSION = 1
+MAX_HANDOFF_TOOLS = 5  # Protocol-v1 global per-task limit, including Needle reads.
 MAX_REQUEST = 1200
 MAX_CONTEXT = 3200
 READS = frozenset(("get_gpu_status", "get_system_status", "list_services",
@@ -53,12 +54,12 @@ class EscalationEnvelope:
         if self.reason not in REASONS or type(self.allow_actions) is not bool:
             raise ValueError("Invalid handoff policy")
         if (type(self.remaining_tools) is not int
-                or not 0 <= self.remaining_tools <= 5
+                or not 0 <= self.remaining_tools <= MAX_HANDOFF_TOOLS
                 or type(self.remaining_decisions) is not int
                 or not 0 <= self.remaining_decisions <= 3):
             raise ValueError("Invalid handoff budget")
         if (type(self.completed) is not tuple or type(self.observations) is not tuple
-                or len(self.completed) > 5
+                or len(self.completed) > MAX_HANDOFF_TOOLS
                 or len(self.completed) != len(self.observations)):
             raise ValueError("Invalid completed prefix")
         for call, observation in zip(self.completed, self.observations):
@@ -152,7 +153,7 @@ def build_handoff(session_id, task_id, request, reason, *,
         completed.append({"name":call["name"],"arguments":args})
         safe.append(data)
     if (type(allow_actions) is not bool or type(max_tools) is not int
-            or not len(completed) <= max_tools <= 5
+            or not len(completed) <= max_tools <= MAX_HANDOFF_TOOLS
             or type(needle_budget) is not int or not 1 <= needle_budget <= 3
             or type(used_decisions) is not int
             or not 0 <= used_decisions <= needle_budget):
@@ -160,5 +161,5 @@ def build_handoff(session_id, task_id, request, reason, *,
     return EscalationEnvelope(
         VERSION, session_id, task_id, request, reason,
         tuple(completed), tuple(safe), allow_actions,
-        min(5,max_tools-len(completed)),
+        max_tools-len(completed),
         max(0, min(3,needle_budget-used_decisions)))
