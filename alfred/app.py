@@ -193,6 +193,17 @@ class Alfred:
 
     def _process_authorized_task(self,task,text):
         self.store.event("utterance",{"length":len(text)})  # No raw transcript stored.
+        # This is a non-privileged local privacy command *after* voice wake
+        # authorization. Never let a model reinterpret it as a tool action.
+        if (self.context.enabled and
+                re.fullmatch(r"(?:clear|forget) (?:this|current) session"
+                             r"(?: context)?[.!?]*",text,re.I)):
+            self.context.clear_session(task.session_id)
+            self.needle_slots.clear(task.session_id)
+            self.sessions.append(task.task_id,Decision("local","direct",0))
+            self.sessions.append(task.task_id,Completion("completed","no_action"))
+            self.feedback.tell("Session context cleared; approved persistent facts were retained.")
+            return
         # A later unrelated command invalidates the only supported pronoun
         # referent. Context must never leak across topics or sessions.
         from .cognitive.needle_loop import PRONOUN, GPU_TEMP
