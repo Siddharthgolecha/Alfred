@@ -272,14 +272,44 @@ class ContinuationTests(unittest.TestCase):
                 try:
                     with (patch.object(self.tools,"run_plan") as run,
                          patch.object(self.sys.approvals,"propose") as propose):
-                        with self.assertRaises(HarnessInvalidPlan):
-                            self.sys.continue_handoff(actionable,harness=sdk)
+                        rejected=self.sys.continue_handoff(actionable,harness=sdk)
+                        self.assertEqual(rejected["status"],"incomplete")
+                        self.assertEqual(rejected["error"],"invalid_plan")
+                        self.assertEqual(rejected["results"],[])
+                        self.assertFalse(rejected["partial"])
+                        self.assertNotIn(raw, str(rejected))
                         self.qwen.complete.assert_not_called()
                         run.assert_not_called()
                         propose.assert_not_called()
                         sdk.run.assert_called_once()
                 finally:
                     sdk.close()
+
+    def test_malformed_sdk_after_completed_reads_keeps_sanitized_prefix(self):
+        from alfred.cognitive.harness_sdk import HarnessInvalidPlan
+        previous=[READ, {"name":"get_system_status","arguments":{}}]
+        observations=[OBS, {"uptime_seconds":321,"stdout":"PRIVATE BACKEND LOG"}]
+        h=build_handoff(SID,TID,"Check GPU then system status",
+                        "incomplete",calls=previous,results=observations,
+                        max_tools=5)
+        sdk=Mock()
+        sdk.plan.side_effect=HarnessInvalidPlan("SECRET RAW SDK OUTPUT")
+        with (patch.object(self.tools,"run_plan") as run,
+              patch.object(self.sys.approvals,"propose") as approve):
+            out=self.sys.continue_handoff(h,harness=sdk)
+        self.assertEqual(out["status"],"incomplete")
+        self.assertEqual(out["error"],"invalid_plan")
+        self.assertTrue(out["partial"])
+        self.assertEqual(out["results"],[
+            {"tool":"get_gpu_status","metrics":{"available":True,"gpu_temp_c":65.0}},
+            {"tool":"get_system_status","metrics":{"uptime_seconds":321}}])
+        self.assertNotIn("SECRET",str(out))
+        self.assertNotIn("PRIVATE",str(out))
+        sdk.plan.assert_called_once()
+        self.qwen.complete.assert_not_called()
+        run.assert_not_called()
+        approve.assert_not_called()
+        self.assertEqual(self.sys.approvals.pending(),[])
 
     def test_no_fallback_after_execution_exception(self):
         h=build_handoff(SID,TID,"Run safe task","delegated",
@@ -455,6 +485,47 @@ class AppTraceTests(unittest.TestCase):
                 self.assertEqual(current["state"],"failed")
                 self.assertEqual(len([event for event in self.app.sessions.events(current["id"])
                                       if event.kind=="observation"]),3)
+
+    def test_malformed_sdk_with_two_real_needle_reads_preserves_failed_trace(self):
+        from alfred.cognitive.harness_sdk import HarnessInvalidPlan
+        self.app.cfg["runtime"]["needle_loop_enabled"]=True
+        self.app.cfg["runtime"]["needle_max_decisions"]=2
+        self.app.cfg["runtime"]["needle_max_tools"]=3
+        self.app.cactus.route.return_value={
+            "confidence":.99,"function_calls":[READ]}
+        second={"name":"get_system_status","arguments":{}}
+        self.app.cactus.route_feedback.return_value={
+            "confidence":.99,"function_calls":[second]}
+        readings=[{"available":True,"gpu_temp_c":62.0,
+                   "stdout":"UNSAFE RAW TOOL OUTPUT"},
+                  {"uptime_seconds":431,
+                   "stdout":"DO NOT SAVE ME"}]
+        self.app.system2.direct=Mock(side_effect=[
+            {"message":"read","results":[item]} for item in readings])
+        self.app.harness=Mock()
+        self.app.harness.plan.side_effect=HarnessInvalidPlan("MALFORMED SECRET")
+        self.app.handle_text("Check GPU temperature then system status")
+        self.assertEqual(self.app.system2.direct.call_count,2)
+        self.app.cactus.route_feedback.assert_called_once()
+        self.app.harness.plan.assert_called_once()
+        self.app.system2.qwen.complete.assert_not_called()
+        self.assertEqual(self.app.system2.approvals.pending(),[])
+        shown=json.loads(self.app.feedback.tell.call_args.args[0])
+        self.assertEqual(shown["status"],"incomplete")
+        self.assertEqual(shown["error"],"invalid_plan")
+        self.assertTrue(shown["partial"])
+        self.assertEqual(shown["results"],[
+            {"tool":"get_gpu_status","metrics":{"available":True,"gpu_temp_c":62.0}},
+            {"tool":"get_system_status","metrics":{"uptime_seconds":431}}])
+        self.assertNotIn("UNSAFE",str(shown))
+        self.assertNotIn("SECRET",str(shown))
+        self.assertNotIn("DO NOT SAVE",str(shown))
+        history=self.app.sessions.events(
+            self.app.sessions.list_tasks(self.app.session_id)[0]["id"])
+        self.assertEqual([e.tool for e in history if e.kind=="observation"],
+                         ["get_gpu_status","get_system_status"])
+        self.assertEqual(history[-1].outcome,"failed")
+        self.assertEqual(history[-1].reason,"invalid_plan")
 
     def test_native_feedback_crash_keeps_completed_read_and_reports_incomplete(self):
         self.app.cfg["runtime"]["needle_loop_enabled"]=True
