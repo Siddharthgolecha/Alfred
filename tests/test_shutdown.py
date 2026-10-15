@@ -12,6 +12,7 @@ import threading
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from alfred.backends import ModelSupervisor
 from alfred.config import load_config
@@ -81,6 +82,21 @@ class ShutdownTests(unittest.TestCase):
         path = self.start_scheduler()
         self.child.send_signal(signal.SIGTERM)
         self.assertEqual(self.child.wait(timeout=8), 0)
+        self.assertFalse(path.exists())
+
+    def test_sigint_during_socket_entry_removes_just_created_socket(self):
+        # Deterministically simulate a signal after bind(), before __enter__
+        # has returned to the with statement's exception cleanup.
+        path = control_dir(self.logdir) / "scheduler.sock"
+        with patch("alfred.lifecycle.threading.Thread.start",
+                   side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                with ShutdownSocket(self.logdir, "scheduler"):
+                    self.fail("Interrupted entry should not yield")
+        self.assertFalse(path.exists())
+        # The orphan cleanup must not prevent a subsequent safe start.
+        with ShutdownSocket(self.logdir,"scheduler"):
+            self.assertTrue(path.exists())
         self.assertFalse(path.exists())
 
     def test_single_instance_and_private_socket(self):
