@@ -752,6 +752,147 @@ class EscalationContextIntegrationTests(unittest.TestCase):
         self.assertEqual(self.app.context.compact(self.app.session_id)["slots"],{})
         self._assert_private_read_channel_is_hidden()
 
+    def _enable_real_two_read_loop(self, *, first=None, second=None):
+        """Actual NeedleAgentLoop + System2.direct, never invented plan results."""
+        self.app.cfg["runtime"]["needle_loop_enabled"]=True
+        self.app.cfg["runtime"]["needle_max_decisions"]=2
+        self.app.cfg["runtime"]["needle_max_tools"]=3
+        self.app.cactus.route.return_value={
+            "confidence":.99,"function_calls":[
+                {"name":"get_system_status","arguments":{}}]}
+        self.app.cactus.route_feedback.return_value={
+            "confidence":.99,"function_calls":[
+                {"name":"list_services","arguments":{}}]}
+        output1=({"uptime_seconds":314,"stdout":"UNTRUSTED NEEDLE RAW"}
+                 if first is None else first)
+        output2=({"safe.service":{"state":"active"}}
+                 if second is None else second)
+        self.app.system2.tools.run_plan=Mock(side_effect=[[output1],[output2]])
+        return output1,output2
+
+    def test_needle_prefix_survives_empty_qwen_handoff_and_next_turn(self):
+        first,second=self._enable_real_two_read_loop()
+        self.app.system2.qwen.complete.return_value=plan(
+            message="Two validated reads already finished")
+        self.app.handle_text("Check system status then list services")
+        self.assertEqual(self.app.system2.tools.run_plan.call_count,2)
+        self.app.cactus.route_feedback.assert_called_once()
+        self.app.system2.qwen.complete.assert_called_once()
+        displayed=self._assert_private_read_channel_is_hidden()
+        self.assertEqual(displayed["results"][0]["metrics"],{"uptime_seconds":314})
+        self.assertEqual(displayed["results"][1]["metrics"],{"service_count":1})
+        self.assertEqual(self.app.context.resolve(self.app.session_id,"check it again"),
+                         "Get system status again")
+        slots=self.app.context.compact(self.app.session_id)["slots"]
+        self.assertEqual(slots["system_status"]["metrics"],{"uptime_seconds":314})
+        self.assertNotIn("UNTRUSTED",str(slots))
+        history=self.app.sessions.events(
+            self.app.sessions.list_tasks(self.app.session_id)[0]["id"])
+        self.assertEqual([e.tool for e in history if e.kind=="observation"],
+                         ["get_system_status","list_services"])
+        self.assertEqual(history[-1].outcome,"completed")
+        # A second authorized request resolves the *originally* verified
+        # prefix without another handoff or replanning.
+        self.app.cactus.route.return_value={
+            "confidence":.99,"function_calls":[
+                {"name":"get_system_status","arguments":{}}]}
+        self.app.system2.tools.run_plan.side_effect=[[{"uptime_seconds":315}]]
+        self.app.handle_text("check it again")
+        self.assertIn("Get system status again",self.app.cactus.route.call_args.args[0])
+        self.app.system2.qwen.complete.assert_called_once()
+        self.assertEqual(self.app.system2.tools.run_plan.call_count,3)
+
+    def test_needle_prefix_retained_after_malformed_sdk_no_action_replay(self):
+        from alfred.cognitive.harness_sdk import HarnessInvalidPlan
+        self._enable_real_two_read_loop()
+        self.app.harness=Mock()
+        self.app.harness.plan.side_effect=HarnessInvalidPlan("PRIVATE SDK TEXT")
+        self.app.handle_text("Check system status then list services")
+        self.assertEqual(self.app.system2.tools.run_plan.call_count,2)
+        self.app.harness.plan.assert_called_once()
+        self.app.system2.qwen.complete.assert_not_called()
+        self.assertEqual(self.app.system2.approvals.pending(),[])
+        result=self._assert_private_read_channel_is_hidden()
+        self.assertEqual(result["status"],"incomplete")
+        self.assertEqual(result["error"],"invalid_plan")
+        self.assertEqual([r["tool"] for r in result["results"]],
+                         ["get_system_status","list_services"])
+        self.assertNotIn("PRIVATE SDK TEXT",str(result))
+        self.assertEqual(self.app.context.resolve(self.app.session_id,
+                         "check it again"),"Get system status again")
+        current=self.app.sessions.list_tasks(self.app.session_id)[0]
+        self.assertEqual(current["state"],"failed")
+        self.assertEqual(self.app.sessions.events(current["id"])[-1].reason,
+                         "invalid_plan")
+
+    def test_skipped_needle_read_does_not_create_context_slot(self):
+        self._enable_real_two_read_loop(first={"skipped":True},second={})
+        self.app.system2.qwen.complete.return_value=plan(message="No more checks")
+        self.app.handle_text("Check system status then list services")
+        self.assertEqual(self.app.system2.tools.run_plan.call_count,2)
+        self.assertEqual(self.app.context.compact(self.app.session_id)["slots"],{})
+        self.assertEqual(self.app.system2.approvals.pending(),[])
+        self._assert_private_read_channel_is_hidden()
+        with self.assertRaises(ContextUnavailable):
+            self.app.context.resolve(self.app.session_id,"check it again")
+
+    def test_unaligned_needle_batch_must_not_claim_context(self):
+        from alfred.cognitive.needle_loop import LoopOutcome
+        self.app.cfg["runtime"]["needle_loop_enabled"]=True
+        self.app.cactus.route.return_value={
+            "confidence":.99,"function_calls":[
+                {"name":"get_system_status","arguments":{}}]}
+        mismatch=LoopOutcome(
+            {"message":"Partial","results":[{"uptime_seconds":99}]},
+            ({"name":"get_system_status","arguments":{}},
+             {"name":"list_services","arguments":{}}),
+            "partial",("get_system_status",))
+        with patch("alfred.app.NeedleAgentLoop.run",return_value=mismatch):
+            self.app.handle_text("Check system status then list services")
+        self.assertEqual(self.app.context.compact(self.app.session_id)["slots"],{})
+        self.app.system2.qwen.complete.assert_not_called()
+        self.assertEqual(self.app.system2.approvals.pending(),[])
+
+    def test_low_budget_needle_prefix_is_recorded_without_qwen_handoff(self):
+        self.app.cfg["runtime"]["needle_loop_enabled"]=True
+        self.app.cfg["runtime"]["needle_max_decisions"]=3
+        self.app.cfg["runtime"]["needle_max_tools"]=3
+        self.app.cactus.route.return_value={
+            "confidence":.99,"function_calls":[
+                {"name":"get_gpu_status","arguments":{}}]}
+        outputs=[{"available":True,"gpu_temp_c":60,
+                  "stdout":"never_store_me"},{"uptime_seconds":408},
+                 {"safe.service":{"state":"active"}}]
+        for limit in (1,2):
+            with self.subTest(max_plan_steps=limit):
+                self.app.cfg["runtime"]["max_plan_steps"]=limit
+                self.app.system2.cfg["max_plan_steps"]=limit
+                self.app.cactus.route_feedback.reset_mock()
+                self.app.cactus.route_feedback.side_effect=[
+                    {"confidence":.99,"function_calls":[
+                        {"name":"get_system_status","arguments":{}}]},
+                    {"confidence":.99,"function_calls":[
+                        {"name":"list_services","arguments":{}}]}]
+                self.app.system2.tools.run_plan=Mock(side_effect=[
+                    [item] for item in outputs])
+                self.app.handle_text(
+                    "Check GPU temperature then system status then services")
+                result=self._assert_private_read_channel_is_hidden()
+                self.assertEqual(result["status"],"incomplete")
+                self.assertEqual(result["halt_reason"],"handoff_budget_exhausted")
+                self.assertEqual(result["results"],outputs)
+                self.assertEqual(self.app.system2.tools.run_plan.call_count,3)
+                self.app.system2.qwen.complete.assert_not_called()
+                slots=self.app.context.compact(self.app.session_id)["slots"]
+                self.assertEqual(slots["gpu_temperature"]["metrics"],
+                                 {"available":True,"gpu_temp_c":60})
+                self.assertEqual(slots["system_status"]["metrics"],
+                                 {"uptime_seconds":408})
+                self.assertNotIn("never_store_me",str(slots))
+                self.assertEqual(self.app.system2.approvals.pending(),[])
+                task=self.app.sessions.list_tasks(self.app.session_id)[-1]
+                self.assertEqual(task["state"],"failed")
+
     def test_approval_and_incomplete_handoff_never_leak_private_read_channel(self):
         from alfred.system2 import VerifiedRead
         self.app.cactus.route.return_value={"confidence":.99,"function_calls":[]}
