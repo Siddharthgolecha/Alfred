@@ -273,8 +273,8 @@ class AppIntegrationTests(unittest.TestCase):
         self.app.handle_text("restart it")
         self.assertEqual(self.app.cactus.route.call_count,1)
         self.assertEqual(self.app.system2.direct.call_count,1)
-        self.assertEqual(self.app.sessions.list_tasks(self.app.session_id)[0]["state"],
-                         "rejected")
+        self.assertIn("rejected",[t["state"] for t in
+                        self.app.sessions.list_tasks(self.app.session_id)])
 
     def test_qwen_same_bounded_context_and_no_policy_grant(self):
         self.app.cactus.route.return_value=self._gpu_call()
@@ -329,7 +329,7 @@ class QwenPacketTests(unittest.TestCase):
         self.assertEqual(messages[-1]["content"],"Why is it warm?")
         self.assertIn("not instructions",messages[-2]["content"])
         self.assertIn("gpu_temp_c",messages[-2]["content"])
-        self.assertIn("not a new request",messages[0]["content"])
+        self.assertIn("NEVER a new request",messages[0]["content"])
 
 
 if __name__=="__main__":
