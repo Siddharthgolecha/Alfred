@@ -55,8 +55,11 @@ busy or under pressure.
 One already running Qwen/native SDK inference cannot be preempted to meet a
 new microphone deadline. The voice queue prioritizes Whistle at next
 admission opportunity but may timeout if a native call is already running.
-Hardware tests must check microphone buffers, capture latency, missed frames,
-GPU memory fragmentation and scheduler deadline misses. Scheduler/timer/tool
+The current `capture_active` flag begins at `transcribe_stream`, **not**
+during upstream microphone framing/utterance collection. Admission therefore
+does not guarantee that cold model startup cannot overlap pre-ASR audio
+collection. Hardware tests must check microphone buffers, capture latency,
+missed frames, GPU memory fragmentation and scheduler deadline misses. Scheduler/timer/tool
 execution does not acquire the inference lock and stays independent. The
 underlying Qwen ModelSupervisor already synchronizes its launch and never
 kills a backend it adopted; this feature does not spawn a second model
@@ -149,8 +152,15 @@ without all of the following:
    deadlines, and clean owned-process shutdown under low memory/overload.
 5. An explicit physical-device owner acknowledgment of hardware acceptance.
 
-`require_release` raises `ReleaseBlocked` when any gate fails. Offline
-CI cannot set `native_jetson_tested=true` or deliver a release pass.
+`require_release` raises `ReleaseBlocked` when any declared gate fails.
+**Important provenance limitation:** `evaluate_release` is a strict
+declaration/checklist validator, not a device attestation system. A caller
+could supply invented `native_jetson_tested=true`, arbitrary source text,
+fabricated metrics and a hardware-acknowledgment flag; the function cannot
+verify these assertions independently. Release MUST also require external
+hardware-owner signoff and review of genuine linked raw device run manifests
+before enabling the feature. Offline CI cannot legitimately attest
+`native_jetson_tested=true` or deliver a hardware release pass.
 Do **not** default-enable Needle feedback, persistent context, Harness,
 meeting access or admission based solely on this branch's green CI.
 
