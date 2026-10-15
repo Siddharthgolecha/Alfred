@@ -33,7 +33,7 @@ DEFAULT = {
         "tts": False, "voice_alerts": False, "telemetry": False,
         "cognitive_diagnostics": False,
         "harness_enabled": False, "harness_timeout_seconds": 45,
-        "needle_loop_enabled": False, "context_enabled": False,
+        "needle_loop_enabled": False, "escalation_enabled": False, "context_enabled": False,
         "context_persistence_enabled": False,
         "context_owner": "local", "context_mode": "assistant",
         "context_ttl_seconds": 120, "context_budget_chars": 1200,
@@ -119,6 +119,8 @@ def load_config(path=None):
     if not 10 <= int(q["supervisor_poll_seconds"]) <= 3600:
         raise ValueError("qwen.supervisor_poll_seconds must be 10..3600")
     ncfg = cfg["runtime"]
+    if type(ncfg["escalation_enabled"]) is not bool:
+        raise ValueError("escalation_enabled must be a boolean")
     if type(ncfg["context_enabled"]) is not bool or type(ncfg["context_persistence_enabled"]) is not bool:
         raise ValueError("context toggles must be booleans")
     if ncfg["context_persistence_enabled"] and not ncfg["context_enabled"]:

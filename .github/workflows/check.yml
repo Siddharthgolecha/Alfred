@@ -27,6 +27,8 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Needle fast-path P50/P95 (mock inference, paired baseline)
         run: PYTHONPATH=. python tests/bench_needle_fastpath.py
+      - name: Needle-to-Qwen handoff P50/P95 (mock inference, paired baseline)
+        run: PYTHONPATH=. python tests/bench_handoff.py
       - name: Scoped context overhead P50/P95 (mock inference, paired baseline)
         run: PYTHONPATH=. python tests/bench_context_fastpath.py
 
