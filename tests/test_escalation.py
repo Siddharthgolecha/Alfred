@@ -911,7 +911,11 @@ class EscalationContextIntegrationTests(unittest.TestCase):
                 self.app.system2.tools.run_plan=Mock(side_effect=[
                     [{"uptime_seconds":144,"raw":"NEVER_STORE"}],
                     [{"uptime_seconds":145}]])
-                self.app.handle_text("Check system status then explain")
+                with patch.object(self.app.context,"observe",
+                                  wraps=self.app.context.observe) as observe:
+                    self.app.handle_text("Check system status then explain")
+                    self.assertEqual(observe.call_count,1,
+                                     "Needle read must not be double-ingested")
                 first=self.app.sessions.list_tasks(self.app.session_id)[-1]
                 self.assertEqual(first["state"],"completed")
                 events=self.app.sessions.events(first["id"])
