@@ -179,7 +179,7 @@ The `Slot` dataclass uses manual `__post_init__` checks and raw dict storage. Re
 
 ### Sub-Task 8 — Split `alfred/meeting_adapter.py` into model and adapter files
 
-**Status**: [ ] pending
+**Status**: [x] done
 
 **Intent**  
 `meeting_adapter.py` (600+ lines) mixes Pydantic/dataclass models, segment validators, and the main adapter class. Separating models from the adapter follows the same single-responsibility principle as Sub-Tasks 6 and 7.
