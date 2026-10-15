@@ -2,11 +2,12 @@
 
 **Status: offline implementation, NOT release-qualified.**
 Base: latest `main` as of 2026-10-15. Issue #18 depends on #13–#17:
-#16 PR #33 has now merged into `main` and is integrated in this
-branch at merge commit `bb54cb2e0d414ff09e4af3bbb2ba06b42b23b3c0`.
-#15 PR #32 and #17 PR #36 remain unmerged. This PR is therefore
-**draft, BLOCKED for final approval/merge** pending those dependencies,
-their combined security/inference audit and physical Orin validation.
+#15 PR #32, #16 PR #33 and #17 PR #36 have now merged into `main`.
+This branch integrated current `main` `388fdb71b87152077a9fcdf5e6536e73a174deb3`
+with a non-force two-parent merge, preserving same-task handoff,
+scoped context and typed skill discovery.
+**Draft for physical 8GB Jetson acceptance and independent review.**
+No native hardware release evidence or owner-approved thresholds exist.
 
 ## Architecture: resource admission and rollback
 
@@ -81,8 +82,9 @@ python -m unittest discover -s tests -v
 PYTHONPATH=. python tests/bench_needle_fastpath.py
 ```
 
-The deterministic fixture generator `tests/phase5_qa.py` covers **144
-unique cases in 12 categories**, each executed in all **three** policy
+The deterministic fixture generator `tests/phase5_qa.py` covers **12
+semantic scenario families x 12 repeated/perturbed trials (144 trial IDs)**,
+each executed in all **three** policy
 configurations: baseline Needle→Qwen, Needle bounded feedback/context, and
 a proxy for unified optional Harness+admission. Categories include
 single GPU/status tools, two-step feedback, pronouns, timers, service
@@ -96,26 +98,32 @@ Whistle, Qwen, Harness, and device telemetry**. In the unified mode,
 `resource_admission_enabled=true` is configured **before** Alfred's Qwen
 client is created. Deterministic admitted Needle, Needle-feedback, Whistle,
 Qwen and Harness stub calls enter the **real Condition-backed gate**.
-The matrix includes explicit capture contention (variant 08), low available
+The first eight trial IDs per family are nominal repetitions (not different
+semantic tasks). The matrix includes explicit capture contention (variant 08), low available
 RAM (09), excessive swap (10) and CPU load (11) per category, and its
 raw CSV records gate-enabled, granted, queued, rejection, pressure and
 resource-fixture fields for every one of the 432 cases. This validates
 offline cooperative policy wiring only, not native performance or
 real concurrent device behavior. The "unified" path is a
-Harness/admission policy proxy, **NOT issue #15's unmerged implementation**
-and NOT full native latency. Issue #16's scoped ContextManager is now in the
-combined source, but the offline matrix keeps its optional context flags off
-and cannot establish full context/admission behavior on physical hardware. `/proc/meminfo` and
+Harness/admission policy proxy, NOT full native latency. Phase 5 #16's
+`ContextManager` is opt-in in BOTH enhanced arms and disabled in baseline;
+the context-pronoun family seeds a referent only with a preceding actual
+System2 fake-tool read, then checks typed observed provenance, owner/mode
+isolation, TTL expiry and same-task Needle packet construction. These probes
+are reported in separate raw columns/aggregate counts, including unified
+admission pressure/capture denials. The native Jetson context/device boundary
+is NOT evaluated by fake tools. `/proc/meminfo` and
 normalized host CPU load are measured locally; **Jetson GPU load, power
 and Qwen cold/warm model times are NULL**, never interpolated.
 
 The script writes:
-- `fixtures.json` — 144 stable cases, no personal data;
+- `fixtures.json` — 144 stable trial IDs across 12 families, no personal data;
 - `raw.csv` — one row per case/configuration (432 rows), actual local
   wall-clock policy/SQLite latency, task state, Qwen/Harness model-stub
   turn counts, stage/accepted tool counts, reminder side effects,
   model escalation rate, resource snapshots and per-fixture admission
-  grants/rejections/pressure/capture probes;
+  grants/rejections/pressure/capture probes, context verified seed,
+  same-task packets, scope-isolation and TTL denial counters;
 - `report.json` — measured aggregates with p50/p95, task-completion
   fraction and all critical safety gates;
 - `report.md` — readable side-by-side comparison and caveats.
@@ -132,19 +140,20 @@ benchmark.** Every record carries `native_jetson=false` and explicit
 swap pressure, bounded queue/Whistle priority, shutdown interrupting
 waiters, no duplicate model startup, no uncertain tool side effects,
 actual System2 preflight denial of network/shell/non-allowlisted tools,
-and deterministic matrix output. Existing #13/#14 and pinned SDK/Cordis
+and deterministic matrix output. Existing #13/#14/#15/#16/#17 and pinned SDK/Cordis
 tests continue testing no unexpected native plugin permissions, local
 loopback-only Qwen URLs, one-time local approval/replay and bounded
-prompt injection. For the **unmerged** #15/#17 features, rerun the
-full matrix and security cases only after their PRs are integrated;
-passing tests on this branch is not evidence their combined security
-boundaries are correct.
+prompt injection. A separate integrated handoff/context/admission
+security test validates same-task model packet and never turns skill metadata
+into an executable tool. Passing these stubbed tests is not evidence of
+native hardware security or device-specific deletion guarantees.
 
 `alfred.release_gates.evaluate_release` makes release impossible
 without all of the following:
 
 1. Physical **NVIDIA Jetson Orin Nano 8GB** identification; actual offline
-   native models and at least 100 distinct scenarios with test-source
+   native models and at least 100 meaningfully distinct (not just reindexed)
+   scenarios with test-source
    provenance, all dependencies merged.
 2. **Zero** unauthorized tool executions, unintended side-effect replays or
    plugin sandbox/egress success. Any positive/unknown result blocks release.
@@ -174,9 +183,11 @@ meeting access or admission based solely on this branch's green CI.
    Whistle/Needle hashes, Jetson RAM and power mode, all backend configurations,
    git commit, ambient temperature and exact local clock.
 2. Each day run at least **three independent cold starts** and warm sessions
-   with baseline, Needle loop, unified Harness+context. **Interleave mode
-   order** to limit temperature and battery/power bias. Use the same 144
-   semantic tests where safe; consequential tasks must be run against
+   with baseline, Needle loop+scoped context, unified Harness+context. **Interleave
+   mode order** to limit temperature and power bias. The 12 mock families are
+   not an adequate real-hardware diversity suite: preregister >=100 distinct
+   semantic tasks, with owner/source/precondition/adversarial variations and
+   honest repeated trial labels. Consequential tasks must run against
    sandboxed allowed user services, not production actuators.
 3. Capture full p50/p95 wall latency and truthful task outcomes; record cold/
    warm Qwen start latency from supervisor health probes, CPU/GPU utilization

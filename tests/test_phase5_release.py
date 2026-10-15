@@ -12,13 +12,15 @@ from phase5_qa import cases, CATEGORIES, MODES, run_matrix
 
 
 class ReleasePolicyTests(unittest.TestCase):
-    def test_more_than_100_deterministic_distinct_cases_all_categories(self):
+    def test_12_families_144_repeat_or_perturbation_trial_ids(self):
         a=list(cases())
         self.assertEqual(len(a),144)
         self.assertEqual(a,list(cases()))
         self.assertEqual(set(x["scenario"] for x in a),set(CATEGORIES))
         self.assertEqual(len(set(x["id"] for x in a)),144)
         self.assertEqual(len(MODES),3)
+        # IDs are reproducible trial labels, not distinct semantic tasks.
+        self.assertEqual(len({x["text"] for x in a}),23)
 
     def test_offline_stub_never_authorizes_rollout_even_if_metrics_fabricated(self):
         metrics=("p50_latency_ms","p95_latency_ms","qwen_cold_load_ms",
@@ -87,6 +89,9 @@ class ReleasePolicyTests(unittest.TestCase):
             report=run_matrix(td)
             self.assertEqual(report["row_count"],432)
             self.assertEqual(report["fixture_count"],144)
+            self.assertEqual(report["distinct_semantic_families"],12)
+            self.assertFalse(report["trial_ids_are_distinct_tasks"])
+            self.assertIsNone(report["physical_distinct_task_coverage"])
             self.assertFalse(report["native_jetson_tested"])
             self.assertEqual(report["release_gates"]["unauthorized_tool_executions"],0)
             self.assertEqual(report["release_gates"]["unintended_replay"],0)
@@ -109,6 +114,20 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertEqual(len(contested),12)
             self.assertTrue(all(int(r["gate_rejected"])>=1 for r in contested))
             self.assertGreater(sum(int(r["gate_needle_attempts"]) for r in unified),0)
+            for mode in MODES[1:]:
+                enhanced=[r for r in raw if r["mode"]==mode]
+                self.assertTrue(all(x["context_enabled"]=="1" for x in enhanced))
+                self.assertGreater(sum(int(x["context_seeded_verified"])
+                                       for x in enhanced),0)
+                self.assertGreater(sum(int(x["context_packet_verified_referent"])
+                                       for x in enhanced),0)
+                self.assertEqual(sum(int(x["context_ttl_expiry_blocked"])
+                                     for x in enhanced),1)
+                self.assertGreater(sum(int(x["context_cross_owner_blocked"])
+                                       for x in enhanced),0)
+                self.assertGreater(sum(int(x["context_meeting_mode_blocked"])
+                                       for x in enhanced),0)
+            self.assertTrue(all(x["context_enabled"]=="0" for x in baseline))
             summary=report["measurements"][MODES[2]]
             self.assertEqual(summary["admission_pressure_refusals"],
                              sum(int(r["gate_pressure"]) for r in unified))
