@@ -150,6 +150,20 @@ class ContextManager:
     def _key(self, session_id):
         return _scope(self.owner,self.mode,session_id)
 
+    def _read_scope(self, session_id, task_id=None):
+        """Resolve owner/mode atomically, or use a task's immutable scope.
+
+        Caller holds _lock throughout packet construction and fact retrieval.
+        An ended task has no durable binding; ordinary current-scope views
+        remain available for diagnostics.
+        """
+        if task_id is not None:
+            valid_id(task_id)
+            bound=self._task_scopes.get((session_id,task_id))
+            if bound is not None:
+                return bound
+        return self._key(session_id)
+
     def start_task(self, session_id, task_id):
         valid_id(task_id)
         if not self.enabled:
@@ -233,11 +247,11 @@ class ContextManager:
         for name in sorted(set(slots)-SLOT_TYPES):
             del slots[name]
 
-    def invalidate_unrelated(self, session_id, explicit_text):
+    def invalidate_unrelated(self, session_id, explicit_text, *, task_id=None):
         if not self.enabled:
             return
         with self._lock:
-            slots=self._slots.get(self._key(session_id),{})
+            slots=self._slots.get(self._read_scope(session_id,task_id),{})
             if REF.fullmatch(explicit_text) or DANGEROUS_REF.fullmatch(explicit_text):
                 return
             if not GPU_TEMP.search(explicit_text):
@@ -247,15 +261,15 @@ class ContextManager:
             if not EXPLICIT_WORKFLOW.search(explicit_text):
                 slots.pop("active_workflow",None)
 
-    def resolve(self, session_id, utterance):
+    def resolve(self, session_id, utterance, *, task_id=None):
         if not self.enabled:
             return utterance
-        key=self._key(session_id)
         if DANGEROUS_REF.fullmatch(utterance):
             raise ContextUnavailable("Action reference is ambiguous. Name the exact target and action.")
         if not REF.fullmatch(utterance):
             return utterance
         with self._lock:
+            key=self._read_scope(session_id,task_id)
             slots=self._slots.get(key,{})
             self._prune_slots(slots,float(self.clock()))
             refs=[k for k in ("gpu_temperature","system_status") if k in slots]
@@ -312,19 +326,23 @@ class ContextManager:
                 existing[key]={
                     "value":value,"provenance":"user_approved","saved_at":now}
 
+    def _facts_for_scope(self, owner, mode):
+        """Called with _lock held; never reconsult mutable owner/mode."""
+        if self.persist_facts:
+            with self.store.lock:
+                rows=self.store.db.execute(
+                    "SELECT key,value,provenance,saved_at FROM context_approved_facts "
+                    "WHERE owner=? AND mode=? ORDER BY key",
+                    (owner,mode)).fetchall()
+            return {r["key"]:{"value":r["value"],"provenance":r["provenance"],
+                               "saved_at":r["saved_at"]} for r in rows}
+        return dict(self._facts.get((owner,mode),{}))
+
     def list_facts(self):
         if not self.enabled:
             return {}
         with self._lock:
-            if self.persist_facts:
-                with self.store.lock:
-                    rows=self.store.db.execute(
-                        "SELECT key,value,provenance,saved_at FROM context_approved_facts "
-                        "WHERE owner=? AND mode=? ORDER BY key",
-                        (self.owner,self.mode)).fetchall()
-                return {r["key"]:{"value":r["value"],"provenance":r["provenance"],
-                                   "saved_at":r["saved_at"]} for r in rows}
-            return dict(self._facts.get((self.owner,self.mode),{}))
+            return self._facts_for_scope(self.owner,self.mode)
 
     def clear_facts(self, key=None, *, local_approval=False):
         if not local_approval:
@@ -349,9 +367,9 @@ class ContextManager:
                 else:
                     facts.pop(key,None)
 
-    def clear_session(self, session_id):
-        key=self._key(session_id)
+    def clear_session(self, session_id, *, task_id=None):
         with self._lock:
+            key=self._read_scope(session_id,task_id)
             self._slots.pop(key,None)
             for item in list(self._tasks):
                 if item[0]==key:
@@ -364,9 +382,9 @@ class ContextManager:
         """Deterministic minimum-first packet, no model summary/authority."""
         if not self.enabled:
             return {}
-        key=self._key(session_id)
         now=float(self.clock())
         with self._lock:
+            key=self._read_scope(session_id,task_id)
             slots=self._slots.get(key,{})
             self._prune_slots(slots,now)
             order=("gpu_temperature","system_status","active_workflow")
@@ -376,10 +394,10 @@ class ContextManager:
                 valid_id(task_id)
                 observation=list(self._tasks.get((key,task_id),[]))
             # Needle receives typed measurements only, never retained fact text.
-            packet={"version":1,"scope":self.mode,"slots":subset}
+            packet={"version":1,"scope":key[1],"slots":subset}
             if not for_needle:
                 packet["task_observations"]=observation
-                packet["user_approved_facts"]=self.list_facts()
+                packet["user_approved_facts"]=self._facts_for_scope(key[0],key[1])
             def size():
                 return len(json.dumps(packet,sort_keys=True,
                                       separators=(",",":"),allow_nan=False))
