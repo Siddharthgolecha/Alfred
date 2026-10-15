@@ -47,6 +47,9 @@ The host-owned provider must expose:
   `qwen`, `safe_pdf`, `qr_obex`. Return **false** if unverified.
 - `start_recording(consent=True, retention=bool) -> opaque meeting_id`,
   `recording_status(meeting_id)`, `stop_recording(meeting_id)`.
+  When retention is **false**, `discard_meeting(meeting_id) -> True`
+  must confirm device-side deletion; otherwise the main adapter raises
+  rather than falsely report that private recording data was discarded.
 - `get_segments(meeting_id) -> current authorized segments`, never a
   historical meeting list or filesystem search.
 - `suggest_minutes({task_id,meeting_id,untrusted_evidence,policy}) ->
@@ -77,8 +80,8 @@ retention disabled, stopping the recorder revokes transcript access.
 An owner/scope mismatch or expired/revoked/forged permit is denied.
 
 `sanitize_segments` preserves source mic channel, UTC start/end timestamps,
-overlap references, ambiguous and likely cross-talk flags, and sync
-uncertainty; it forces `identity_type=microphone_channel` and **never**
+overlap references, optional bounded per-word decoder-estimated timing,
+ambiguous and likely cross-talk flags, and sync uncertainty; it forces `identity_type=microphone_channel` and **never**
 promotes a device to a real person's identity. All text is size-bounded
 and known obvious tokens/emails are redacted. Max 64 segments/16k evidence
 JSON bytes. Redaction is **best effort**, not a guarantee against every
@@ -91,7 +94,9 @@ cited excerpt or be `Not specified`. Owners must occur in that quoted
 excerpt or be `Unassigned`. Mic channel labels cannot be owners. No
 invented attendance or speaker identity fields are allowed. Qwen's
 generated output is untrusted until this validation succeeds. Only the
-validated exact digest may be sent to the guarded PDF writer. QR/OBEX
+validated exact digest *and matching cited evidence snapshot* may be sent
+to the guarded PDF writer; a changed transcript must be revalidated.
+QR/OBEX
 delivery additionally requires a separate trusted local confirmation, and
 must never report delivery success when the device returns `delivered=false`.
 
@@ -129,8 +134,9 @@ python -m alfred --skills
 ```
 
 The fake provider tests cover missing devices, real graph approval status,
-consent/retention, owner/task/session mismatch, expiry/revocation, UUID-like
-opaque handles, redaction, timestamp/overlap/cross-talk, hallucinated
+consent/retention with device discard verification, owner/task/session
+mismatch, expiry/revocation, opaque handles, redaction, timestamp/
+overlap/cross-talk, post-validation evidence mutation, hallucinated
 owners/dates/decisions, PDFs with modified content, failed OBEX delivery,
 and no module import/execution side effects on main.
 
