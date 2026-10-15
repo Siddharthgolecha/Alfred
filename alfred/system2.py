@@ -175,13 +175,16 @@ class System2:
         results=self.tools.run_plan(steps)
         return {"message":message or "Completed","results":results}
 
-    def reason(self, utterance, allow_actions=True):
+    def reason(self, utterance, allow_actions=True, *, context=None):
         # Tool schemas, not just tool names, are provided to the planner.
         tool_catalog=[s for s in TOOL_SCHEMAS if s["name"] not in
                       ("delegate_to_reasoner","run_workflow")]
+        opts={"context":context} if context and (
+            context.get("slots") or context.get("task_observations")
+            or context.get("user_approved_facts")) else {}
         plan=self.qwen.complete(utterance, tool_catalog,
                                 allowed_services=self.tools.services,
-                                named_tasks=self.tools.tasks.keys())
+                                named_tasks=self.tools.tasks.keys(),**opts)
         message,steps,save_as=parse_plan(plan,utterance,self.tools,
                                         self.cfg.get("max_plan_steps",5))
         outcome = self.execute_or_stage(steps,message,save_as,allow_actions)
