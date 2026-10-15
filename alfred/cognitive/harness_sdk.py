@@ -6,6 +6,8 @@ No transcript is saved by Alfred; temporary SDK session files are destroyed on c
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 from concurrent.futures import Future
 import hashlib
 import importlib.metadata
@@ -182,7 +184,8 @@ class LocalHarness:
     """Owned reusable DeepSeek SDK runtime. No shell, tools, or cloud routes."""
 
     def __init__(self, model_url, model, *, timeout=45, max_tokens=256,
-                 factory=None, patch=PATCH):
+                 factory=None, patch=PATCH, admission=None):
+        self.admission = admission
         self.url = _loopback(model_url)
         if not isinstance(model, str) or not re.fullmatch(r"[a-zA-Z0-9_.:/-]{1,120}", model):
             raise HarnessUnavailable("Invalid local model identifier")
@@ -283,6 +286,12 @@ class LocalHarness:
             raise
 
     def run(self, prompt, session_id):
+        guard=(self.admission.claim("harness")
+               if self.admission is not None else nullcontext())
+        with guard:
+            return self._run_admitted(prompt,session_id)
+
+    def _run_admitted(self, prompt, session_id):
         """Read-only SDK model turn with a firm parent timeout and crash fallback.
 
         A worker thread is necessary because SDK Session.run waits for async

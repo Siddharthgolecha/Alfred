@@ -1,6 +1,8 @@
 """Cactus Needle/Whistle and schema-constrained multi-backend local reasoning."""
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import json
 import logging
 import math
@@ -89,7 +91,8 @@ def _finite_json_float(value):
 
 class Qwen:
     """Schema-constrained System 2 planner across compatible local services."""
-    def __init__(self, cfg, supervisor):
+    def __init__(self, cfg, supervisor, admission=None):
+        self.admission = admission
         self.cfg = cfg
         self.supervisor = supervisor
 
@@ -107,6 +110,16 @@ class Qwen:
 
     def complete(self, transcript, tool_catalog, allowed_services=(), named_tasks=(), *,
                  context=None, handoff=None):
+        guard = (self.admission.claim("qwen")
+                 if self.admission is not None else nullcontext())
+        with guard:
+            return self._complete_admitted(
+                transcript, tool_catalog, allowed_services, named_tasks,
+                context=context, handoff=handoff)
+
+    def _complete_admitted(self, transcript, tool_catalog,
+                            allowed_services=(), named_tasks=(), *,
+                            context=None, handoff=None):
         self.supervisor.ensure_running()
         model = self.supervisor.model_id()
         # Maintain compatibility with older callers which supply names only.
@@ -247,7 +260,13 @@ class Qwen:
         return plan
 
     def explain(self, user_request, observed_results):
-        """Second bounded pass: interpret observed tool output; never return executable calls."""
+        """Inference-only diagnostic response, never an executable tool proposal."""
+        guard=(self.admission.claim("qwen_explain")
+               if self.admission is not None else nullcontext())
+        with guard:
+            return self._explain_admitted(user_request,observed_results)
+
+    def _explain_admitted(self, user_request, observed_results):
         self.supervisor.ensure_running()
         model = self.supervisor.model_id()
         observations = json.dumps(observed_results,default=str,ensure_ascii=True)[:7000]
@@ -285,15 +304,18 @@ class Qwen:
 
 class Cactus:
     """One long-lived Needle instance; native inference kept on calling thread."""
-    def __init__(self, schemas):
+    def __init__(self, schemas, admission=None):
+        self.admission = admission
         import needle
         self.needle = needle
         self.agent = needle.Needle(tools=schemas)
         self.whistle = needle.Whistle()
 
     def route(self, transcript):
-        self.agent.reset()
-        return self.agent.complete(transcript, max_new_tokens=384)
+        guard=self.admission.claim("needle") if self.admission else nullcontext()
+        with guard:
+            self.agent.reset()
+            return self.agent.complete(transcript, max_new_tokens=384)
 
     def route_feedback(self, observation_json):
         """Continue the current isolated task without reset; input is trusted scalar JSON.
@@ -301,9 +323,16 @@ class Cactus:
         Needle.complete() interprets a JSON result as tool feedback. Never use
         Needle.run(), which would execute model-named Python functions itself.
         """
-        return self.agent.complete(observation_json, max_new_tokens=384)
+        guard=self.admission.claim("needle_feedback") if self.admission else nullcontext()
+        with guard:
+            return self.agent.complete(observation_json, max_new_tokens=384)
 
     def transcribe_stream(self, frames, on_partial=None):
+        guard=self.admission.claim("whistle") if self.admission else nullcontext()
+        with guard:
+            return self._transcribe_admitted(frames,on_partial)
+
+    def _transcribe_admitted(self, frames, on_partial=None):
         # Whistle commits segments as it receives streaming samples.
         pieces = []
         pending = ""
