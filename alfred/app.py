@@ -516,6 +516,15 @@ class Alfred:
         if any(t is not None and t.is_alive() for t in threads):
             LOG.warning("Background workers did not all exit; leaving DB open until process exit")
         else:
+            # Never surrender session ownership while another thread is
+            # still inside a live model/tool command.
+            if self._needle_task_lock.acquire(blocking=False):
+                try:
+                    self.sessions.release_ownership()
+                finally:
+                    self._needle_task_lock.release()
+            else:
+                LOG.warning("Active command still owns its session; retaining ownership")
             self.store.db.close()
 
 def doctor(cfg):
