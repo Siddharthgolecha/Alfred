@@ -370,51 +370,62 @@ class OfflineMeetingAdapter:
                 raise RuntimeError("Device capability unavailable")
 
     def status(self, permit):
-        self._verify(permit,active=True,skill="meeting_recording")
-        response=self._provider.recording_status(permit.meeting_id)
-        if type(response) is not dict or response.get("state") not in ("recording","stopping"):
-            raise ValueError("Device returned invalid meeting status")
-        # Only minimal metadata, no device stdout or recording path.
-        return {"meeting_id":permit.meeting_id,"state":response["state"],
-                "identity":"mic_channel_not_person"}
-
-    def stop(self, permit):
-        self._verify(permit,active=True,skill="meeting_recording")
-        if self._journal is None:
-            raise RuntimeError("Recording cleanup journal unavailable")
+        # Atomic authorization + provider operation. Stronger than per-meeting:
+        # revocation, stop and purge cannot race any in-flight transmission.
         with self._lock:
-            meeting=self._meetings[permit.meeting_id]
-            operation_id=meeting["operation_id"]
-            retained=meeting["retention"]
-            # Journal before physical side effects. A process crash between
-            # stop and discard can be recovered by a trusted local operator.
-            self._journal.put(operation_id,permit.session_id,permit.task_id,
-                              permit.owner,meeting_id=permit.meeting_id,
-                              retained=retained,state="stopping")
-            meeting["active"]=False
-            meeting["state"]="stopping"
-            if not retained:
-                # Nonretained evidence must be inaccessible throughout purge.
-                # Retained recordings keep their existing task-bound permit
-                # after a successful stop, as before.
-                self._revoke_meeting_access(permit.meeting_id)
-            # Providers must implement idempotent stop; recording may already
-            # have ended before interruption, so never start it again.
-            self._provider.stop_recording(permit.meeting_id)
-            if retained:
+            self._verify(permit,active=True,skill="meeting_recording")
+            response=self._provider.recording_status(permit.meeting_id)
+            if type(response) is not dict or response.get("state") not in ("recording","stopping"):
+                raise ValueError("Device returned invalid meeting status")
+            # Only minimal metadata, no device stdout or recording path.
+            return {"meeting_id":permit.meeting_id,"state":response["state"],
+                    "identity":"mic_channel_not_person"}
+
+    def stop(self, permit, *, local_authorized=False):
+        if local_authorized is not True:
+            raise PermissionError("Stopping a recording requires separate local authorization")
+        # Atomic authorization + provider operation. Stronger than per-meeting:
+        # revocation, stop and purge cannot race any in-flight transmission.
+        with self._lock:
+            self._verify(permit,active=True,skill="meeting_recording")
+            if self._journal is None:
+                raise RuntimeError("Recording cleanup journal unavailable")
+            with self._lock:
+                meeting=self._meetings[permit.meeting_id]
+                operation_id=meeting["operation_id"]
+                retained=meeting["retention"]
+                # Journal before physical side effects. A process crash between
+                # stop and discard can be recovered by a trusted local operator.
+                self._journal.put(operation_id,permit.session_id,permit.task_id,
+                                  permit.owner,meeting_id=permit.meeting_id,
+                                  retained=retained,state="stopping")
+                meeting["active"]=False
+                meeting["state"]="stopping"
+                if not retained:
+                    # Nonretained evidence must be inaccessible throughout purge.
+                    # Retained recordings keep their existing task-bound permit
+                    # after a successful stop, as before.
+                    self._revoke_meeting_access(permit.meeting_id)
+                # Providers must implement idempotent stop; recording may already
+                # have ended before interruption, so never start it again.
+                self._provider.stop_recording(permit.meeting_id)
+                if retained:
+                    self._journal.put(
+                        operation_id,permit.session_id,permit.task_id,
+                        permit.owner,meeting_id=permit.meeting_id,
+                        retained=True,state="stopped_retained")
+                    meeting["state"]="stopped"
+                    return {"meeting_id":permit.meeting_id,"state":"stopped",
+                            "retained":True}
+                self._journal.put(operation_id,permit.session_id,permit.task_id,
+                                  permit.owner,meeting_id=permit.meeting_id,
+                                  retained=False,state="purge_pending")
+                meeting["state"]="purge_pending"
+                self._discard_or_raise(permit.meeting_id)
                 self._journal.remove(operation_id)
-                meeting["state"]="stopped"
+                meeting["state"]="purged"
                 return {"meeting_id":permit.meeting_id,"state":"stopped",
-                        "retained":True}
-            self._journal.put(operation_id,permit.session_id,permit.task_id,
-                              permit.owner,meeting_id=permit.meeting_id,
-                              retained=False,state="purge_pending")
-            meeting["state"]="purge_pending"
-            self._discard_or_raise(permit.meeting_id)
-            self._journal.remove(operation_id)
-            meeting["state"]="purged"
-            return {"meeting_id":permit.meeting_id,"state":"stopped",
-                    "retained":False}
+                        "retained":False}
 
     def _revoke_meeting_access(self, meeting_id):
         for key in tuple(self._permits):
@@ -478,7 +489,10 @@ class OfflineMeetingAdapter:
                         state="stopping")
                     self._provider.stop_recording(mid)
                     if row["retained"]:
-                        self._journal.remove(op)
+                        self._journal.put(
+                            op,row["session_id"],row["task_id"],owner,
+                            meeting_id=mid,retained=True,
+                            state="stopped_retained")
                         completed.append({"meeting_id":mid,"state":"stopped_retained"})
                         if mid in self._meetings:
                             self._meetings[mid]["active"]=False
@@ -502,66 +516,78 @@ class OfflineMeetingAdapter:
         return completed
 
     def evidence(self, permit):
-        self._verify(permit,skill="transcript_retrieval")
-        # Only the exact explicitly consented ID; never list historical runs.
-        return sanitize_segments(self._provider.get_segments(permit.meeting_id))
+        # Atomic authorization + provider operation. Stronger than per-meeting:
+        # revocation, stop and purge cannot race any in-flight transmission.
+        with self._lock:
+            self._verify(permit,skill="transcript_retrieval")
+            # Only the exact explicitly consented ID; never list historical runs.
+            return sanitize_segments(self._provider.get_segments(permit.meeting_id))
 
     def minutes(self, permit, *, title):
-        self._verify(permit,skill="qwen_minutes")
-        packet=self.evidence(permit)
-        # Device Qwen receives a structurally bounded, untrusted data packet.
-        # Main cannot guarantee model behavior, so validate extractive claims.
-        draft=self._provider.suggest_minutes({
-            "task_id":permit.task_id,"meeting_id":permit.meeting_id,
-            "untrusted_evidence":list(packet),
-            "policy":"Only cite exact segment text; no inferred owners/dates/identities."})
-        checked=validate_minutes_proposal(draft,packet,meeting_title=title)
-        digest=hashlib.sha256(json.dumps(
-            checked,sort_keys=True,separators=(",",":"),ensure_ascii=True
-        ).encode("utf-8")).hexdigest()
-        packet_digest=hashlib.sha256(json.dumps(
-            packet,sort_keys=True,separators=(",",":"),ensure_ascii=True
-        ).encode("utf-8")).hexdigest()
+        # Atomic authorization + provider operation. Stronger than per-meeting:
+        # revocation, stop and purge cannot race any in-flight transmission.
         with self._lock:
-            self._validated_minutes[(permit.task_id,permit.meeting_id)]=(
-                digest,packet_digest)
-        return checked
+            self._verify(permit,skill="qwen_minutes")
+            packet=self.evidence(permit)
+            # Device Qwen receives a structurally bounded, untrusted data packet.
+            # Main cannot guarantee model behavior, so validate extractive claims.
+            draft=self._provider.suggest_minutes({
+                "task_id":permit.task_id,"meeting_id":permit.meeting_id,
+                "untrusted_evidence":list(packet),
+                "policy":"Only cite exact segment text; no inferred owners/dates/identities."})
+            checked=validate_minutes_proposal(draft,packet,meeting_title=title)
+            digest=hashlib.sha256(json.dumps(
+                checked,sort_keys=True,separators=(",",":"),ensure_ascii=True
+            ).encode("utf-8")).hexdigest()
+            packet_digest=hashlib.sha256(json.dumps(
+                packet,sort_keys=True,separators=(",",":"),ensure_ascii=True
+            ).encode("utf-8")).hexdigest()
+            with self._lock:
+                self._validated_minutes[(permit.task_id,permit.meeting_id)]=(
+                    digest,packet_digest)
+            return checked
 
     def export_pdf(self, permit, minutes):
-        self._verify(permit,skill="qwen_minutes")
-        packet=self.evidence(permit)
-        if type(minutes) is not dict:
-            raise ValueError("Validated minutes object required")
-        digest=hashlib.sha256(json.dumps(
-            minutes,sort_keys=True,separators=(",",":"),ensure_ascii=True
-        ).encode("utf-8")).hexdigest()
-        packet_digest=hashlib.sha256(json.dumps(
-            packet,sort_keys=True,separators=(",",":"),ensure_ascii=True
-        ).encode("utf-8")).hexdigest()
+        # Atomic authorization + provider operation. Stronger than per-meeting:
+        # revocation, stop and purge cannot race any in-flight transmission.
         with self._lock:
-            if self._validated_minutes.get((permit.task_id,permit.meeting_id))!=(
-                digest,packet_digest):
-                raise PermissionError("PDF contents/evidence not validated for this task")
-        # Provider implementation MUST call existing GuardedSSD PDF writer and
-        # return an opaque artifact ID, never an arbitrary destination path.
-        handle=self._provider.save_pdf(permit.meeting_id,minutes,list(packet))
-        if type(handle) is not str or not ARTIFACT.fullmatch(handle):
-            raise ValueError("Invalid guarded PDF artifact ID")
-        with self._lock:
-            self._artifacts[(permit.meeting_id,handle)]=permit.task_id
-        return {"artifact_id":handle,"delivery":"not_sent"}
+            self._verify(permit,skill="qwen_minutes")
+            packet=self.evidence(permit)
+            if type(minutes) is not dict:
+                raise ValueError("Validated minutes object required")
+            digest=hashlib.sha256(json.dumps(
+                minutes,sort_keys=True,separators=(",",":"),ensure_ascii=True
+            ).encode("utf-8")).hexdigest()
+            packet_digest=hashlib.sha256(json.dumps(
+                packet,sort_keys=True,separators=(",",":"),ensure_ascii=True
+            ).encode("utf-8")).hexdigest()
+            with self._lock:
+                if self._validated_minutes.get((permit.task_id,permit.meeting_id))!=(
+                    digest,packet_digest):
+                    raise PermissionError("PDF contents/evidence not validated for this task")
+            # Provider implementation MUST call existing GuardedSSD PDF writer and
+            # return an opaque artifact ID, never an arbitrary destination path.
+            handle=self._provider.save_pdf(permit.meeting_id,minutes,list(packet))
+            if type(handle) is not str or not ARTIFACT.fullmatch(handle):
+                raise ValueError("Invalid guarded PDF artifact ID")
+            with self._lock:
+                self._artifacts[(permit.meeting_id,handle)]=permit.task_id
+            return {"artifact_id":handle,"delivery":"not_sent"}
 
     def deliver(self, permit, artifact_id, *, local_authorized=False):
-        self._verify(permit,skill="qr_obex_handoff")
-        if not local_authorized:
-            raise PermissionError("QR/OBEX handoff requires separate local approval")
+        # Atomic authorization + provider operation. Stronger than per-meeting:
+        # revocation, stop and purge cannot race any in-flight transmission.
         with self._lock:
-            if self._artifacts.get((permit.meeting_id,artifact_id)) != permit.task_id:
-                raise PermissionError("Unknown or foreign artifact ID")
-        output=self._provider.deliver_pdf(permit.meeting_id,artifact_id)
-        if type(output) is not dict or type(output.get("delivered")) is not bool:
-            raise ValueError("Invalid handoff result")
-        return {"meeting_id":permit.meeting_id,"delivered":output["delivered"]}
+            self._verify(permit,skill="qr_obex_handoff")
+            if not local_authorized:
+                raise PermissionError("QR/OBEX handoff requires separate local approval")
+            with self._lock:
+                if self._artifacts.get((permit.meeting_id,artifact_id)) != permit.task_id:
+                    raise PermissionError("Unknown or foreign artifact ID")
+            output=self._provider.deliver_pdf(permit.meeting_id,artifact_id)
+            if type(output) is not dict or type(output.get("delivered")) is not bool:
+                raise ValueError("Invalid handoff result")
+            return {"meeting_id":permit.meeting_id,"delivered":output["delivered"]}
 
     def revoke(self, permit):
         if type(permit) is not MeetingPermit:
