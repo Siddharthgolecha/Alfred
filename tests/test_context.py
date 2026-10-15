@@ -396,6 +396,7 @@ class AppIntegrationTests(unittest.TestCase):
         self.app=Alfred(cfg,load_models=False)
         self.app.cactus=Mock()
         self.app.feedback.tell=Mock()
+        self.app.supervisor.ensure_running=Mock(return_value=True)
         self.app.harness=Mock()
         def sdk_plan(request,session_id,*,tools,allowed_services=(),
                      named_tasks=(),handoff=None,**extras):

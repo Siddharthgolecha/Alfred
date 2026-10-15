@@ -693,6 +693,7 @@ class CombinedHandoffSkillBoundaryTests(unittest.TestCase):
                 "message":"Try recording", "steps":[
                     {"tool":"meeting_recording","args":{}}],
                 "save_as":None})
+            app.supervisor.ensure_running=Mock(return_value=True)
             app.harness=Mock()
             app.harness.plan.side_effect=lambda request,sid,*,tools,**kw: app.qwen.complete(
                 request,tools,**kw)

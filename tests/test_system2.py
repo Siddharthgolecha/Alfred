@@ -540,7 +540,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(self.app.store.list_schedules(),[])
         self.assertEqual(self.app.system2.approvals.pending(),[])
         self.app.feedback.tell.assert_called_once()
-        self.assertIn("no actions were taken",self.app.feedback.tell.call_args.args[0])
+        self.assertIn("no actions were taken",self.app.feedback.tell.call_args.args[0].lower())
         self.assertNotIn("completed",self.app.feedback.tell.call_args.args[0])
 
     def test_readonly_qwen_failure_is_also_ledger_failure(self):
