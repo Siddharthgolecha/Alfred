@@ -3,20 +3,19 @@
 The SDK's own JSON-RPC subprocess is used, not a home-grown fake wire parser.
 Only the verified, currently tool-free sdk-minimal Cordis overlay may start.
 No transcript is saved by Alfred; temporary SDK session files are destroyed on close.
+
+Manifest constants live in harness_config.py; audit helpers in harness_audit.py.
+All three are re-exported here for backward compatibility with existing import sites.
 """
 from __future__ import annotations
 
 from contextlib import nullcontext
-
 from concurrent.futures import Future
-import hashlib
 import importlib.metadata
 import json
 import logging
 import os
 from pathlib import Path
-import re
-import shutil
 import subprocess
 import tempfile
 import threading
@@ -24,7 +23,34 @@ from urllib.parse import urlsplit
 
 LOG = logging.getLogger(__name__)
 
-from ..constants import Limits, Patterns, Timeouts, Truncation
+from ..constants import Limits, Patterns, Timeouts
+from .harness_config import (  # re-exported for existing callers
+    SDK_VERSION,
+    DENIED_ROWS,
+    EXPECTED_ACTIVE_ROWS,
+    EXPECTED_DISABLED_ROWS,
+)
+from .harness_audit import (  # re-exported for existing callers
+    HarnessUnavailable,
+    audit_effective_cordis_config,
+    check_safe_patch,
+)
+
+__all__ = [
+    "LocalHarness",
+    "HarnessInvalidPlan",
+    "HarnessUnavailable",
+    "SDK_VERSION",
+    "DENIED_ROWS",
+    "EXPECTED_ACTIVE_ROWS",
+    "EXPECTED_DISABLED_ROWS",
+    "audit_effective_cordis_config",
+    "check_safe_patch",
+]
+
+PATCH = Path(__file__).with_name("alfred_safe.patch.yml")
+MAX_PROMPT = 8192
+MAX_RESPONSE = 2000
 
 
 class HarnessInvalidPlan(ValueError):
@@ -35,111 +61,7 @@ class HarnessInvalidPlan(ValueError):
     """
 
 
-SDK_VERSION = "0.1.5rc1"
-# Exact shipped sdk-minimal row IDs from the audited release family. The
-# overlay deliberately disables all model-facing tools and host side effects.
-DENIED_ROWS = frozenset({
-    "persistent-bash", "persistent-pwsh", "terminal-bash", "terminal-pwsh",
-    "pty", "subprocess", "sandbox-policy", "sandbox", "filesystem",
-    "tool-fs", "attachment-local", "working-directory",
-    "tool-working-directory", "mcp-resources", "jobs",
-    "plugin-package-inventory-deepseek", "session-log-deepseek",
-    "compaction-basic", "image-offload",
-})
-# Exact effective `dsh --profile sdk-minimal --patch ... --dump-config`
-# inventory captured from the official pinned 0.1.5rc1 binary. All registered
-# plugins, including invariant providers, must match; no additional plugins
-# are permitted. The model-facing tools registry must have ZERO actual tools.
-EXPECTED_ACTIVE_ROWS = {
-    "sdk-app-startup": "@deepseek-ai/dsh-sdk-app",
-    "sdk-jsonrpc-server": "@deepseek-ai/dsh-sdk-jsonrpc-server",
-    "deepseek-llm-api-extensions": "@deepseek-ai/dsh-deepseek-llm-api-extensions",
-    "llm-deepseek": "@deepseek-ai/dsh-llm-deepseek",
-    "session-projection": "@deepseek-ai/dsh-session-projection",
-    "timer": "@deepseek-ai/cordis-plugin-timer",
-    "llm": "@deepseek-ai/dsh-llm",
-    "session": "@deepseek-ai/dsh-session",
-    "session-title": "@deepseek-ai/dsh-session-title",
-    "system-prompt": "@deepseek-ai/dsh-system-prompt",
-    "tools": "@deepseek-ai/dsh-tools",
-    "agent": "@deepseek-ai/dsh-agent",
-    "llm-retry": "@deepseek-ai/dsh-llm-retry",
-    "invariants": "@deepseek-ai/dsh-invariants",
-    "session-invariant": "@deepseek-ai/dsh-session/invariant",
-    "agent-invariant": "@deepseek-ai/dsh-agent/invariant",
-    "scope-invariant": "@deepseek-ai/dsh-scope/invariant",
-    "agent-loop-invariant": "@deepseek-ai/dsh-agent-loop/invariant",
-    "agent-loop": "@deepseek-ai/dsh-agent-loop",
-    "sessions": "@deepseek-ai/dsh-session-persistence-jsonl",
-}
-EXPECTED_DISABLED_ROWS = {
-    "session-log-deepseek": "@deepseek-ai/dsh-session-log-deepseek",
-    "plugin-package-inventory-deepseek": "@deepseek-ai/dsh-plugin-package-inventory-deepseek",
-    "sandbox": "@deepseek-ai/dsh-sandbox-local",
-    "sandbox-policy": "@deepseek-ai/dsh-sandbox-policy",
-    "subprocess": "@deepseek-ai/dsh-subprocess-local",
-    "pty": "@deepseek-ai/dsh-terminal",
-    "terminal-bash": "@deepseek-ai/dsh-terminal-bash",
-    "terminal-pwsh": "@deepseek-ai/dsh-terminal-bash",
-    "jobs": "@deepseek-ai/dsh-jobs-local",
-    "persistent-bash": "@deepseek-ai/dsh-tool-bash-persistent",
-    "persistent-pwsh": "@deepseek-ai/dsh-tool-pwsh-persistent",
-}
-
-
-def audit_effective_cordis_config(dump):
-    """Fail closed on unexpected plugin permissions in official --dump-config.
-
-    The official CLI emits an ordered YAML list of top-level plugin rows,
-    with source comments and possible !!js config expressions. Parse only
-    *literal* top-level id/name/disabled metadata; never evaluate JS tags,
-    YAML constructors, or external plugin commands.
-    """
-    if type(dump) is not str or not 0 < len(dump) < Truncation.CORDIS_DUMP_BYTES:
-        raise HarnessUnavailable("Invalid Cordis config dump length")
-    rows = {}
-    current = None
-    for line in dump.splitlines():
-        if line.startswith("- id: "):
-            name = line[6:]
-            if (not Patterns.CORDIS_ROW_ID.fullmatch(name)
-                    or name in rows):
-                raise HarnessUnavailable("Duplicate or invalid Cordis row")
-            rows[name] = {"name": None, "disabled": False}
-            current = rows[name]
-        elif line.startswith("- ") and not line.startswith("- id: "):
-            raise HarnessUnavailable("Unknown top-level Cordis entry")
-        elif current is not None and line.startswith("  name: "):
-            if current["name"] is not None:
-                raise HarnessUnavailable("Duplicate plugin name")
-            current["name"] = line[8:].strip("'\\\"")
-        elif current is not None and line.startswith("  disabled: "):
-            if line != "  disabled: true":
-                raise HarnessUnavailable("Dynamic or enabled plugin state")
-            current["disabled"] = True
-    expected = set(EXPECTED_ACTIVE_ROWS) | set(EXPECTED_DISABLED_ROWS)
-    if set(rows) != expected:
-        raise HarnessUnavailable("Unexpected effective Cordis plugin inventory")
-    for key, name in EXPECTED_ACTIVE_ROWS.items():
-        if rows[key] != {"name": name, "disabled": False}:
-            raise HarnessUnavailable("Unexpected active Cordis plugin")
-    for key, name in EXPECTED_DISABLED_ROWS.items():
-        if rows[key] != {"name": name, "disabled": True}:
-            raise HarnessUnavailable("Unsafe Cordis plugin is enabled")
-    return {"active": sorted(EXPECTED_ACTIVE_ROWS),
-            "disabled": sorted(EXPECTED_DISABLED_ROWS)}
-
-
-PATCH = Path(__file__).with_name("alfred_safe.patch.yml")
-MAX_PROMPT = 8192
-MAX_RESPONSE = 2000
-
-
-class HarnessUnavailable(RuntimeError):
-    pass
-
-
-def _loopback(url):
+def _loopback(url: str) -> str:
     if not isinstance(url, str):
         raise HarnessUnavailable("Harness requires local HTTP model endpoint")
     parsed = urlsplit(url)
@@ -151,42 +73,12 @@ def _loopback(url):
     return url.rstrip("/")
 
 
-def check_safe_patch(path=PATCH):
-    """Validate the version-specific Cordis overlay before any SDK launch.
-
-    Rejects new/unexpected rows, JS expressions, duplicates, plugins, enabling
-    rows or modifying the SDK server/model provider. Uses exact text grammar
-    rather than a full yaml parser (to avoid implicit custom-tag execution).
-    """
-    raw = Path(path).read_bytes()
-    if len(raw) > Truncation.PATCH_BYTES:
-        raise HarnessUnavailable("Unsafe Cordis overlay size")
-    lines = []
-    for rawline in raw.decode("utf-8").splitlines():
-        line = rawline.split("#", 1)[0].strip()
-        if line:
-            lines.append(line)
-    if len(lines) != 2 * len(DENIED_ROWS):
-        raise HarnessUnavailable("Cordis disable list incomplete")
-    seen = set()
-    for i in range(0, len(lines), 2):
-        a, b = lines[i:i+2]
-        if not Patterns.CORDIS_PATCH_LINE.fullmatch(a) or b != "disabled: true":
-            raise HarnessUnavailable("Cordis overlay contains unauthorized syntax")
-        row = a[6:]
-        if row not in DENIED_ROWS or row in seen:
-            raise HarnessUnavailable("Unexpected or duplicated Cordis row")
-        seen.add(row)
-    if seen != DENIED_ROWS:
-        raise HarnessUnavailable("Unsafe Cordis overlay missing rows")
-    return hashlib.sha256(raw).hexdigest()
-
-
 class LocalHarness:
     """Owned reusable DeepSeek SDK runtime. No shell, tools, or cloud routes."""
 
-    def __init__(self, model_url, model, *, timeout=45, max_tokens=256,
-                 factory=None, patch=PATCH, admission=None):
+    def __init__(self, model_url: str, model: str, *, timeout: float = 45,
+                 max_tokens: int = 256, factory=None, patch=PATCH,
+                 admission=None) -> None:
         self.admission = admission
         self.url = _loopback(model_url)
         if not isinstance(model, str) or not Patterns.MODEL_ID.fullmatch(model):
@@ -206,7 +98,7 @@ class LocalHarness:
         self._sdk = None
         self._closed = False
 
-    def _audit_installed_runtime(self, root, workspace):
+    def _audit_installed_runtime(self, root: Path, workspace: Path) -> None:
         """Audit the EXACT binary/profile to be launched, before a model turn.
 
         Source/profile comments or local YAML text are not sufficient: only
@@ -230,7 +122,7 @@ class LocalHarness:
         except (ImportError, OSError, subprocess.TimeoutExpired, ValueError) as exc:
             raise HarnessUnavailable("Cannot verify trusted Cordis plugin graph") from exc
 
-    def audit_installation(self):
+    def audit_installation(self) -> dict:
         """Validate exact pinned distributions and *effective* bundled plugins.
 
         This verifies the installed SDK binary, not Needle/Cordis integration.
@@ -247,7 +139,7 @@ class LocalHarness:
             raise HarnessUnavailable(
                 "Pinned DeepSeek Harness missing: install with pip install -e . "
                 "or verified offline wheelhouse") from exc
-        if (sdk,runtime)!=(SDK_VERSION,SDK_VERSION):
+        if (sdk, runtime) != (SDK_VERSION, SDK_VERSION):
             raise HarnessUnavailable(
                 "DeepSeek Harness SDK/runtime mismatch: reinstall "
                 f"both pinned distributions at {SDK_VERSION}")
@@ -256,31 +148,31 @@ class LocalHarness:
         with (self.admission.claim("harness")
               if self.admission is not None else nullcontext()):
             with tempfile.TemporaryDirectory(prefix="alfred-cordis-audit-") as tmp:
-                root=Path(tmp)
-                workspace=root/"workspace"
+                root = Path(tmp)
+                workspace = root / "workspace"
                 workspace.mkdir(mode=0o700)
-                self._audit_installed_runtime(root,workspace)
-        return {"sdk_version":sdk,"runtime_version":runtime,
-                "profile":"sdk-minimal","patch_sha256":self.patch_sha256,
-                "plugin_audit":"passed","cordis_tool_registry":"empty",
-                "published_wheel_hash":"verify-before-install"}
+                self._audit_installed_runtime(root, workspace)
+        return {"sdk_version": sdk, "runtime_version": runtime,
+                "profile": "sdk-minimal", "patch_sha256": self.patch_sha256,
+                "plugin_audit": "passed", "cordis_tool_registry": "empty",
+                "published_wheel_hash": "verify-before-install"}
 
-    def configure_model(self, served_model):
+    def configure_model(self, served_model: str) -> None:
         """Use the verified, exact local backend model ID before SDK startup.
 
         A configured Hugging Face alias may differ from the model identifier
         actually advertised by llama.cpp, LM Studio or Ollama. Never silently
         substitute the provider model mid-session.
         """
-        if (not isinstance(served_model,str)
+        if (not isinstance(served_model, str)
                 or not Patterns.MODEL_ID.fullmatch(served_model)):
             raise HarnessUnavailable("Invalid advertised local model ID")
         with self._lock:
             if self._sdk is not None or self._closed:
                 raise HarnessUnavailable("Cannot change model after SDK startup")
-            self.model=served_model
+            self.model = served_model
 
-    def require_ready(self):
+    def require_ready(self) -> bool:
         """Start official SDK, never a structural mock, and audit Cordis."""
         if self.factory is not None:
             raise HarnessUnavailable("Mock SDK cannot satisfy production startup")
@@ -354,13 +246,13 @@ class LocalHarness:
             self.close()
             raise
 
-    def run(self, prompt, session_id):
-        guard=(self.admission.claim("harness")
-               if self.admission is not None else nullcontext())
+    def run(self, prompt: str, session_id: str) -> dict:
+        guard = (self.admission.claim("harness")
+                 if self.admission is not None else nullcontext())
         with guard:
-            return self._run_admitted(prompt,session_id)
+            return self._run_admitted(prompt, session_id)
 
-    def _run_admitted(self, prompt, session_id):
+    def _run_admitted(self, prompt: str, session_id: str) -> dict:
         """Read-only SDK model turn with a firm parent timeout and crash fallback.
 
         A worker thread is necessary because SDK Session.run waits for async
@@ -373,9 +265,9 @@ class LocalHarness:
             raise HarnessUnavailable("Invalid correlated session")
         with self._lock:
             sdk = self._open()
-            done = Future()
+            done: Future = Future()
 
-            def run_once():
+            def run_once() -> None:
                 try:
                     done.set_result(sdk.run(prompt, session_id=session_id))
                 except BaseException as exc:
@@ -395,8 +287,8 @@ class LocalHarness:
                 self.close()
                 raise HarnessUnavailable("Required local DeepSeek Harness unavailable") from exc
 
-    def plan(self, utterance, session_id, *, tools, allowed_services=(),
-             named_tasks=(), max_steps=5, handoff=None, context=None):
+    def plan(self, utterance: str, session_id: str, *, tools, allowed_services=(),
+             named_tasks=(), max_steps: int = 5, handoff=None, context=None) -> dict:
         """Ask the shared SDK for an UNTRUSTED JSON plan; do not execute tools.
 
         The caller MUST pass the result through System2.parse_plan and
@@ -437,7 +329,7 @@ class LocalHarness:
             "Use steps=[] if unclear. Request: " + utterance +
             (". Handoff metadata: " + handoff.to_model_context()
              if handoff is not None else "") +
-            (". Bounded context data: " + json.dumps(context,sort_keys=True)
+            (". Bounded context data: " + json.dumps(context, sort_keys=True)
              if context and (context.get("slots") or
                  context.get("task_observations") or
                  context.get("user_approved_facts")) else "")
@@ -463,7 +355,7 @@ class LocalHarness:
         # System2.parse_plan is still the authoritative schema and policy check.
         return plan
 
-    def close(self):
+    def close(self) -> None:
         with self._lock:
             if self._closed:
                 return
