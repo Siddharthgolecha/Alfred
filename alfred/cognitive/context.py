@@ -27,9 +27,9 @@ FACT_KEY = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 FORBIDDEN = re.compile(r"secret|password|token|api_key|command|script|system|"
                        r"prompt|instruction|shell|tool|policy|approval|credential", re.I)
 SENSITIVE_VALUE = re.compile(
-    r"(?i)(?:sk-[A-Za-z0-9]{8,}|bearer\\s+\\S+|"
-    r"ignore\\s+(?:previous|all)\\s+instructions|"
-    r"(?:^|\\s)(?:sudo|curl|wget)\\s|rm\\s+-rf|https?://)")
+    r"(?i)(?:sk-[A-Za-z0-9]{8,}|bearer\s+\S+|"
+    r"ignore\s+(?:previous|all)\s+instructions|"
+    r"(?:^|\s)(?:sudo|curl|wget)\s|rm\s+-rf|https?://)")
 REF = re.compile(r"^\s*(?:check|read|show|get)\s+(?:it|that)(?:\s+again)?[.!?]*\s*$",re.I)
 DANGEROUS_REF = re.compile(r"^\s*(?:restart|stop|start|cancel|delete|run|"
                             r"approve|change|disable|enable)\s+(?:it|that)(?:\s+again)?[.!?]*\s*$",re.I)
