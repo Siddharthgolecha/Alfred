@@ -671,5 +671,62 @@ class MeetingPolicyTests(unittest.TestCase):
         self.assertFalse(adapter.available("qr_obex_handoff"))
 
 
+class CombinedHandoffSkillBoundaryTests(unittest.TestCase):
+    """PR #32 + #36: skill discovery is never model tool authorization."""
+
+    def test_meeting_skills_do_not_grant_needle_or_qwen_authority(self):
+        from alfred.runtime import TOOL_SCHEMAS
+        with tempfile.TemporaryDirectory() as temp:
+            cfg=load_config()
+            cfg["runtime"]["database"]=str(Path(temp)/"handoff.db")
+            cfg["runtime"]["logs"]=temp
+            cfg["runtime"]["escalation_enabled"]=True
+            cfg["runtime"]["harness_enabled"]=False
+            cfg["runtime"]["needle_loop_enabled"]=False
+            cfg["qwen"]["enabled"]=True
+            device=FakeMeetingDevice()
+            adapter=OfflineMeetingAdapter(device)
+            app=Alfred(cfg,load_models=False,meeting_adapter=adapter)
+            app.cactus=Mock()
+            app.feedback.tell=Mock()
+            app.qwen.complete=Mock(return_value={
+                "message":"Try recording", "steps":[
+                    {"tool":"meeting_recording","args":{}}],
+                "save_as":None})
+            try:
+                available={item["name"]:item for item in app.skills.metadata()}
+                self.assertTrue(available["meeting_recording"]["available"])
+                self.assertNotIn("meeting_recording",{
+                    schema["name"] for schema in TOOL_SCHEMAS})
+                with self.assertRaises((ValueError,PermissionError)):
+                    app.tools.execute("meeting_recording",{})
+                with unittest.mock.patch.object(
+                        app.tools,"run_plan",side_effect=AssertionError(
+                            "A discovered skill must not become executable")) as run:
+                    for proposed in ("meeting_recording","delegate_to_reasoner"):
+                        with self.subTest(needle_route=proposed):
+                            app.cactus.route.return_value={
+                                "function_calls":[{
+                                    "name":proposed,"arguments":{}}],
+                                "confidence":0.99}
+                            app.handle_text("Record a meeting")
+                            self.assertEqual(
+                                app.sessions.events(
+                                    app.store.db.execute(
+                                        "SELECT id FROM cognitive_tasks "
+                                        "ORDER BY rowid DESC LIMIT 1").fetchone()[0]
+                                )[-1].outcome, "failed")
+                            self.assertEqual(app.system2.approvals.pending(),[])
+                            catalog=app.qwen.complete.call_args.args[1]
+                            self.assertNotIn("meeting_recording",{
+                                schema["name"] for schema in catalog})
+                    run.assert_not_called()
+                self.assertEqual(
+                    [call for call in device.calls if call[0] != "probe"],[])
+                self.assertEqual(app.qwen.complete.call_count,2)
+            finally:
+                app.close()
+
+
 if __name__=="__main__":
     unittest.main()

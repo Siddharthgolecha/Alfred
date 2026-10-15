@@ -166,10 +166,15 @@ workflow privileges.
 - Existing Phase 4 `WorkflowEngine` is unchanged; approved graph digest
   and service/named-task allowlists continue to gate all actions. Skill
   metadata does not make a workflow executable or locally approved.
-- After #15 merges (and with #16 **already merged**), reconcile the
-  **consented meeting
-  evidence packet** only into the appropriate same-task context, never
-  global retained session slots. No transcript read without explicit ID.
+- #15 (PR #32) and #16 (PR #33) are now merged into main. The `--skills`
+  registry is **discovery-only**: it is not part of Needle/Qwen/Harness tool
+  schemas and is not a delegated action. Integration regression
+  `CombinedHandoffSkillBoundaryTests` rejects synthetic Needle/Qwen meeting
+  tool proposals even when the installed fake adapter advertises readiness.
+- A real **consented meeting evidence packet** must remain task-scoped,
+  with explicit meeting ID and authenticated user consent; it must never
+  become a global retained session slot or historical transcript search.
+  That native/device integration is still out of scope.
 
 ## Fake-device acceptance and hardware follow-up
 
@@ -202,6 +207,10 @@ dependencies, offline Qwen/Whistle, PDF open-and-review, explicit consent
 start/stop/read/transfer, 100% local approval gating, P50/P95 CPU/RAM/
 power/thermal baseline, and no background child process after shutdown.
 
-**Hard blockers:** #15 and #16 are unmerged; Jetson implementation is
-absent from main by design. Passing fake tests does NOT mean end-to-end
-Jetson meeting recording, real Qwen MoM or QR/OBEX works.
+**Dependency integration:** #15 and #16 are merged; PR #36 has integrated
+current main at `4ef27e63e3535b46964be02d91587e34fa97f280` by a non-force
+two-parent merge, retaining all reviewed meeting invariants. This is a
+device-neutral contract; a live Jetson provider is absent from main.
+Passing fake tests does NOT mean end-to-end Jetson meeting recording,
+real Qwen MoM, physical deletion or QR/OBEX delivery works.
+On-device safety tests and independent review remain required for rollout.
