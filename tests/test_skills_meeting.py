@@ -5,6 +5,7 @@ import copy
 import io
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -299,7 +300,7 @@ class MeetingPolicyTests(unittest.TestCase):
         self.assertEqual(self.adapter.deliver(
             p,receipt["artifact_id"],local_authorized=True),
             {"meeting_id":MEETING,"delivered":True})
-        self.assertEqual(self.adapter.stop(p)["retained"],True)
+        self.assertEqual(self.adapter.stop(p,local_authorized=True)["retained"],True)
         self.assertEqual(self.adapter.evidence(p),ev)
         self.adapter.revoke(p)
         with self.assertRaises(PermissionError):
@@ -334,7 +335,7 @@ class MeetingPolicyTests(unittest.TestCase):
     def test_without_retention_stop_revokes_transcript_access(self):
         self.start(retention=False)
         p=self.grant()
-        self.assertEqual(self.adapter.stop(p)["retained"],False)
+        self.assertEqual(self.adapter.stop(p,local_authorized=True)["retained"],False)
         self.assertIn(("discard",MEETING),self.device.calls)
         with self.assertRaises(PermissionError):
             self.adapter.evidence(p)
@@ -365,7 +366,7 @@ class MeetingPolicyTests(unittest.TestCase):
         p=self.grant()
         self.device.discard_meeting=Mock(return_value=False)
         with self.assertRaisesRegex(RuntimeError,"discard unverified"):
-            self.adapter.stop(p)
+            self.adapter.stop(p,local_authorized=True)
         with self.assertRaises(PermissionError):
             self.adapter.evidence(p)
 
@@ -383,7 +384,7 @@ class MeetingPolicyTests(unittest.TestCase):
         p=self.grant()
         self.device.discard_meeting=Mock(side_effect=[False,True])
         with self.assertRaisesRegex(RuntimeError,"discard unverified"):
-            self.adapter.stop(p)
+            self.adapter.stop(p,local_authorized=True)
         rows=self.journal.pending(SID,"local")
         self.assertEqual(len(rows),1)
         self.assertEqual(rows[0]["state"],"purge_pending")
@@ -419,7 +420,7 @@ class MeetingPolicyTests(unittest.TestCase):
         original=self.device.stop_recording
         self.device.stop_recording=Mock(side_effect=[OSError("transient"),None])
         with self.assertRaises(OSError):
-            self.adapter.stop(p)
+            self.adapter.stop(p,local_authorized=True)
         self.assertEqual(self.journal.pending(SID,"local")[0]["state"],"stopping")
         with self.assertRaises(PermissionError):
             self.adapter.evidence(p)
@@ -508,6 +509,143 @@ class MeetingPolicyTests(unittest.TestCase):
         self.assertEqual(packet[0]["start_utc"],"2026-10-15T01:00:00Z")
         self.assertEqual(packet[0]["end_utc"],"2026-10-15T01:00:04Z")
         self.assertLess(packet[0]["start_utc"],packet[1]["end_utc"])
+
+    def test_read_permit_never_authorizes_recording_stop(self):
+        self.start(retention=False)
+        p=self.grant()
+        with self.assertRaises(PermissionError):
+            self.adapter.stop(p)
+        self.assertFalse(any(call[0]=="stop" for call in self.device.calls))
+        self.assertEqual(self.adapter.status(p)["state"],"recording")
+        self.assertEqual(self.adapter.stop(p,local_authorized=True)["retained"],False)
+
+    def test_meeting_ids_unique_across_independent_stores_sessions_and_owners(self):
+        self.start(retention=True)
+        first=set(self.device.active_operations)
+        other=Store(Path(self.tmp.name)/"meetings.sqlite")
+        try:
+            second=OfflineMeetingAdapter(self.device,
+                                         journal=MeetingCleanupJournal(other))
+            with self.assertRaisesRegex(ValueError,"Duplicate meeting ID"):
+                second.start(session_id=SID2,task_id=TASK2,owner="different",
+                    consent=True,retention=False,local_authorized=True)
+            # Token rollback affects ONLY the second attempt.
+            self.assertEqual(self.device.active_operations,first)
+            rows=self.journal.pending(SID,"local")
+            self.assertEqual(len(rows),1)
+            self.assertEqual(rows[0]["state"],"recording")
+            self.assertEqual(self.grant().meeting_id,MEETING)
+            self.assertFalse(self.journal.pending(SID2,"different"))
+            # A retained stopped meeting ID cannot be reassigned either.
+            self.adapter.stop(self.grant(),local_authorized=True)
+            with self.assertRaisesRegex(ValueError,"Duplicate meeting ID"):
+                second.start(session_id=SID2,task_id=TASK2,owner="different",
+                    consent=True,retention=False,local_authorized=True)
+        finally:
+            other.db.close()
+
+    def test_blocking_provider_read_export_transfer_serialize_with_purge(self):
+        # Events hold each actual device call, not merely _verify().
+        # stop cannot pass it or purge and must wait for in-flight operation.
+        for operation in ("evidence","export_pdf","deliver"):
+            with self.subTest(operation=operation):
+                # Fresh journal/recording per case; stop with verified purge.
+                if hasattr(self,"_once_used") and self._once_used:
+                    self.tearDown()
+                    self.setUp()
+                self._once_used=True
+                self.start(retention=False)
+                p=self.grant()
+                if operation in ("export_pdf","deliver"):
+                    checked=self.adapter.minutes(p,title="Project sync")
+                if operation=="deliver":
+                    handle=self.adapter.export_pdf(p,checked)["artifact_id"]
+                name={"evidence":"get_segments",
+                      "export_pdf":"save_pdf","deliver":"deliver_pdf"}[operation]
+                original=getattr(self.device,name)
+                entered=threading.Event()
+                release=threading.Event()
+                stopped=threading.Event()
+                stop_started=threading.Event()
+                errors=[]
+                def slow(*args,**kwargs):
+                    entered.set()
+                    if not release.wait(2):
+                        raise AssertionError("Timed out waiting for test barrier")
+                    return original(*args,**kwargs)
+                setattr(self.device,name,slow)
+                def actor():
+                    try:
+                        if operation=="evidence": self.adapter.evidence(p)
+                        elif operation=="export_pdf": self.adapter.export_pdf(p,checked)
+                        else: self.adapter.deliver(p,handle,local_authorized=True)
+                    except BaseException as exc: errors.append(exc)
+                def stopper():
+                    stop_started.set()
+                    try:
+                        self.adapter.stop(p,local_authorized=True)
+                    except BaseException as exc: errors.append(exc)
+                    finally: stopped.set()
+                t1=threading.Thread(target=actor)
+                t2=threading.Thread(target=stopper)
+                try:
+                    t1.start()
+                    self.assertTrue(entered.wait(1))
+                    t2.start()
+                    self.assertTrue(stop_started.wait(1))
+                    self.assertFalse(stopped.wait(.08),
+                                     "Stop must wait for in-flight device operation")
+                    self.assertNotIn(("discard",MEETING),self.device.calls)
+                finally:
+                    release.set()
+                    t1.join(2)
+                    if t2.ident is not None: t2.join(2)
+                self.assertFalse(t1.is_alive())
+                self.assertFalse(t2.is_alive())
+                self.assertEqual(errors,[])
+                self.assertTrue(stopped.is_set())
+                self.assertIn(("discard",MEETING),self.device.calls)
+                with self.assertRaises(PermissionError):
+                    self.adapter.evidence(p)
+
+    def test_revoke_waits_for_inflight_read_and_prevents_new_device_calls(self):
+        self.start(retention=True)
+        p=self.grant()
+        read_started=threading.Event()
+        release=threading.Event()
+        revoked=threading.Event()
+        original=self.device.get_segments
+        def slow(mid):
+            read_started.set()
+            if not release.wait(2):
+                raise AssertionError("Timed out at test barrier")
+            return original(mid)
+        self.device.get_segments=slow
+        errors=[]
+        def read():
+            try: self.adapter.evidence(p)
+            except BaseException as exc: errors.append(exc)
+        reader=threading.Thread(target=read)
+        revoker=threading.Thread(target=lambda:(
+            self.adapter.revoke(p),revoked.set()))
+        try:
+            reader.start()
+            self.assertTrue(read_started.wait(1))
+            revoker.start()
+            self.assertFalse(revoked.wait(.08),
+                             "Revocation cannot finish while read holds lease")
+        finally:
+            release.set()
+            reader.join(2)
+            if revoker.ident is not None: revoker.join(2)
+        self.assertFalse(reader.is_alive())
+        self.assertFalse(revoker.is_alive())
+        self.assertEqual(errors,[])
+        self.assertTrue(revoked.is_set())
+        previous=len([x for x in self.device.calls if x[0]=="get"])
+        with self.assertRaises(PermissionError):
+            self.adapter.evidence(p)
+        self.assertEqual(previous,len([x for x in self.device.calls if x[0]=="get"]))
 
     def test_unavailable_qwen_or_obex_reports_missing(self):
         device=FakeMeetingDevice(features={"microphone","guarded_ssd",
