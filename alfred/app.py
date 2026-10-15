@@ -111,16 +111,16 @@ class Alfred:
                 while not self._watchdog_stop.is_set():
                     try:
                         if self.admission.enabled:
-                            if self.admission.capture_active:
-                                # Never cold-start Qwen in the active voice
-                                # capture critical path. Next watchdog cycle
-                                # will retry once capture is idle.
-                                continue
-                            with self.admission.claim("qwen"):
-                                self.supervisor.ensure_running()
+                            if not self.admission.capture_active:
+                                # Never cold-start Qwen during voice capture.
+                                # Crucially, still reach _watchdog_stop.wait
+                                # at the bottom: skipping it spins hot.
+                                with self.admission.claim("qwen"):
+                                    self.supervisor.ensure_running()
+                                LOG.info("Qwen available: %s", self.supervisor.status())
                         else:
                             self.supervisor.ensure_running()
-                        LOG.info("Qwen available: %s", self.supervisor.status())
+                            LOG.info("Qwen available: %s", self.supervisor.status())
                     except Exception as exc:
                         LOG.warning("Qwen unavailable; will retry: %s", exc)
                     self._watchdog_stop.wait(int(self.cfg["qwen"]["supervisor_poll_seconds"]))
