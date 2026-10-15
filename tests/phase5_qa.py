@@ -112,6 +112,7 @@ class AdmittedStub:
 
     def reset_mock(self):
         self.mock.reset_mock()
+        self.attempt_count=0
 
 
 class AdmittedCactus:
@@ -220,6 +221,9 @@ def run_matrix(output_dir):
                               "swap_used_mib":0.,"cpu_load_per_core":.2}
                     before_gate=app.admission.snapshot()
                     if unified:
+                        app.cactus.route.reset_mock()
+                        app.cactus.route_feedback.reset_mock()
+                        app.cactus.transcribe_stream.reset_mock()
                         # Whistle has a real admission wrapper, exercised
                         # before voice capture moves into model routing.
                         app.admission.set_capture_active(True)
