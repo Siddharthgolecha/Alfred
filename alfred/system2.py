@@ -146,6 +146,13 @@ def parse_plan(plan, text, tools, max_steps):
     return message,steps,save_as
 
 
+@dataclass(frozen=True)
+class VerifiedRead:
+    """Python-authenticated returned read, never a model-authored claim."""
+    tool: str
+    output: object
+
+
 class System2:
     """Single entry for Qwen plans, with explicit read-only fallback."""
     def __init__(self, qwen, tools, store, cfg):
@@ -174,7 +181,19 @@ class System2:
         if not steps:
             return {"message":message or "No tool action required","results":[]}
         results=self.tools.run_plan(steps)
-        return {"message":message or "Completed","results":results}
+        # Bind observations to *preflighted and actually returned* step names.
+        # The planner's text and any unexecuted/skipped step are not evidence.
+        # This opaque typed channel is consumed by Alfred, then removed before
+        # showing JSON to users or passing anything back to a language model.
+        from .cognitive.context import READS
+        verified = tuple(
+            VerifiedRead(step["tool"], value)
+            for step, value in zip(steps, results)
+            if step["tool"] in READS and not (
+                isinstance(value,dict) and value.get("skipped") is True)
+        ) if isinstance(results,list) and len(results)==len(steps) else ()
+        return {"message":message or "Completed","results":results,
+                "_verified_reads":verified}
 
     @staticmethod
     def _incomplete_plan():
@@ -187,27 +206,26 @@ class System2:
                     "specific action and time or interval."
                 ), "results": []}
 
-    def reason(self, utterance, allow_actions=True):
+    def reason(self, utterance, allow_actions=True, *, context=None):
         # Tool schemas, not just tool names, are provided to the planner.
         tool_catalog=[s for s in TOOL_SCHEMAS if s["name"] not in
                       ("delegate_to_reasoner","run_workflow")]
+        opts={"context":context} if context and (
+            context.get("slots") or context.get("task_observations")
+            or context.get("user_approved_facts")) else {}
         try:
             plan=self.qwen.complete(utterance, tool_catalog,
                                     allowed_services=self.tools.services,
-                                    named_tasks=self.tools.tasks.keys())
+                                    named_tasks=self.tools.tasks.keys(),**opts)
         except QwenPlanResponseError as exc:
-            # Invalid model output is not a plan. No tool authorization is
-            # retried or inferred from the failed completion.
+            # Generation retries never confer authorization; a failed
+            # structured response is a failed, non-executed plan.
             LOG.warning("System 2 plan unavailable: %s", exc)
             return self._incomplete_plan()
         try:
             message,steps,save_as=parse_plan(plan,utterance,self.tools,
                                             self.cfg.get("max_plan_steps",5))
         except (ValueError, PermissionError) as exc:
-            # Semantic failures (unknown tools, unapproved services, invalid
-            # typed arguments) MUST NOT be regenerated into new permissions.
-            # This is deliberately before execute_or_stage: never intercept a
-            # partially executed plan and treat it as retryable.
             LOG.warning("System 2 plan rejected by preflight: %s", exc)
             return self._incomplete_plan()
         outcome = self.execute_or_stage(steps,message,save_as,allow_actions)
