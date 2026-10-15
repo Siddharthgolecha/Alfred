@@ -265,6 +265,24 @@ class AppIntegrationTests(unittest.TestCase):
         self.app.reason.assert_not_called()
         self.assertEqual(len(self.app.sessions.list_tasks(self.app.session_id)),2)
 
+    def test_clear_current_session_local_command_does_not_reach_models(self):
+        self.app.cactus.route.return_value=self._gpu_call()
+        self.app.system2.direct=Mock(return_value={
+            "message":"Done","results":[{"available":True,"gpu_temp_c":64}]})
+        self.app.handle_text("Check GPU temperature")
+        self.app.context.set_explicit_fact("answer_style","short",local_approval=True)
+        self.app.cactus.route.reset_mock()
+        self.app.system2.direct.reset_mock()
+        self.app.handle_text("clear this session")
+        self.app.cactus.route.assert_not_called()
+        self.app.system2.direct.assert_not_called()
+        self.assertEqual(self.app.context.compact(self.app.session_id)["slots"],{})
+        self.assertIn("answer_style",self.app.context.list_facts())
+        self.app.handle_text("check it again")
+        self.app.cactus.route.assert_not_called()
+        self.assertIn("rejected",[t["state"] for t in
+                       self.app.sessions.list_tasks(self.app.session_id)])
+
     def test_context_expired_and_dangerous_action_no_executions(self):
         self.app.cactus.route.return_value=self._gpu_call()
         self.app.system2.direct=Mock(return_value={
