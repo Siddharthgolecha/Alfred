@@ -26,6 +26,10 @@ SCOPE_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,31}$")
 FACT_KEY = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 FORBIDDEN = re.compile(r"secret|password|token|api_key|command|script|system|"
                        r"prompt|instruction|shell|tool|policy|approval|credential", re.I)
+SENSITIVE_VALUE = re.compile(
+    r"(?i)(?:sk-[A-Za-z0-9]{8,}|bearer\\s+\\S+|"
+    r"ignore\\s+(?:previous|all)\\s+instructions|"
+    r"(?:^|\\s)(?:sudo|curl|wget)\\s|rm\\s+-rf|https?://)")
 REF = re.compile(r"^\s*(?:check|read|show|get)\s+(?:it|that)(?:\s+again)?[.!?]*\s*$",re.I)
 DANGEROUS_REF = re.compile(r"^\s*(?:restart|stop|start|cancel|delete|run|"
                             r"approve|change|disable|enable)\s+(?:it|that)(?:\s+again)?[.!?]*\s*$",re.I)
@@ -108,6 +112,7 @@ class ContextManager:
         if persist_facts:
             self._protect_db()
             with self.store.lock, self.store.db:
+                self.store.db.execute("PRAGMA secure_delete=ON")
                 self.store.db.execute("""
                     CREATE TABLE IF NOT EXISTS context_approved_facts(
                         owner TEXT NOT NULL,
@@ -261,7 +266,8 @@ class ContextManager:
         if (type(key) is not str or not FACT_KEY.fullmatch(key)
                 or FORBIDDEN.search(key)
                 or type(value) is not str or not 1 <= len(value) <= 160
-                or any(ord(ch)<32 or ord(ch)==127 for ch in value)):
+                or any(ord(ch)<32 or ord(ch)==127 for ch in value)
+                or SENSITIVE_VALUE.search(value)):
             raise ValueError("Invalid retained fact. Use short non-sensitive preferences.")
         return key,value
 
