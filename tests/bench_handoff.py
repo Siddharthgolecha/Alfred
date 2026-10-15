@@ -38,6 +38,8 @@ def main(samples=200):
                 "message":"Completed","results":[{"available":True,"gpu_temp_c":64}]})
             app.supervisor.ensure_running=Mock(return_value=True)
             app.harness=Mock()
+            app.system2.qwen.complete=Mock(side_effect=AssertionError(
+                "Required SDK benchmark invoked legacy independent Qwen planner"))
             app.harness.plan.return_value={
                 "message":"Explanation from fake model","steps":[],"save_as":None}
             durations={"direct":[],"escalation":[]}
