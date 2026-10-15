@@ -184,7 +184,7 @@ class System2:
         only bounded telemetry; no raw stdout, names, or tool result strings.
         """
         from .cognitive.escalation import EscalationEnvelope
-        from .cognitive.harness_sdk import HarnessUnavailable
+        from .cognitive.harness_sdk import HarnessInvalidPlan, HarnessUnavailable
 
         if not isinstance(handoff, EscalationEnvelope):
             raise ValueError("Expected a validated escalation envelope")
@@ -235,6 +235,10 @@ class System2:
                     handoff.request, catalog,
                     allowed_services=self.tools.services,
                     named_tasks=self.tools.tasks.keys(), handoff=handoff)
+        except HarnessInvalidPlan:
+            # A completed but malformed SDK proposal is a hard rejection.
+            # Do not give an action-bearing request another planning attempt.
+            raise
         except (OSError, ValueError, RuntimeError, TimeoutError, ConnectionError):
             return {"status":"incomplete",
                     "message":"Local reasoner unavailable; no follow-up action executed.",
