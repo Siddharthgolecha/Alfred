@@ -488,7 +488,8 @@ class AppWiringTests(unittest.TestCase):
                 self.app.feedback.tell.reset_mock()
                 self.app.handle_text("Check GPU temperature then check status")
                 self.app.system2.direct.assert_called_once()
-                last=self.app.sessions.list_tasks(self.app.session_id)[0]
+                # The loop creates a fresh task for every subtest.
+                last=self.app.sessions.list_tasks(self.app.session_id)[-1]
                 expected="rejected" if final["function_calls"][0]["name"] == "run_named_task" else "completed"
                 self.assertEqual(last["state"],expected)
                 if expected=="rejected":
