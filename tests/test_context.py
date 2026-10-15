@@ -110,6 +110,19 @@ class ContextFixtures(unittest.TestCase):
         self.assertEqual(self.ctx.resolve(SID_A,"check it again"),
                          "Show GPU temperature again")
 
+    def test_scope_switch_during_task_does_not_retain_finished_observations(self):
+        self.assertTrue(self.add_gpu())
+        self.ctx.switch_scope("other_owner","meeting")
+        self.assertFalse(self.add_gpu())
+        self.ctx.finish_task(SID_A,TASK_A)
+        self.ctx.switch_scope("local","assistant")
+        self.assertEqual(self.ctx.compact(SID_A,TASK_A)["task_observations"],[])
+        self.assertNotIn((SID_A,TASK_A),self.ctx._task_scopes)
+        self.assertNotIn((("local","assistant",SID_A),TASK_A),self.ctx._tasks)
+        # Session slots intentionally retain their bounded TTL independently
+        # of the task; finished-task observations must NOT be retained.
+        self.assertIn("gpu_temperature",self.ctx.compact(SID_A)["slots"])
+
     def test_reject_fabricated_or_untrusted_tool_observation(self):
         cases=[
             ("get_gpu_status",{"available":False,"gpu_temp_c":65}),
@@ -222,6 +235,46 @@ class PersistenceTests(unittest.TestCase):
             self.assertEqual(check.list_facts(),{})
             third.db.close()
 
+    def test_two_connections_cannot_exceed_eight_retained_facts(self):
+        with tempfile.TemporaryDirectory() as home:
+            path=Path(home)/"bounded.db"
+            stores=[Store(path),Store(path)]
+            try:
+                managers=[ContextManager(s,enabled=True,persist_facts=True)
+                          for s in stores]
+                for index in range(7):
+                    managers[0].set_explicit_fact(f"preference_{index}","short",
+                                                  local_approval=True)
+                barrier=threading.Barrier(2)
+                outcomes=[]
+                lock=threading.Lock()
+                def writer(ctx,key):
+                    barrier.wait(timeout=5)
+                    try:
+                        ctx.set_explicit_fact(key,"short",local_approval=True)
+                        result="inserted"
+                    except ValueError as exc:
+                        result=str(exc)
+                    with lock:
+                        outcomes.append(result)
+                threads=[threading.Thread(target=writer,args=(cm,key))
+                         for cm,key in zip(managers,("preference_eight","preference_nine"))]
+                for t in threads: t.start()
+                for t in threads: t.join(timeout=8)
+                self.assertFalse(any(t.is_alive() for t in threads))
+                self.assertEqual(outcomes.count("inserted"),1)
+                self.assertEqual(sum("budget reached" in x for x in outcomes),1)
+                self.assertEqual(len(managers[0].list_facts()),8)
+                self.assertEqual(managers[0].list_facts(),managers[1].list_facts())
+                # An existing key remains editable even at the hard cap.
+                managers[1].set_explicit_fact("preference_0","updated",
+                                              local_approval=True)
+                self.assertEqual(managers[0].list_facts()["preference_0"]["value"],
+                                 "updated")
+            finally:
+                for store in stores:
+                    store.db.close()
+
     def test_default_off_never_creates_retention_table(self):
         with tempfile.TemporaryDirectory() as home:
             store=Store(Path(home)/"data.db")
@@ -307,6 +360,67 @@ class AppIntegrationTests(unittest.TestCase):
                       self.app.cactus.route.call_args.args[0])
         self.app.reason.assert_not_called()
         self.assertEqual(len(self.app.sessions.list_tasks(self.app.session_id)),2)
+
+    def test_unsupported_needle_qwen_read_creates_verified_fresh_slot(self):
+        self.app.cactus.route.side_effect=[
+            {"confidence":.95,"function_calls":[]},
+            {"confidence":.95,"function_calls":[
+                {"name":"get_gpu_status","arguments":{}}]}]
+        self.app.system2.qwen.complete=Mock(return_value={
+            "message":"GPU checked","steps":[{"tool":"get_gpu_status","args":{}}],
+            "save_as":None})
+        self.app.system2.tools.run_plan=Mock(return_value=[
+            {"available":True,"gpu_temp_c":64}])
+        self.app.handle_text("Check GPU temperature")
+        self.app.system2.qwen.complete.assert_called_once()
+        self.assertEqual(self.app.context.resolve(self.app.session_id,
+                         "check it again"),"Show GPU temperature again")
+        first=self.app.sessions.list_tasks(self.app.session_id)[0]
+        returned=[e.tool for e in self.app.sessions.events(first["id"])
+                  if e.kind=="observation" and e.outcome=="returned"]
+        self.assertEqual(returned,["get_gpu_status"])
+        self.app.handle_text("check it again")
+        self.assertIn("Show GPU temperature again",
+                      self.app.cactus.route.call_args.args[0])
+        self.app.system2.qwen.complete.assert_called_once()
+        self.assertEqual(self.app.system2.tools.run_plan.call_count,2)
+
+    def test_explicit_qwen_delegate_attributes_tool_result_not_delegate(self):
+        self.app.cactus.route.return_value={"confidence":.99,
+            "function_calls":[{"name":"delegate_to_reasoner",
+                               "arguments":{"request":"Check GPU temperature"}}]}
+        self.app.system2.qwen.complete=Mock(return_value={
+            "message":"GPU checked","steps":[{"tool":"get_gpu_status","args":{}}],
+            "save_as":None})
+        self.app.system2.tools.run_plan=Mock(return_value=[
+            {"available":True,"gpu_temp_c":64}])
+        self.app.handle_text("Check GPU temperature")
+        first=self.app.sessions.list_tasks(self.app.session_id)[0]
+        returned=[e.tool for e in self.app.sessions.events(first["id"])
+                  if e.kind=="observation" and e.outcome=="returned"]
+        self.assertEqual(returned,["get_gpu_status"])
+        self.assertEqual(self.app.context.resolve(self.app.session_id,
+                         "check it again"),"Show GPU temperature again")
+        self.assertNotIn("_verified_reads",
+                         self.app.feedback.tell.call_args.args[0])
+
+    def test_skipped_denied_or_invalid_qwen_plan_cannot_create_slot(self):
+        self.app.cactus.route.return_value={"confidence":.95,"function_calls":[]}
+        self.app.system2.qwen.complete=Mock(return_value={
+            "message":"Skipped","steps":[{"tool":"get_gpu_status","args":{}}],
+            "save_as":None})
+        self.app.system2.tools.run_plan=Mock(return_value=[{"skipped":True}])
+        self.app.handle_text("Check GPU temperature")
+        self.assertEqual(self.app.context.compact(self.app.session_id)["slots"],{})
+        self.app.system2.qwen.complete.return_value={
+            "message":"Unsafe","steps":[{"tool":"run_named_task",
+                                          "args":{"name":"unknown"}}],"save_as":None}
+        self.app.handle_text("Check GPU temperature")
+        self.assertEqual(self.app.context.compact(self.app.session_id)["slots"],{})
+        self.app.system2.qwen.complete.side_effect=OSError("Qwen down")
+        self.app.handle_text("Check GPU temperature")
+        self.assertEqual(self.app.context.compact(self.app.session_id)["slots"],{})
+        self.assertEqual(self.app.system2.tools.run_plan.call_count,1)
 
     def test_clear_current_session_local_command_does_not_reach_models(self):
         self.app.cactus.route.return_value=self._gpu_call()
