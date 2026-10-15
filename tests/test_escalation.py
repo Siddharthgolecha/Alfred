@@ -126,6 +126,32 @@ class ContinuationTests(unittest.TestCase):
         self.assertIs(passed.__class__,EscalationEnvelope)
         self.assertEqual(passed.session_id,SID)
 
+    def test_five_total_tools_allow_three_needle_reads_then_two_qwen_reads(self):
+        completed=[READ,
+                   {"name":"get_system_status","arguments":{}},
+                   {"name":"list_services","arguments":{}}]
+        h=build_handoff(SID,TID,"Report GPU and system diagnostics",
+                        "incomplete",calls=completed,
+                        results=[OBS,{"uptime_seconds":321},{}],max_tools=5)
+        self.assertEqual(len(h.completed),3)
+        self.assertEqual(h.remaining_tools,2)
+        self.qwen.complete.return_value=plan([
+            {"tool":"list_automations","args":{}},
+            {"tool":"list_reminders","args":{}}])
+        with patch.object(self.tools,"run_plan",return_value=[[],[]]) as run:
+            result=self.sys.continue_handoff(h)
+        run.assert_called_once()
+        self.assertEqual(len(result["results"]),5)
+        self.assertEqual(len(result["tool_outcomes"]),2)
+        self.qwen.complete.return_value=plan([
+            {"tool":"list_automations","args":{}},
+            {"tool":"list_reminders","args":{}},
+            {"tool":"list_schedules","args":{}}])
+        with patch.object(self.tools,"run_plan") as run:
+            with self.assertRaisesRegex(ValueError,"remaining tool budget"):
+                self.sys.continue_handoff(h)
+            run.assert_not_called()
+
     def test_conditional_skip_is_not_misreported_as_executed(self):
         self.qwen.complete.return_value=plan([
             {"tool":"get_system_status","args":{}},
@@ -267,6 +293,39 @@ class AppTraceTests(unittest.TestCase):
         self.assertEqual(sent.task_id,tasks[0]["id"])
         self.assertEqual(sent.session_id,tasks[0]["session_id"])
         self.assertFalse(sent.allow_actions)
+
+    def test_supported_six_and_ten_step_config_still_handoff_safely(self):
+        self.app.cactus.route.return_value={"confidence":.99,"function_calls":[]}
+        for steps in (6,10):
+            with self.subTest(max_plan_steps=steps):
+                self.app.cfg["runtime"]["max_plan_steps"]=steps
+                self.app.system2.cfg["max_plan_steps"]=steps
+                self.app.system2.qwen.complete.reset_mock()
+                self.app.handle_text("Explain quantum teleportation")
+                sent=self.app.system2.qwen.complete.call_args.kwargs["handoff"]
+                self.assertEqual(sent.remaining_tools,5)
+                self.assertEqual(len(sent.completed),0)
+                self.assertFalse(sent.allow_actions)
+                self.assertEqual(self.app.sessions.list_tasks(self.app.session_id)[-1]["state"],"completed")
+                self.assertNotIn("Could not complete command",
+                                 self.app.feedback.tell.call_args.args[0])
+
+    def test_supported_six_and_ten_step_config_actionable_delegation(self):
+        self.app.cactus.route.return_value={
+            "confidence":.99,"function_calls":[
+                {"name":"delegate_to_reasoner","arguments":{"request":"Run a safe task"}}]}
+        self.app.cfg["runtime"]["allowed_services"]=[]
+        self.app.system2.qwen.complete.return_value=plan(message="No action needed")
+        for steps in (6,10):
+            with self.subTest(max_plan_steps=steps):
+                self.app.cfg["runtime"]["max_plan_steps"]=steps
+                self.app.system2.cfg["max_plan_steps"]=steps
+                self.app.handle_text("Run the safe task")
+                sent=self.app.system2.qwen.complete.call_args.kwargs["handoff"]
+                self.assertEqual(sent.remaining_tools,5)
+                self.assertTrue(sent.allow_actions)
+                self.assertEqual(self.app.sessions.list_tasks(self.app.session_id)[-1]["state"],"completed")
+                self.assertEqual(self.app.system2.approvals.pending(),[])
 
     def test_uncertain_needle_readonly_no_privilege(self):
         self.app.cactus.route.return_value={
