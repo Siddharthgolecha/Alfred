@@ -289,6 +289,12 @@ class Alfred:
                 result=self.reason(text,allow_actions=True)
             else:
                 result=self.system2.direct(calls)
+            if result.get("status") == "incomplete":
+                # Inference/preflight failure is not an ordinary no-op. No
+                # model-provided content is recorded in the durable ledger.
+                self.sessions.append(task.task_id, Completion("failed", "invalid_plan"))
+                self.feedback.tell(result["message"])
+                return
             if "approval" in result:
                 approval=result["approval"]
                 self.sessions.append(task.task_id,
@@ -632,7 +638,10 @@ def _main(argv=None):
                                 Escalation("local", "qwen", "explicit_reason"))
             try:
                 result = app.reason(args.reason)
-                if "approval" in result:
+                if result.get("status") == "incomplete":
+                    app.sessions.append(task.task_id,
+                                        Completion("failed", "invalid_plan"))
+                elif "approval" in result:
                     app.sessions.append(task.task_id,
                                         ApprovalReference(result["approval"]["approval_id"]))
                     app.sessions.append(task.task_id,
@@ -647,7 +656,8 @@ def _main(argv=None):
                 raise
         finally:
             app.close()
-        return 0
+        # The --reason one-shot CLI must signal an unsuccessful planner run.
+        return 1 if result.get("status") == "incomplete" else 0
     if not args.text:
         # Fail before loading native Whistle/Needle models or starting services.
         # Merely seeing a Pulse "Built-in Audio" entry is not enough.
