@@ -53,7 +53,9 @@ Voice and CLI requests from the same configured owner/mode can use one session.
    a programmatic call with `local_approval=True` does so. Disabled
    persistence stores these only in memory; optional persistence writes to
    the existing SQLite database. Credentials/policy/command-like *keys*,
-   oversized values and control characters are rejected. These facts are
+   oversized values, control characters, obvious shell-like instructions
+   and credential patterns are rejected. This is a limited filter, not a
+   proof against every prompt injection. These facts are
    **untrusted personal preferences, not policy, approvals or tool authority**.
 
 `ContextManager.compact` applies a deterministic hard JSON budget (256–3200
@@ -80,7 +82,10 @@ rebase when #15 is approved.
   by the new context tables. `ContextManager.start_task/finish_task`
   manages transient observations; `clear_session(session_id)` deletes
   session slots and transient task observations, preserving only explicitly
-  approved owner/mode facts. `Alfred.close` clears the current session.
+  approved owner/mode facts. The wake-authorized/local text command
+  **`clear this session`** performs the same cleanup without invoking
+  Needle or Qwen; it never deletes approved facts. `Alfred.close` clears
+  the current session.
 - Restart loses session slots and task results (fresh observations must be
   obtained again). Explicit facts persist across restart **only** when both
   context flags are enabled. There is no implicit memory-to-action replay.
@@ -134,3 +139,5 @@ On the real device, validate P50/P95 against the baseline with the relevant
 feature enabled and disabled before production rollout. Hardware acceptance
 [#29](https://github.com/Siddharthgolecha/Alfred/issues/29) is not
 satisfied by offline Python mocks.
+
+SQLite uses `PRAGMA secure_delete=ON` when persistent facts are enabled, but this does not erase backups, filesystem snapshots or all historical WAL data. Treat disk retention as sensitive even after logical deletion.
