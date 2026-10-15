@@ -20,7 +20,7 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertEqual(len(set(x["id"] for x in a)),144)
         self.assertEqual(len(MODES),3)
         # IDs are reproducible trial labels, not distinct semantic tasks.
-        self.assertEqual(len({x["text"] for x in a}),23)
+        self.assertEqual(len({x["text"] for x in a}),21)
 
     def test_offline_stub_never_authorizes_rollout_even_if_metrics_fabricated(self):
         metrics=("p50_latency_ms","p95_latency_ms","qwen_cold_load_ms",

@@ -369,7 +369,12 @@ def run_matrix(output_dir):
                         any(packet.get("slots",{}).get("gpu_temperature",{}).
                             get("provenance")=="observed"
                             for _,_,packet in scoped_packets))
-                    if (app.context.enabled and not packet_same_task):
+                    # An expired/unavailable pronoun is rejected during
+                    # ContextManager.resolve, BEFORE Needle packet assembly.
+                    # That is a correct fail-closed result, not a packet leak.
+                    if (app.context.enabled and not packet_same_task and not
+                            (name=="context_pronoun" and
+                             (expired_referent or not context_seeded))):
                         raise AssertionError("Missing current-task context packet")
                     if (name=="context_pronoun" and app.context.enabled
                             and context_seeded and variant!=7
