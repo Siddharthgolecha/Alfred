@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import shutil
@@ -77,6 +78,13 @@ def _unique_json_pairs(pairs):
 
 def _reject_nonfinite_constant(value):
     raise QwenPlanResponseError("Non-finite JSON number in Qwen plan")
+
+
+def _finite_json_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise QwenPlanResponseError("Non-finite JSON number in Qwen plan")
+    return parsed
 
 
 class Qwen:
@@ -184,7 +192,8 @@ class Qwen:
             raise QwenPlanResponseError("Empty plan content (possibly thinking-only)")
         try:
             plan = json.loads(content, object_pairs_hook=_unique_json_pairs,
-                              parse_constant=_reject_nonfinite_constant)
+                              parse_constant=_reject_nonfinite_constant,
+                              parse_float=_finite_json_float)
         except (TypeError, ValueError) as exc:
             raise QwenPlanResponseError("Malformed or ambiguous Qwen JSON plan") from exc
         if (not isinstance(plan, dict)
