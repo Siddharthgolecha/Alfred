@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 
 from alfred.app import Alfred
 from alfred.cognitive.escalation import build_handoff, EscalationEnvelope
+from alfred.cognitive.needle_loop import ContextUnavailable
 from alfred.config import load_config
 from alfred.models import Qwen
 from alfred.runtime import Store, Tools, TOOL_SCHEMAS
@@ -634,6 +635,139 @@ class AppTraceTests(unittest.TestCase):
                 new.resume_session("z"*32)
         finally:
             new.close()
+
+
+
+class EscalationContextIntegrationTests(unittest.TestCase):
+    """Phase 5 #15 handoff and merged #33 context must compose safely."""
+
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        cfg=load_config()
+        cfg["runtime"]["database"]=str(Path(self.tmp.name)/"alfred.db")
+        cfg["runtime"]["logs"]=self.tmp.name
+        cfg["runtime"]["context_enabled"]=True
+        cfg["runtime"]["escalation_enabled"]=True
+        cfg["runtime"]["needle_loop_enabled"]=False
+        self.app=Alfred(cfg,load_models=False)
+        self.app.cactus=Mock()
+        self.app.feedback.tell=Mock()
+        self.app.supervisor.ensure_running=Mock()
+        self.app.system2.qwen.complete=Mock()
+
+    def tearDown(self):
+        self.app.close()
+        self.tmp.cleanup()
+
+    def _plan_status(self):
+        self.app.system2.qwen.complete.return_value=plan([
+            {"tool":"get_system_status","args":{}}],"Status was measured")
+
+    def _assert_private_read_channel_is_hidden(self):
+        response=self.app.feedback.tell.call_args.args[0]
+        self.assertNotIn("_verified_reads",response)
+        self.assertNotIn("VerifiedRead(",response)
+        self.assertNotIn("VerifiedRead",response)
+        return json.loads(response)
+
+    def test_unsupported_handoff_status_read_creates_followup_slot(self):
+        self.app.cactus.route.side_effect=[
+            {"confidence":.99,"function_calls":[]},
+            {"confidence":.99,"function_calls":[
+                {"name":"get_system_status","arguments":{}}]}]
+        self._plan_status()
+        output={"uptime_seconds":123,"private_field":"RAW_FROM_REAL_READ"}
+        self.app.system2.tools.run_plan=Mock(return_value=[output])
+
+        self.app.handle_text("Check system status")
+        first=self.app.sessions.list_tasks(self.app.session_id)[0]
+        self.assertEqual(first["state"],"completed")
+        history=self.app.sessions.events(first["id"])
+        self.assertEqual([(e.tool,e.outcome) for e in history if e.kind=="observation"],
+                         [("get_system_status","returned")])
+        first_out=self._assert_private_read_channel_is_hidden()
+        self.assertEqual(first_out["results"],[output])
+        self.assertEqual(self.app.context.resolve(self.app.session_id,"check it again"),
+                         "Get system status again")
+        self.assertEqual(self.app.context.compact(self.app.session_id)["slots"]
+                         ["system_status"]["metrics"],{"uptime_seconds":123})
+        self.app.handle_text("check it again")
+        self.assertIn("Get system status again",self.app.cactus.route.call_args.args[0])
+        self.assertEqual(self.app.system2.qwen.complete.call_count,1)
+        self.assertEqual(self.app.system2.tools.run_plan.call_count,2)
+        self._assert_private_read_channel_is_hidden()
+        self.assertEqual(self.app.sessions.list_tasks(self.app.session_id)[-1]["state"],
+                         "completed")
+        self.assertEqual(self.app.system2.approvals.pending(),[])
+
+    def test_explicit_delegation_verified_read_updates_context(self):
+        self.app.cactus.route.return_value={
+            "confidence":.99,"function_calls":[
+                {"name":"delegate_to_reasoner",
+                 "arguments":{"request":"Check system status"}}]}
+        self._plan_status()
+        self.app.system2.tools.run_plan=Mock(return_value=[{"uptime_seconds":291}])
+        self.app.handle_text("Check system status")
+        self._assert_private_read_channel_is_hidden()
+        self.assertEqual(self.app.context.resolve(self.app.session_id,"check it again"),
+                         "Get system status again")
+        self.assertEqual(self.app.system2.approvals.pending(),[])
+        task=self.app.sessions.list_tasks(self.app.session_id)[0]
+        self.assertEqual(task["state"],"completed")
+        self.assertEqual([e.tool for e in self.app.sessions.events(task["id"])
+                          if e.kind=="observation" and e.outcome=="returned"],
+                         ["get_system_status"])
+
+    def test_skipped_handoff_does_not_create_context_slot(self):
+        self.app.cactus.route.return_value={"confidence":.99,"function_calls":[]}
+        self._plan_status()
+        self.app.system2.tools.run_plan=Mock(return_value=[{"skipped":True}])
+        self.app.handle_text("Check system status")
+        output=self._assert_private_read_channel_is_hidden()
+        self.assertEqual(output["tool_outcomes"],[
+            {"tool":"get_system_status","outcome":"blocked"}])
+        self.assertEqual(self.app.context.compact(self.app.session_id)["slots"],{})
+        with self.assertRaises(ContextUnavailable):
+            self.app.context.resolve(self.app.session_id,"check it again")
+        self.assertEqual(self.app.system2.approvals.pending(),[])
+
+    def test_denied_plan_or_unrequested_read_does_not_create_context_slot(self):
+        self.app.cactus.route.return_value={"confidence":.99,"function_calls":[]}
+        self.app.system2.qwen.complete.return_value=plan([
+            {"tool":"run_named_task","args":{"name":"unknown"}}])
+        self.app.system2.tools.run_plan=Mock()
+        self.app.handle_text("Check system status")
+        denied=self._assert_private_read_channel_is_hidden()
+        self.assertEqual(denied["status"],"incomplete")
+        self.assertEqual(denied["error"],"invalid_plan")
+        self.assertEqual(self.app.context.compact(self.app.session_id)["slots"],{})
+        self.app.system2.tools.run_plan.assert_not_called()
+        self.assertEqual(self.app.system2.approvals.pending(),[])
+        self.app.system2.qwen.complete.return_value=plan([
+            {"tool":"get_system_status","args":{}}])
+        self.app.system2.tools.run_plan.return_value=[{"uptime_seconds":88}]
+        self.app.handle_text("Explain quantum teleportation")
+        self.assertEqual(self.app.context.compact(self.app.session_id)["slots"],{})
+        self._assert_private_read_channel_is_hidden()
+
+    def test_approval_and_incomplete_handoff_never_leak_private_read_channel(self):
+        from alfred.system2 import VerifiedRead
+        self.app.cactus.route.return_value={"confidence":.99,"function_calls":[]}
+        original=self.app.system2.continue_handoff
+        for outcome in (
+            {"status":"incomplete","error":"invalid_plan","results":[],
+             "_verified_reads":(VerifiedRead("get_system_status",
+                                            {"uptime_seconds":67}),)},
+            {"message":"Awaiting approval","approval":{"approval_id":123,"actions":1},
+             "_verified_reads":(VerifiedRead("get_system_status",
+                                            {"uptime_seconds":68}),)},
+        ):
+            with self.subTest(outcome=outcome.get("status","approval")):
+                self.app.system2.continue_handoff=Mock(return_value=dict(outcome))
+                self.app.handle_text("Check system status")
+                self._assert_private_read_channel_is_hidden()
+                self.assertEqual(self.app.context.compact(self.app.session_id)["slots"],{})
+        self.app.system2.continue_handoff=original
 
 
 class LocalEndpointSmokeTests(unittest.TestCase):
