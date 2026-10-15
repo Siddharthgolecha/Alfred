@@ -209,8 +209,8 @@ class ContinuationTests(unittest.TestCase):
                 sdk=LocalHarness("http://127.0.0.1:8080","qwen",factory=Mock())
                 sdk.run=Mock(return_value={"message":raw})
                 try:
-                    with patch.object(self.tools,"run_plan") as run, \\
-                         patch.object(self.sys.approvals,"propose") as propose:
+                    with (patch.object(self.tools,"run_plan") as run,
+                         patch.object(self.sys.approvals,"propose") as propose):
                         with self.assertRaises(HarnessInvalidPlan):
                             self.sys.continue_handoff(actionable,harness=sdk)
                         self.qwen.complete.assert_not_called()
@@ -347,13 +347,13 @@ class AppTraceTests(unittest.TestCase):
     def test_live_process_cannot_be_resumed_then_dead_owner_recovers(self):
         dbpath=self.app.cfg["runtime"]["database"]
         script=(
-            "import sys,time\\n"
-            "from alfred.runtime import Store\\n"
-            "from alfred.cognitive.sessions import SessionLedger\\n"
-            "db=Store(sys.argv[1])\\n"
-            "task=SessionLedger(db).begin_task('text',5)\\n"
-            "print(task.session_id,task.task_id,flush=True)\\n"
-            "time.sleep(60)\\n"
+            "import sys,time\n"
+            "from alfred.runtime import Store\n"
+            "from alfred.cognitive.sessions import SessionLedger\n"
+            "db=Store(sys.argv[1])\n"
+            "task=SessionLedger(db).begin_task('text',5)\n"
+            "print(task.session_id,task.task_id,flush=True)\n"
+            "time.sleep(60)\n"
         )
         env=dict(os.environ)
         env["PYTHONPATH"]=str(Path(__file__).resolve().parents[1])
