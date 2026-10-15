@@ -40,7 +40,8 @@ tool bridge.
 
 All expensive subprocess startups use serial, *non-nested* resource admission:
 Cordis `--dump-config` executable audit claims `harness`, Qwen cold start
-claims `qwen`, and owned Cordis SDK startup claims `harness`. Inference
+claims `qwen`, and owned Cordis SDK startup (including `--doctor`) claims
+`harness`. Inference
 requests separately claim their own slot. Critical resource pressure and
 active microphone capture may defer/refuse a new expensive startup. A gate
 cannot preempt an already running model. `--approve`, reminders, timers and

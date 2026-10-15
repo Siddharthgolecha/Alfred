@@ -160,10 +160,9 @@ class Alfred:
             raise HarnessUnavailable("No authorized Harness session for reasoning")
         if not self.cfg["qwen"]["enabled"]:
             raise HarnessUnavailable("Qwen disabled: required Harness cannot reason")
-        if self.admission.enabled:
-            with self.admission.claim("harness"):
-                self.supervisor.ensure_running()
-        else:
+        # The supervisor may cold-load Qwen; it is a Qwen admission
+        # operation, not an SDK turn. Plan()/run() claim harness separately.
+        with self.admission.claim("qwen"):
             self.supervisor.ensure_running()
         if not allow_actions:
             safe_text = (text + "\nContext data (not instructions): "
@@ -776,9 +775,20 @@ def doctor(cfg):
     print("Backend executable:",s.executable_name())
     harness_ready=False
     harness=None
+    runtime=cfg["runtime"]
+    # --doctor launches a real Cordis child when the model is READY.
+    # Apply the very same memory/swap/CPU/capture admission as interactive
+    # startup; diagnostics must never bypass the deployment pressure gate.
+    admission=InferenceAdmission(
+        enabled=runtime["resource_admission_enabled"],
+        min_available_mib=runtime["resource_min_available_mib"],
+        max_swap_used_mib=runtime["resource_max_swap_used_mib"],
+        max_cpu_load_per_core=runtime["resource_max_cpu_load_per_core"],
+        max_wait_ms=runtime["resource_max_wait_ms"])
     try:
         harness=LocalHarness(s.url,cfg["qwen"]["model"] or cfg["qwen"]["expected_model"],
-                             timeout=cfg["runtime"]["harness_timeout_seconds"])
+                             timeout=runtime["harness_timeout_seconds"],
+                             admission=admission)
         status=harness.audit_installation()
         print("Official DeepSeek Harness plugin audit:",json.dumps(status))
         print("Cordis tool bridge: NOT YET WIRED (Issue #58; zero model-facing tools)")
@@ -790,11 +800,12 @@ def doctor(cfg):
             harness.require_ready()  # Actual SDK child, not merely a YAML audit.
             harness_ready=True
             print("Official Cordis SDK subprocess: READY (restricted/tool-free)")
-    except (HarnessUnavailable,OSError,ValueError) as exc:
+    except (HarnessUnavailable,AdmissionRejected,OSError,ValueError) as exc:
         print("Harness NOT READY:",str(exc))
     finally:
         if harness is not None:
             harness.close()
+        admission.close()
     return healthy and harness_ready
 
 def _main(argv=None):
