@@ -34,6 +34,10 @@ Voice and CLI requests from the same configured owner/mode can use one session.
    results for that task, held only in memory, discarded at task completion.
    The task's initial owner/mode/session scope is immutable for cleanup;
    switching scope during a task cannot prolong its task observations.
+   Read-side packets, approved facts and pronoun resolution are also bound
+   to that immutable task scope, under one manager lock. Switching configured
+   owner or mode mid-task cannot splice another profile's facts and slots
+   into the in-flight Qwen or Needle context.
    `_bounded_metrics` keeps finite allowlisted numeric/boolean telemetry.
    For `list_services`, only a count can be represented. No output strings,
    shell stdout, transcript, arbitrary JSON, or model-generated action is
