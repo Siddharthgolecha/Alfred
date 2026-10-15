@@ -26,7 +26,7 @@ from .wakeword import WakeWordGate, AcousticWakeDetector
 from .cognitive import (SessionLedger, Decision, Observation, Escalation,
                         ApprovalReference, Completion, Diagnostic)
 from .cognitive.harness_sdk import LocalHarness, HarnessUnavailable
-from .cognitive.escalation import build_handoff
+from .cognitive.escalation import build_handoff, MAX_HANDOFF_TOOLS
 from .cognitive.needle_loop import (NeedleAgentLoop, SessionSlots,
                                    ContextUnavailable, MULTISTEP)
 
@@ -145,7 +145,7 @@ class Alfred:
         envelope = build_handoff(
             task.session_id, task.task_id, original, reason,
             calls=calls, results=results, allow_actions=allow_actions,
-            max_tools=self.cfg["runtime"]["max_plan_steps"],
+            max_tools=min(self.cfg["runtime"]["max_plan_steps"], MAX_HANDOFF_TOOLS),
             needle_budget=self.cfg["runtime"]["needle_max_decisions"],
             used_decisions=used_decisions)
         self.sessions.append(task.task_id, Escalation("needle3", "qwen", reason))
