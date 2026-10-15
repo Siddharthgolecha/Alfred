@@ -668,7 +668,9 @@ class EscalationContextIntegrationTests(unittest.TestCase):
         self.assertNotIn("_verified_reads",response)
         self.assertNotIn("VerifiedRead(",response)
         self.assertNotIn("VerifiedRead",response)
-        return json.loads(response)
+        # Pending-approval feedback is an intentional human-readable CLI
+        # instruction, whereas ordinary and failed results are JSON.
+        return json.loads(response) if response.lstrip().startswith("{") else response
 
     def test_unsupported_handoff_status_read_creates_followup_slot(self):
         self.app.cactus.route.side_effect=[
