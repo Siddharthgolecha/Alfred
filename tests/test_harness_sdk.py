@@ -151,7 +151,6 @@ class AlfredSdkIntegrationTests(unittest.TestCase):
         cfg = load_config()
         cfg["runtime"]["database"] = str(Path(home)/"alfred.db")
         cfg["runtime"]["logs"] = home
-        cfg["runtime"]["harness_enabled"] = True
         app = Alfred(cfg, load_models=False)
         app.feedback.tell = Mock()
         app.cactus = Mock()
@@ -290,7 +289,7 @@ class AlfredSdkIntegrationTests(unittest.TestCase):
             finally:
                 app.close()
 
-    def test_generation_crash_may_fallback_before_any_execution(self):
+    def test_generation_crash_fails_closed_before_any_execution(self):
         with tempfile.TemporaryDirectory() as home:
             app = self.make_app(home)
             fake = Mock()
@@ -300,10 +299,10 @@ class AlfredSdkIntegrationTests(unittest.TestCase):
             app.system2.execute_or_stage = Mock()
             app.system2.reason = Mock(return_value={"message":"Fallback","results":[]})
             try:
-                out = app.reason("Find an answer", allow_actions=True)
-                self.assertEqual(out["message"], "Fallback")
-                app.system2.reason.assert_called_once_with(
-                    "Find an answer", allow_actions=True)
+                app._start_task("reason",len("Find an answer"))
+                with self.assertRaises(HarnessUnavailable):
+                    app.reason("Find an answer",allow_actions=True)
+                app.system2.reason.assert_not_called()
                 app.system2.execute_or_stage.assert_not_called()
             finally:
                 app.close()
@@ -339,20 +338,19 @@ class AlfredSdkIntegrationTests(unittest.TestCase):
             try:
                 app.handle_text("simple explanation")
                 fake.run.assert_called_once()
-                app.system2.reason.assert_called_once_with(
-                    "simple explanation", allow_actions=False)
+                app.system2.reason.assert_not_called()
             finally:
                 app.close()
 
-    def test_disabled_flag_preserves_old_path(self):
+    def test_required_sdk_default(self):
         cfg = load_config()
-        self.assertFalse(cfg["runtime"]["harness_enabled"])
+        self.assertNotIn("harness_enabled",cfg["runtime"])
         with tempfile.TemporaryDirectory() as home:
             cfg["runtime"]["database"] = str(Path(home)/"alfred.db")
             cfg["runtime"]["logs"] = home
-            app = Alfred(cfg, load_models=False)
+            app = Alfred(cfg,load_models=False)
             try:
-                self.assertIsNone(app.harness)
+                self.assertIsInstance(app.harness,LocalHarness)
             finally:
                 app.close()
 

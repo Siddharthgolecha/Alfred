@@ -1,7 +1,7 @@
-"""Optional real DeepSeek Harness SDK adapter; Alfred retains all tool authority.
+"""Required real DeepSeek Harness SDK adapter; Alfred retains all tool authority.
 
 The SDK's own JSON-RPC subprocess is used, not a home-grown fake wire parser.
-Only a verified, tool-free sdk-minimal Cordis overlay may be started.
+Only the verified, currently tool-free sdk-minimal Cordis overlay may start.
 No transcript is saved by Alfred; temporary SDK session files are destroyed on close.
 """
 from __future__ import annotations
@@ -228,6 +228,45 @@ class LocalHarness:
         except (ImportError, OSError, subprocess.TimeoutExpired, ValueError) as exc:
             raise HarnessUnavailable("Cannot verify trusted Cordis plugin graph") from exc
 
+    def audit_installation(self):
+        """Validate exact pinned distributions and *effective* bundled plugins.
+
+        This verifies the installed SDK binary, not Needle/Cordis integration.
+        Wheel byte SHA-256 must be checked before installation from wheelhouse.
+        """
+        if self.factory is not None:
+            raise HarnessUnavailable("Mock SDK is not a production-ready runtime")
+        if check_safe_patch(self.patch) != self.patch_sha256:
+            raise HarnessUnavailable("Required Cordis security overlay changed")
+        try:
+            sdk = importlib.metadata.version("deepseek-harness-sdk")
+            runtime = importlib.metadata.version("deepseek-harness-runtime-bin")
+        except importlib.metadata.PackageNotFoundError as exc:
+            raise HarnessUnavailable(
+                "Pinned DeepSeek Harness missing: install with pip install -e . "
+                "or verified offline wheelhouse") from exc
+        if (sdk,runtime)!=(SDK_VERSION,SDK_VERSION):
+            raise HarnessUnavailable(
+                "DeepSeek Harness SDK/runtime mismatch: reinstall "
+                f"both pinned distributions at {SDK_VERSION}")
+        with tempfile.TemporaryDirectory(prefix="alfred-cordis-audit-") as tmp:
+            root=Path(tmp)
+            workspace=root/"workspace"
+            workspace.mkdir(mode=0o700)
+            self._audit_installed_runtime(root,workspace)
+        return {"sdk_version":sdk,"runtime_version":runtime,
+                "profile":"sdk-minimal","patch_sha256":self.patch_sha256,
+                "plugin_audit":"passed","cordis_tool_registry":"empty",
+                "published_wheel_hash":"verify-before-install"}
+
+    def require_ready(self):
+        """Start official SDK, never a structural mock, and audit Cordis."""
+        if self.factory is not None:
+            raise HarnessUnavailable("Mock SDK cannot satisfy production startup")
+        with self._lock:
+            self._open()
+        return True
+
     def _open(self):
         if self._closed:
             raise HarnessUnavailable("Harness closed")
@@ -324,7 +363,7 @@ class LocalHarness:
                 return {"message": response, "results": []}
             except BaseException as exc:
                 self.close()
-                raise HarnessUnavailable("Local harness unavailable; using legacy path") from exc
+                raise HarnessUnavailable("Required local DeepSeek Harness turn failed") from exc
 
     def plan(self, utterance, session_id, *, tools, allowed_services=(),
              named_tasks=(), max_steps=5, handoff=None, context=None):

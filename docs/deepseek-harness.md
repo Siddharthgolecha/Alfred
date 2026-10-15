@@ -1,3 +1,27 @@
+# Phase 5.1 / Issue 58: Required DeepSeek Harness foundation
+
+**Current state:** The official pinned SDK and Cordis runtime are mandatory
+for Qwen cognition; missing/unsafe SDK is a startup failure, with no independent
+Qwen planner fallback. Fresh config enables Needle feedback, context, bounded
+escalation and resource admission. Effective Cordis plugin graph remains audited
+at startup.
+
+**Outstanding:** The restricted Cordis profile is still tool-free. Native
+Needle's feedback loop remains Python-managed, not Cordis-owned. This foundation
+PR does **not** satisfy the shared Cordis task/tool/observation acceptance
+criteria, or native Jetson #18/#29 gates. Do not close Issue #58 on this PR.
+
+Normal install: `python -m pip install -e .`.
+For offline Jetson x86_64/aarch64, obtain the exact pinned wheel files from
+`coordination/deepseek-harness-lock.json`, then run
+`python scripts/install_harness.py --wheelhouse /path --verify` and
+`python scripts/install_harness.py --wheelhouse /path --install`.
+Wheel hashes are checked **before** install; the installed package version
+and actual Cordis graph are checked at runtime. Dependencies beyond those two
+wheels must be pre-provisioned offline.
+
+## Original Phase 5 opt-in SDK implementation (historical)
+
 # Issue #13 — optional offline DeepSeek Harness SDK bridge
 
 **Status:** Implemented as a read-only *Cordis runtime* that can propose actions, never execute them. Disabled by default. **No shell, plugin, tool, browser, remote endpoint, or automatic approval is ever authorized by the Harness runtime.** Alfred's existing System2/Tools preflight and one-time approvals exclusively execute/stage validated proposals. Native Needle stays in Python, sharing the canonical session ID with SDK Qwen. The existing Qwen-compatible inference service is shared, not restarted by the SDK.

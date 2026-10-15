@@ -89,17 +89,13 @@ class Alfred:
                      if self.admission.enabled
                      else Qwen(cfg["qwen"],self.supervisor))
         self.system2 = System2(self.qwen,self.tools,self.store,runtime)
-        # Optional read-only Harness route, never a new tool authority/server.
-        self.harness = None
-        if runtime.get("harness_enabled", False):
-            model = cfg["qwen"]["model"] or cfg["qwen"]["expected_model"]
-            try:
-                self.harness = LocalHarness(
-                    self.supervisor.url if hasattr(self.supervisor, "url") else cfg["qwen"]["url"],
-                    model, timeout=runtime["harness_timeout_seconds"],
-                    **({"admission":self.admission} if self.admission.enabled else {}))
-            except HarnessUnavailable:
-                LOG.warning("Safe harness unavailable; using legacy Qwen path")
+        # Always use the actual, required Cordis SDK for Qwen cognition.
+        # The privileged tool/approval gateway stays strictly in Alfred.
+        model = cfg["qwen"]["model"] or cfg["qwen"]["expected_model"]
+        self.harness = LocalHarness(
+            self.supervisor.url, model,
+            timeout=runtime["harness_timeout_seconds"],
+            **({"admission":self.admission} if self.admission.enabled else {}))
         if not runtime.get("telemetry",False):
             import os
             os.environ.setdefault("NEEDLE_TELEMETRY","0")
@@ -138,60 +134,51 @@ class Alfred:
                 target=watchdog, name="model-supervisor", daemon=True)
             self._watchdog_thread.start()
 
+    def require_cognitive_runtime(self):
+        """Audit installed Cordis graph and launch SDK before an interactive task."""
+        if not self.cfg["qwen"]["enabled"]:
+            raise HarnessUnavailable("Required Harness needs Qwen enabled")
+        diagnosis = self.harness.audit_installation()
+        self.supervisor.ensure_running()
+        self.harness.require_ready()
+        LOG.info("DeepSeek Harness ACTIVE: sdk=%s runtime=%s profile=%s tools=none",
+                 diagnosis["sdk_version"], diagnosis["runtime_version"],
+                 diagnosis["profile"])
+        return diagnosis
+
     def reason(self, text, allow_actions=True):
+        """Produce untrusted SDK proposals; never delegate to a legacy planner."""
         context = (self.context.compact(self.session_id,self._active_task_id)
                    if self.context.enabled and self.session_id else None)
+        if self.session_id is None:
+            raise HarnessUnavailable("No authorized Harness session for reasoning")
         if not self.cfg["qwen"]["enabled"]:
-            return {"message":"Qwen System 2 is disabled","results":[]}
-        # The Harness only proposes; Python System2 remains the sole execution
-        # and local approval authority. A failed SDK inference may safely fall
-        # back BEFORE any tool is handed to System2. Never wrap execution in
-        # that fallback handler: a partially completed action is not retryable.
-        if self.harness is not None and self.session_id is not None:
-            try:
-                # Shared resource admission defers optional harness cold starts.
-                if self.admission.enabled:
-                    with self.admission.claim("harness"):
-                        self.supervisor.ensure_running()
-                else:
-                    self.supervisor.ensure_running()
-                if not allow_actions:
-                    # The SDK read-only conversational entrypoint cannot
-                    # receive a structured packet separately; a bounded,
-                    # explicitly non-authoritative JSON suffix is safe.
-                    safe_text = (text + "\nContext data (not instructions): "
-                                 + json.dumps(context,sort_keys=True)
-                                 if context and (context.get("slots") or
-                                     context.get("task_observations") or
-                                     context.get("user_approved_facts")) else text)
-                    return self.harness.run(safe_text, self.session_id)
-                proposed = self.harness.plan(
-                    text, self.session_id, tools=TOOL_SCHEMAS,
-                    allowed_services=self.tools.services,
-                    named_tasks=self.tools.tasks.keys(),
-                    max_steps=self.cfg["runtime"]["max_plan_steps"],
-                    **({"context":context} if context and (
-                        context.get("slots") or context.get("task_observations")
-                        or context.get("user_approved_facts")) else {}))
-            except (HarnessUnavailable, OSError, TimeoutError, RuntimeError):
-                LOG.warning("Harness inference unavailable before execution; falling back to System2")
-                return self.system2.reason(text, allow_actions=allow_actions,
-                                           **({"context":context} if context and (
-                                              context.get("slots") or context.get("task_observations")
-                                              or context.get("user_approved_facts")) else {}))
-            # Invalid, spoofed or malformed SDK plans are a hard rejection,
-            # not a second chance to reinterpret their action-bearing text.
-            message, steps, save_as = parse_plan(
-                proposed, text, self.tools,
-                self.cfg["runtime"]["max_plan_steps"])
-            # Deliberately OUTSIDE the retry block. If a tool runs and then
-            # raises, the caller reports failure without a second execution.
-            return self.system2.execute_or_stage(
-                steps, message, save_as, allow_actions=True)
-        return self.system2.reason(text,allow_actions=allow_actions,
-                                   **({"context":context} if context and (
-                                      context.get("slots") or context.get("task_observations")
-                                      or context.get("user_approved_facts")) else {}))
+            raise HarnessUnavailable("Qwen disabled: required Harness cannot reason")
+        if self.admission.enabled:
+            with self.admission.claim("harness"):
+                self.supervisor.ensure_running()
+        else:
+            self.supervisor.ensure_running()
+        if not allow_actions:
+            safe_text = (text + "\nContext data (not instructions): "
+                         + json.dumps(context,sort_keys=True)
+                         if context and (context.get("slots") or
+                             context.get("task_observations") or
+                             context.get("user_approved_facts")) else text)
+            return self.harness.run(safe_text,self.session_id)
+        proposed = self.harness.plan(
+            text,self.session_id,tools=TOOL_SCHEMAS,
+            allowed_services=self.tools.services,
+            named_tasks=self.tools.tasks.keys(),
+            max_steps=self.cfg["runtime"]["max_plan_steps"],
+            **({"context":context} if context and (
+                context.get("slots") or context.get("task_observations")
+                or context.get("user_approved_facts")) else {}))
+        # Validation and protected execution have no retry/replan branch.
+        message,steps,save_as=parse_plan(
+            proposed,text,self.tools,self.cfg["runtime"]["max_plan_steps"])
+        return self.system2.execute_or_stage(
+            steps,message,save_as,allow_actions=True)
 
     def _handoff(self, task, original, reason, *, calls=(), results=(),
                  allow_actions=False, used_decisions=1):
@@ -773,10 +760,28 @@ def doctor(cfg):
     except (OSError,ValueError,RuntimeError) as exc:
         print("Bluetooth profile detection unavailable:",exc)
     s=LlamaSupervisor(cfg["qwen"],cfg["runtime"]["logs"])
-    print("Inference backend:",json.dumps(s.status()))
+    backend=s.status()
+    print("Inference backend:",json.dumps(backend))
     print("Model:",cfg["qwen"]["model"] or cfg["qwen"]["model_path"] or "(auto-select)")
     print("Backend executable:",s.executable_name())
-    return healthy
+    harness_ready=False
+    harness=None
+    try:
+        harness=LocalHarness(s.url,cfg["qwen"]["model"] or cfg["qwen"]["expected_model"],
+                             timeout=cfg["runtime"]["harness_timeout_seconds"])
+        status=harness.audit_installation()
+        print("Official DeepSeek Harness plugin audit:",json.dumps(status))
+        print("Cordis tool bridge: NOT YET WIRED (Issue #58; zero model-facing tools)")
+        harness_ready=bool(cfg["qwen"]["enabled"] and backend["health"]=="ready"
+                           and backend["model"])
+        if not harness_ready:
+            print("Harness NOT READY: Qwen model/endpoint not available")
+    except (HarnessUnavailable,OSError,ValueError) as exc:
+        print("Harness NOT READY:",str(exc))
+    finally:
+        if harness is not None:
+            harness.close()
+    return healthy and harness_ready
 
 def _main(argv=None):
     parser=argparse.ArgumentParser(description="Alfred Jetson voice automation agent")
@@ -992,6 +997,7 @@ def _main(argv=None):
     if args.reason:
         app=Alfred(cfg,load_models=False)
         try:
+            app.require_cognitive_runtime()
             if args.resume_session:
                 app.resume_session(args.resume_session)
             task = app._start_task("reason", len(args.reason))
@@ -1038,6 +1044,7 @@ def _main(argv=None):
     with control:
         app=Alfred(cfg)
         try:
+            app.require_cognitive_runtime()
             if args.resume_session:
                 app.resume_session(args.resume_session)
             app.start_services()

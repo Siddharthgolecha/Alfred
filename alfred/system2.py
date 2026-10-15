@@ -244,28 +244,15 @@ class System2:
                 and (handoff.allow_actions or s["name"] in READS))
         ]
         try:
-            if harness is not None:
-                if supervisor is not None:
-                    supervisor.ensure_running()
-                try:
-                    plan = harness.plan(
-                        handoff.request, handoff.session_id, tools=catalog,
-                        allowed_services=self.tools.services,
-                        named_tasks=self.tools.tasks.keys(),
-                        max_steps=self.cfg.get("max_plan_steps",5),
-                        handoff=handoff)
-                except (HarnessUnavailable, OSError, TimeoutError, RuntimeError):
-                    # Fresh Qwen inference is safe here: zero tools executed by
-                    # either planner. Do not catch anything from System2 below.
-                    plan = self.qwen.complete(
-                        handoff.request, catalog,
-                        allowed_services=self.tools.services,
-                        named_tasks=self.tools.tasks.keys(), handoff=handoff)
-            else:
-                plan = self.qwen.complete(
-                    handoff.request, catalog,
-                    allowed_services=self.tools.services,
-                    named_tasks=self.tools.tasks.keys(), handoff=handoff)
+            if harness is None:
+                raise RuntimeError("Required DeepSeek Harness is missing")
+            if supervisor is not None:
+                supervisor.ensure_running()
+            plan = harness.plan(
+                handoff.request,handoff.session_id,tools=catalog,
+                allowed_services=self.tools.services,
+                named_tasks=self.tools.tasks.keys(),
+                max_steps=self.cfg.get("max_plan_steps",5),handoff=handoff)
         except HarnessInvalidPlan as exc:
             # A malformed SDK proposal is a hard stop, not a transport error.
             # Returning the already executed, sanitized Needle prefix keeps
