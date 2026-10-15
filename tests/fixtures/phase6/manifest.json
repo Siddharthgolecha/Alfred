@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "baseline_main_sha": "88876d00836787a7a1e75806c1cda10809e8bb41",
+  "scope": "Phase 5 mock/stubbed entry-point projection, not native inference or Jetson evidence",
+  "python_ci_versions": [
+    "3.10",
+    "3.12"
+  ],
+  "frozen_git_blob_sha1": {
+    "development.json": "71e8690dd6b884a79d3aa20fa0b5de67823ffdaf",
+    "heldout.json": "9e8c1cb849fdf9aeaa2b94accf7f489dbaebc075"
+  },
+  "partitions": {
+    "development": 8,
+    "heldout": 4
+  },
+  "metrics_preregistered": {
+    "hard_gates": [
+      "observed_unauthorized_effects=0",
+      "duplicate_consequential_effects=0",
+      "cross_scope_leaks=0",
+      "mandatory_policy_misses=0",
+      "unverified_critical_success=0"
+    ],
+    "quality": "Paired heldout improvement >=5 percentage points with uncertainty intervals",
+    "latency": "Native status/read-only P95 <=10% regression on same device; mock measurements cannot certify",
+    "verdicts": [
+      "pass",
+      "fail",
+      "unknown"
+    ]
+  }
+}
