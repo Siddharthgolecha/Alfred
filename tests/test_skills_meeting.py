@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import tempfile
 import unittest
@@ -15,7 +16,8 @@ from alfred.meeting_adapter import (
 )
 from alfred.skills import SkillRegistry
 from alfred.config import load_config
-from alfred.app import Alfred
+from contextlib import redirect_stdout
+from alfred.app import Alfred, _main
 
 SID="a"*32
 SID2="b"*32
@@ -141,6 +143,23 @@ class InventoryTests(unittest.TestCase):
         self.assertFalse(reg.get("gpu_status").available)
         self.assertFalse(reg.get("meeting_recording").available)
         self.assertFalse(reg.get("qwen_minutes").available)
+
+    def test_cli_skill_discovery_is_offline_and_has_no_model_process(self):
+        with tempfile.TemporaryDirectory() as td:
+            config=Path(td)/"config.json"
+            config.write_text(json.dumps({
+                "runtime":{"database":str(Path(td)/"db.sqlite"),"logs":td},
+                "qwen":{"enabled":False}
+            }))
+            buf=io.StringIO()
+            with redirect_stdout(buf):
+                rc=_main(["--config",str(config),"--skills"])
+            self.assertEqual(rc,0)
+            out=json.loads(buf.getvalue())
+            self.assertEqual(len(out),7)
+            meeting=[row for row in out if row["name"]=="meeting_recording"][0]
+            self.assertFalse(meeting["available"])
+            self.assertIn("not installed",meeting["reason"])
 
     def test_main_app_does_not_require_device_modules(self):
         with tempfile.TemporaryDirectory() as td:
