@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 import re
@@ -103,6 +104,9 @@ def sanitize_segments(raw):
             "timing_basis":"decoder_estimated",
         }
         result.append(row)
+    for row in result:
+        if any(x not in ids or x==row["id"] for x in row["overlap_with"]):
+            raise ValueError("Dangling or self-referential overlap link")
     if len(json.dumps(result,ensure_ascii=True))>MAX_EVIDENCE_BYTES:
         raise ValueError("Meeting evidence exceeds bounded local context")
     return tuple(result)
@@ -213,6 +217,7 @@ class OfflineMeetingAdapter:
         self._meetings={}       # meeting_id -> trusted session/owner/retention
         self._permits={}        # (task_id,meeting_id) -> exact immutable permit
         self._artifacts={}      # (meeting_id,artifact_id) -> retained media handle
+        self._validated_minutes={}  # (task_id,meeting_id) -> digest
 
     def available(self, skill):
         if skill not in self.OPERATIONS:
@@ -335,11 +340,25 @@ class OfflineMeetingAdapter:
             "task_id":permit.task_id,"meeting_id":permit.meeting_id,
             "untrusted_evidence":list(packet),
             "policy":"Only cite exact segment text; no inferred owners/dates/identities."})
-        return validate_minutes_proposal(draft,packet,meeting_title=title)
+        checked=validate_minutes_proposal(draft,packet,meeting_title=title)
+        digest=hashlib.sha256(json.dumps(
+            checked,sort_keys=True,separators=(",",":"),ensure_ascii=True
+        ).encode("utf-8")).hexdigest()
+        with self._lock:
+            self._validated_minutes[(permit.task_id,permit.meeting_id)]=digest
+        return checked
 
     def export_pdf(self, permit, minutes):
         self._verify(permit,skill="qwen_minutes")
         packet=self.evidence(permit)
+        if type(minutes) is not dict:
+            raise ValueError("Validated minutes object required")
+        digest=hashlib.sha256(json.dumps(
+            minutes,sort_keys=True,separators=(",",":"),ensure_ascii=True
+        ).encode("utf-8")).hexdigest()
+        with self._lock:
+            if self._validated_minutes.get((permit.task_id,permit.meeting_id))!=digest:
+                raise PermissionError("PDF contents not evidence-validated for this task")
         # Provider implementation MUST call existing GuardedSSD PDF writer and
         # return an opaque artifact ID, never an arbitrary destination path.
         handle=self._provider.save_pdf(permit.meeting_id,minutes,list(packet))
@@ -366,6 +385,7 @@ class OfflineMeetingAdapter:
             raise PermissionError("Permit required")
         with self._lock:
             self._permits.pop((permit.task_id,permit.meeting_id),None)
+            self._validated_minutes.pop((permit.task_id,permit.meeting_id),None)
 
     def clear_session(self, session_id, owner):
         valid_id(session_id)
@@ -377,6 +397,7 @@ class OfflineMeetingAdapter:
             for key,p in tuple(self._permits.items()):
                 if p.session_id==session_id and p.owner==owner:
                     self._permits.pop(key,None)
+                    self._validated_minutes.pop(key,None)
             for key in tuple(self._artifacts):
                 if (key[0] in self._meetings and
                     self._meetings[key[0]]["session_id"]==session_id
