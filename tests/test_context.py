@@ -396,6 +396,16 @@ class AppIntegrationTests(unittest.TestCase):
         self.app=Alfred(cfg,load_models=False)
         self.app.cactus=Mock()
         self.app.feedback.tell=Mock()
+        self.app.supervisor.ensure_running=Mock(return_value=True)
+        self.app.harness=Mock()
+        def sdk_plan(request,session_id,*,tools,allowed_services=(),
+                     named_tasks=(),handoff=None,**extras):
+            kwargs={"allowed_services":allowed_services,
+                    "named_tasks":named_tasks}
+            if handoff is not None:
+                kwargs["handoff"]=handoff
+            return self.app.system2.qwen.complete(request,tools,**kwargs)
+        self.app.harness.plan.side_effect=sdk_plan
 
     def tearDown(self):
         self.app.close()
@@ -522,10 +532,11 @@ class AppIntegrationTests(unittest.TestCase):
         self.app.cactus.route.return_value={"confidence":.99,"function_calls":[]}
         self.app.context.set_explicit_fact("answer_style","short",
                                             local_approval=True)
-        self.app.system2.reason=Mock(return_value={"message":"okay","results":[]})
+        self.app.system2.qwen.complete=Mock(return_value={
+            "message":"okay","steps":[],"save_as":None})
         self.app.handle_text("Explain temperature of the GPU")
-        kwargs=self.app.system2.reason.call_args.kwargs
-        self.assertFalse(kwargs["allow_actions"])
+        kwargs=self.app.harness.plan.call_args.kwargs
+        self.assertFalse(kwargs["handoff"].allow_actions)
         self.assertIn("user_approved_facts",kwargs["context"])
         self.assertEqual(kwargs["context"]["user_approved_facts"]
                          ["answer_style"]["value"],"short")

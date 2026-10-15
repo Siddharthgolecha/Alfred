@@ -255,3 +255,18 @@ Official references: [Needle/Whistle APIs](https://github.com/cactus-compute/nee
 ## Development state
 
 This is a first hardware-integration-ready implementation with offline unit fixtures, **not a claim of on-device testing**. See the feature PR for follow-up fixes/Jetson acceptance.
+
+### DeepSeek Harness required-runtime foundation (#58)
+
+Fresh Alfred installs require the pinned official DeepSeek Harness SDK and
+runtime for Qwen planning. Install with `pip install -e .`; for x86_64/Jetson
+aarch64 use `scripts/install_harness.py` with checksum-verified offline
+wheelhouse files. The interactive CLI rejects SDK/plugin audit failure, Qwen
+unavailability and SDK startup failure rather than falling back to an
+independent model planner. `--doctor` reports these conditions separately
+from microphone health.
+
+**Release blocker:** Cordis currently has zero model-facing tools and native
+Needle still runs its bounded feedback in Python. This PR is the first
+foundation of #58, not an assertion of shared Cordis lifecycle or Jetson
+hardware validation; follow-up PRs are required.

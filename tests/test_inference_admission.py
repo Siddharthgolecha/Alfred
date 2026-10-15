@@ -12,7 +12,7 @@ from alfred.inference_admission import InferenceAdmission, AdmissionRejected, li
 from alfred.app import Alfred
 from alfred.config import load_config
 from alfred.models import Qwen
-from alfred.cognitive.harness_sdk import LocalHarness
+from alfred.cognitive.harness_sdk import LocalHarness, HarnessUnavailable
 
 SAFE={"available_mib":1600.0,"swap_used_mib":0.,"cpu_load_per_core":.2}
 LOW={"available_mib":150.0,"swap_used_mib":0.,"cpu_load_per_core":.2}
@@ -241,6 +241,111 @@ class IntegrationAdmissionTests(unittest.TestCase):
         self.app.close()
         self.tmp.cleanup()
 
+
+    def test_mandatory_cold_start_low_pressure_never_spawns(self):
+        """No Qwen or Cordis launch, including audit, under critical RAM."""
+        app=self.app
+        app.admission.sampler=lambda:dict(LOW)
+        with patch.object(app.harness,"_audit_installed_runtime") as audit, \
+             patch.object(app.harness,"_open") as sdk_open, \
+             patch.object(app.supervisor,"ensure_running") as start_qwen, \
+             patch("alfred.cognitive.harness_sdk.importlib.metadata.version",
+                   return_value="0.1.5rc1"):
+            with self.assertRaises(AdmissionRejected):
+                app.require_cognitive_runtime()
+        audit.assert_not_called()
+        start_qwen.assert_not_called()
+        sdk_open.assert_not_called()
+        self.assertGreater(app.admission.snapshot()["pressure"],0)
+
+    def test_safe_startup_admits_each_phase_once_without_nesting(self):
+        app=self.app
+        app.admission.sampler=lambda:dict(SAFE)
+        launched=[]
+        def audit(*_):
+            launched.append("audit")
+        def start():
+            self.assertTrue(app.admission.snapshot()["busy"])
+            launched.append("qwen")
+            return True
+        def sdk_open():
+            self.assertTrue(app.admission.snapshot()["busy"])
+            launched.append("sdk")
+            return object()
+        with patch.object(app.harness,"_audit_installed_runtime",side_effect=audit), \
+             patch.object(app.harness,"_open",side_effect=sdk_open), \
+             patch.object(app.supervisor,"ensure_running",side_effect=start), \
+             patch.object(app.supervisor,"model_id",return_value="Qwen3.5-4B"), \
+             patch("alfred.cognitive.harness_sdk.importlib.metadata.version",
+                   return_value="0.1.5rc1"):
+            diagnosis=app.require_cognitive_runtime()
+        self.assertEqual(diagnosis["plugin_audit"],"passed")
+        self.assertEqual(launched,["audit","qwen","sdk"])
+        self.assertEqual(app.admission.snapshot()["granted"],3)
+        self.assertFalse(app.admission.snapshot()["busy"])
+
+    def test_sdk_warmup_rejects_low_pressure_and_live_capture(self):
+        app=self.app
+        with patch.object(app.harness,"_open") as sdk_open:
+            app.admission.sampler=lambda:dict(LOW)
+            with self.assertRaises(AdmissionRejected):
+                app.harness.require_ready()
+            app.admission.sampler=lambda:dict(SAFE)
+            app.admission.max_wait_ms=5
+            app.admission.set_capture_active(True)
+            try:
+                with self.assertRaises(AdmissionRejected):
+                    app.harness.require_ready()
+            finally:
+                app.admission.set_capture_active(False)
+            sdk_open.assert_not_called()
+
+    def test_handoff_low_pressure_does_not_start_qwen_or_sdk(self):
+        from alfred.cognitive.escalation import build_handoff
+        app=self.app
+        app.admission.sampler=lambda:dict(LOW)
+        h=build_handoff("a"*32,"b"*32,"Check GPU","unsupported",
+                        allow_actions=False,max_tools=3)
+        with patch.object(app.supervisor,"ensure_running") as start_qwen, \
+             patch.object(app.harness,"plan") as plan:
+            result=app.system2.continue_handoff(
+                h,supervisor=app.supervisor,harness=app.harness,
+                admission=app.admission)
+        self.assertEqual(result["status"],"incomplete")
+        self.assertEqual(result["results"],[])
+        start_qwen.assert_not_called()
+        plan.assert_not_called()
+
+    def test_handoff_cannot_bypass_admission_by_omitting_gate(self):
+        from alfred.cognitive.escalation import build_handoff
+        app=self.app
+        h=build_handoff("a"*32,"b"*32,"Check GPU","unsupported",
+                        allow_actions=False,max_tools=3)
+        with patch.object(app.supervisor,"ensure_running") as start, \
+             patch.object(app.harness,"plan") as propose:
+            result=app.system2.continue_handoff(
+                h,supervisor=app.supervisor,harness=app.harness)
+        self.assertEqual(result["status"],"incomplete")
+        start.assert_not_called()
+        propose.assert_not_called()
+
+    def test_handoff_safe_pressure_one_start_one_plan(self):
+        from alfred.cognitive.escalation import build_handoff
+        app=self.app
+        app.admission.sampler=lambda:dict(SAFE)
+        h=build_handoff("a"*32,"b"*32,"Check GPU","unsupported",
+                        allow_actions=False,max_tools=3)
+        with patch.object(app.supervisor,"ensure_running",return_value=True) as start, \
+             patch.object(app.harness,"plan",return_value={
+                 "message":"No steps","steps":[],"save_as":None}) as plan:
+            result=app.system2.continue_handoff(
+                h,supervisor=app.supervisor,harness=app.harness,
+                admission=app.admission)
+        self.assertEqual(result["results"],[])
+        self.assertEqual(result["handoff"]["task_id"],"b"*32)
+        start.assert_called_once()
+        plan.assert_called_once()
+
     def test_model_resource_pressure_rejects_before_tool_execution(self):
         # This proves a real model with the injected shared gate cannot run
         # while under pressure; app mocks alone cannot attest native safety.
@@ -322,6 +427,10 @@ class IntegrationAdmissionTests(unittest.TestCase):
             app.cactus.route=Mock(side_effect=needle)
             app.cactus.route_feedback=Mock(side_effect=feedback)
             app.qwen.complete=Mock(side_effect=qwen_plan)
+            app.supervisor.ensure_running=Mock(return_value=True)
+            app.harness=Mock()
+            app.harness.plan.side_effect=lambda request,sid,*,tools,**kw: qwen_plan(
+                request,tools,**kw)
             try:
                 with patch("alfred.runtime.gpu_status",return_value={
                     "available":True,"gpu_temp_c":64,

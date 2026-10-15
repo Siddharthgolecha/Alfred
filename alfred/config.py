@@ -32,9 +32,9 @@ DEFAULT = {
         "approval_ttl_seconds": 180,
         "tts": False, "voice_alerts": False, "telemetry": False,
         "cognitive_diagnostics": False,
-        "harness_enabled": False, "harness_timeout_seconds": 45,
-        "needle_loop_enabled": False, "escalation_enabled": False, "context_enabled": False,
-        "resource_admission_enabled": False,
+        "harness_timeout_seconds": 45,
+        "needle_loop_enabled": True, "escalation_enabled": True, "context_enabled": True,
+        "resource_admission_enabled": True,
         "resource_min_available_mib": 512,
         "resource_max_swap_used_mib": 1024,
         "resource_max_cpu_load_per_core": 3.0,
@@ -154,8 +154,6 @@ def load_config(path=None):
         raise ValueError("needle_max_tools must be 1..3")
     if type(ncfg["needle_context_ttl_seconds"]) is not int or not 1 <= ncfg["needle_context_ttl_seconds"] <= 300:
         raise ValueError("needle_context_ttl_seconds must be 1..300")
-    if type(cfg["runtime"]["harness_enabled"]) is not bool:
-        raise ValueError("harness_enabled must be a boolean")
     if type(cfg["runtime"]["harness_timeout_seconds"]) is not int or not 5 <= cfg["runtime"]["harness_timeout_seconds"] <= 120:
         raise ValueError("harness_timeout_seconds must be 5..120")
     if type(cfg["runtime"]["cognitive_diagnostics"]) is not bool:

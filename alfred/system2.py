@@ -206,10 +206,11 @@ class System2:
                     "specific action and time or interval."
                 ), "results": []}
 
-    def continue_handoff(self, handoff, *, harness=None, supervisor=None):
+    def continue_handoff(self, handoff, *, harness=None, supervisor=None,
+                         session_context=None, admission=None):
         """Continue one trusted, already-authorized task, never replay its tools.
 
-        Model inference can fail or fall back before execution. Validation and
+        Model inference can fail before execution; it may not fall back. Validation and
         execution are *outside* the exception handler, preventing a partially
         executed plan from being retried. Observations sent to Qwen contain
         only bounded telemetry; no raw stdout, names, or tool result strings.
@@ -244,28 +245,22 @@ class System2:
                 and (handoff.allow_actions or s["name"] in READS))
         ]
         try:
-            if harness is not None:
-                if supervisor is not None:
+            if harness is None:
+                raise RuntimeError("Required DeepSeek Harness is missing")
+            if supervisor is not None:
+                # A live Qwen supervisor cannot bypass the required gate even
+                # if a caller forgets to provide it. No work starts in that
+                # case; callers must explicitly supply their shared admission.
+                if admission is None:
+                    raise RuntimeError("Missing inference admission for Qwen cold start")
+                with admission.claim("qwen"):
                     supervisor.ensure_running()
-                try:
-                    plan = harness.plan(
-                        handoff.request, handoff.session_id, tools=catalog,
-                        allowed_services=self.tools.services,
-                        named_tasks=self.tools.tasks.keys(),
-                        max_steps=self.cfg.get("max_plan_steps",5),
-                        handoff=handoff)
-                except (HarnessUnavailable, OSError, TimeoutError, RuntimeError):
-                    # Fresh Qwen inference is safe here: zero tools executed by
-                    # either planner. Do not catch anything from System2 below.
-                    plan = self.qwen.complete(
-                        handoff.request, catalog,
-                        allowed_services=self.tools.services,
-                        named_tasks=self.tools.tasks.keys(), handoff=handoff)
-            else:
-                plan = self.qwen.complete(
-                    handoff.request, catalog,
-                    allowed_services=self.tools.services,
-                    named_tasks=self.tools.tasks.keys(), handoff=handoff)
+            plan = harness.plan(
+                handoff.request,handoff.session_id,tools=catalog,
+                allowed_services=self.tools.services,
+                named_tasks=self.tools.tasks.keys(),
+                max_steps=self.cfg.get("max_plan_steps",5),handoff=handoff,
+                **({"context":session_context} if session_context else {}))
         except HarnessInvalidPlan as exc:
             # A malformed SDK proposal is a hard stop, not a transport error.
             # Returning the already executed, sanitized Needle prefix keeps

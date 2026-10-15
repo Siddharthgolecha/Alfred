@@ -101,7 +101,15 @@ class SafeSdkTests(unittest.TestCase):
             self.assertEqual(sdk.kwargs["base_url"], "http://127.0.0.1:8080/v1")
             self.assertEqual(sdk.kwargs["patches"], (str(client.patch),))
             self.assertEqual(sdk.kwargs["shutdown_timeout_seconds"], 1)
-            self.assertNotIn("shell", json.dumps(sdk.kwargs).lower())
+            prompt=sdk.kwargs["env"]["DSH_SYSTEM_PROMPT"]
+            self.assertIn("MAY PROPOSE",prompt)
+            self.assertIn("NOT execution or approval",prompt)
+            self.assertIn("NEVER invoke",prompt)
+            self.assertIn("no executable tools",prompt)
+            self.assertNotIn("No tools or actions.",prompt)
+            self.assertNotIn("shell", json.dumps({
+                k:v for k,v in sdk.kwargs.items() if k!="env"
+            }).lower())
             home = Path(sdk.kwargs["dsh_home"]).parent
             self.assertTrue(home.exists())
         finally:
@@ -151,7 +159,6 @@ class AlfredSdkIntegrationTests(unittest.TestCase):
         cfg = load_config()
         cfg["runtime"]["database"] = str(Path(home)/"alfred.db")
         cfg["runtime"]["logs"] = home
-        cfg["runtime"]["harness_enabled"] = True
         app = Alfred(cfg, load_models=False)
         app.feedback.tell = Mock()
         app.cactus = Mock()
@@ -161,7 +168,7 @@ class AlfredSdkIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             app = self.make_app(home)
             fake = Mock()
-            fake.run.return_value = {"message":"hello", "results":[]}
+            fake.plan.return_value = {"message":"hello","steps":[],"save_as":None}
             app.harness = fake
             app.supervisor.ensure_running = Mock()
             app.system2.reason = Mock()
@@ -170,7 +177,7 @@ class AlfredSdkIntegrationTests(unittest.TestCase):
                 app.handle_text("What is an atom?")
                 app.system2.reason.assert_not_called()
                 app.supervisor.ensure_running.assert_called_once()
-                self.assertEqual(fake.run.call_args.args[1], app.session_id)
+                self.assertEqual(fake.plan.call_args.args[1], app.session_id)
                 self.assertEqual(len(app.sessions.list_tasks(app.session_id)), 1)
                 events = app.sessions.events(app.sessions.list_tasks(app.session_id)[0]["id"])
                 self.assertIn("escalation", [x.kind for x in events])
@@ -290,7 +297,7 @@ class AlfredSdkIntegrationTests(unittest.TestCase):
             finally:
                 app.close()
 
-    def test_generation_crash_may_fallback_before_any_execution(self):
+    def test_generation_crash_fails_closed_before_any_execution(self):
         with tempfile.TemporaryDirectory() as home:
             app = self.make_app(home)
             fake = Mock()
@@ -300,10 +307,10 @@ class AlfredSdkIntegrationTests(unittest.TestCase):
             app.system2.execute_or_stage = Mock()
             app.system2.reason = Mock(return_value={"message":"Fallback","results":[]})
             try:
-                out = app.reason("Find an answer", allow_actions=True)
-                self.assertEqual(out["message"], "Fallback")
-                app.system2.reason.assert_called_once_with(
-                    "Find an answer", allow_actions=True)
+                app._start_task("reason",len("Find an answer"))
+                with self.assertRaises(HarnessUnavailable):
+                    app.reason("Find an answer",allow_actions=True)
+                app.system2.reason.assert_not_called()
                 app.system2.execute_or_stage.assert_not_called()
             finally:
                 app.close()
@@ -327,32 +334,31 @@ class AlfredSdkIntegrationTests(unittest.TestCase):
             finally:
                 app.close()
 
-    def test_sdk_crash_falls_back_without_new_tool_grants(self):
+    def test_sdk_crash_fails_closed_without_new_tool_grants(self):
         with tempfile.TemporaryDirectory() as home:
             app = self.make_app(home)
             fake = Mock()
-            fake.run.side_effect = HarnessUnavailable("SDK crash")
+            fake.plan.side_effect = HarnessUnavailable("SDK crash")
             app.harness = fake
             app.supervisor.ensure_running = Mock()
             app.cactus.route.return_value = {"confidence": .95, "function_calls": []}
             app.system2.reason = Mock(return_value={"message":"fallback", "results":[]})
             try:
                 app.handle_text("simple explanation")
-                fake.run.assert_called_once()
-                app.system2.reason.assert_called_once_with(
-                    "simple explanation", allow_actions=False)
+                fake.plan.assert_called_once()
+                app.system2.reason.assert_not_called()
             finally:
                 app.close()
 
-    def test_disabled_flag_preserves_old_path(self):
+    def test_required_sdk_default(self):
         cfg = load_config()
-        self.assertFalse(cfg["runtime"]["harness_enabled"])
+        self.assertNotIn("harness_enabled",cfg["runtime"])
         with tempfile.TemporaryDirectory() as home:
             cfg["runtime"]["database"] = str(Path(home)/"alfred.db")
             cfg["runtime"]["logs"] = home
-            app = Alfred(cfg, load_models=False)
+            app = Alfred(cfg,load_models=False)
             try:
-                self.assertIsNone(app.harness)
+                self.assertIsInstance(app.harness,LocalHarness)
             finally:
                 app.close()
 
