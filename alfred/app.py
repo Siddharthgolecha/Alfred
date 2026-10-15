@@ -196,9 +196,13 @@ class Alfred:
             max_tools=min(self.cfg["runtime"]["max_plan_steps"], MAX_HANDOFF_TOOLS),
             needle_budget=self.cfg["runtime"]["needle_max_decisions"],
             used_decisions=used_decisions)
-        self.sessions.append(task.task_id, Escalation("needle3", "qwen", reason))
+        self.sessions.append(task.task_id, Escalation(
+            source_model="needle3", target_model="qwen", reason=reason))
         self.sessions.append(task.task_id, Decision(
-            "qwen", "delegate" if allow_actions else "readonly", 0))
+            engine="qwen",
+            route="delegate" if allow_actions else "readonly",
+            call_count=0,
+        ))
         bounded_context=(self.context.compact(task.session_id,task.task_id)
                          if self.context.enabled else None)
         return self.system2.continue_handoff(
@@ -254,11 +258,11 @@ class Alfred:
         if "approval" in result:
             proposal=result["approval"]
             self.sessions.append(task.task_id,
-                                 ApprovalReference(proposal["approval_id"]))
+                                 ApprovalReference(approval_id=proposal["approval_id"]))
             for name in result.get("proposed_tools", ()):
-                self.sessions.append(task.task_id, Observation(name, "staged"))
+                self.sessions.append(task.task_id, Observation(tool=name, outcome="staged"))
             self.sessions.append(task.task_id,
-                                 Completion("pending_approval", "needs_approval"))
+                                 Completion(outcome="pending_approval", reason="needs_approval"))
             self.feedback.tell(
                 f"Local approval required for {proposal['actions']}. "
                 f"On the Jetson, run: alfred --approve {proposal['approval_id']}")
@@ -269,14 +273,16 @@ class Alfred:
             reason = ("invalid_plan" if result.get("error") == "invalid_plan"
                       else "disabled" if not self.cfg["qwen"]["enabled"]
                       else "exception")
-            self.sessions.append(task.task_id, Completion("failed", reason))
+            self.sessions.append(task.task_id, Completion(outcome="failed", reason=reason))
             self.feedback.tell(json.dumps(result,default=str)[:Truncation.RESULT * 3 // 2])
         else:
             for item in result.get("tool_outcomes", ()):
                 self.sessions.append(task.task_id, Observation(
-                    item["tool"], item["outcome"]))
+                    tool=item["tool"], outcome=item["outcome"]))
             self.sessions.append(task.task_id, Completion(
-                "completed", "executed" if result.get("results") else "no_action"))
+                outcome="completed",
+                reason="executed" if result.get("results") else "no_action",
+            ))
             self.feedback.tell(json.dumps(result,default=str)[:Truncation.RESULT * 3 // 2])
 
     def resume_session(self, session_id):
@@ -324,8 +330,8 @@ class Alfred:
                              r"(?: context)?[.!?]*",text,re.I)):
             self.context.clear_session(task.session_id,task_id=task.task_id)
             self.needle_slots.clear(task.session_id)
-            self.sessions.append(task.task_id,Decision("local","direct",0))
-            self.sessions.append(task.task_id,Completion("completed","no_action"))
+            self.sessions.append(task.task_id, Decision(engine="local", route="direct", call_count=0))
+            self.sessions.append(task.task_id, Completion(outcome="completed", reason="no_action"))
             self.feedback.tell("Session context cleared; approved persistent facts were retained.")
             return
         # A later unrelated command invalidates the only supported pronoun
@@ -339,7 +345,7 @@ class Alfred:
                 routed_text=self.context.resolve(self.session_id,text,
                                                  task_id=task.task_id)
             except ContextUnavailable as exc:
-                self.sessions.append(task.task_id,Completion("rejected","unsafe_route"))
+                self.sessions.append(task.task_id, Completion(outcome="rejected", reason="unsafe_route"))
                 self.feedback.tell(str(exc))
                 return
         elif self.cfg["runtime"]["needle_loop_enabled"]:
@@ -348,11 +354,11 @@ class Alfred:
             try:
                 routed_text = self.needle_slots.resolve(self.session_id, text)
             except ContextUnavailable as exc:
-                self.sessions.append(task.task_id, Completion("rejected", "unsafe_route"))
+                self.sessions.append(task.task_id, Completion(outcome="rejected", reason="unsafe_route"))
                 self.feedback.tell(str(exc))
                 return
         if self.cactus is None:
-            self.sessions.append(task.task_id, Completion("failed", "exception"))
+            self.sessions.append(task.task_id, Completion(outcome="failed", reason="exception"))
             raise RuntimeError("Cactus models were not initialized")
         try:
             routed_at = time.monotonic()
@@ -367,7 +373,7 @@ class Alfred:
             if (self.cfg["runtime"].get("cognitive_diagnostics",False)
                     and self.admission.allow_optional_diagnostics()):
                 duration = max(0, min(Limits.DIAG_MAX_LATENCY_MS, int((time.monotonic() - routed_at)*1000)))
-                self.sessions.append(task.task_id, Diagnostic("needle_route", {
+                self.sessions.append(task.task_id, Diagnostic(name="needle_route", metrics={
                     "latency_ms":duration, "input_chars":len(text)}))
             calls=response.get("function_calls") or []
             confidence=response.get("confidence")
@@ -379,8 +385,8 @@ class Alfred:
                     or type(call.get("name")) is not str
                     or ("arguments" in call and type(call["arguments"]) is not dict)
                     for call in calls)):
-                self.sessions.append(task.task_id, Decision("needle3", "rejected", 0))
-                self.sessions.append(task.task_id, Completion("rejected", "unsafe_route"))
+                self.sessions.append(task.task_id, Decision(engine="needle3", route="rejected", call_count=0))
+                self.sessions.append(task.task_id, Completion(outcome="rejected", reason="unsafe_route"))
                 self.feedback.tell("Needle returned an invalid tool request. Please clarify.")
                 return
             if self.cfg["runtime"]["needle_loop_enabled"] and len(calls) > 1:
@@ -391,16 +397,16 @@ class Alfred:
                                          sort_keys=True, separators=(",", ":"),
                                          allow_nan=False) for c in calls]
                 if len(signatures) != len(set(signatures)):
-                    self.sessions.append(task.task_id, Decision("needle3", "rejected", 0))
-                    self.sessions.append(task.task_id, Completion("rejected", "unsafe_route"))
+                    self.sessions.append(task.task_id, Decision(engine="needle3", route="rejected", call_count=0))
+                    self.sessions.append(task.task_id, Completion(outcome="rejected", reason="unsafe_route"))
                     self.feedback.tell("Repeated tool request rejected before execution.")
                     return
             if response.get("suppressed_calls") or (
                 isinstance(validation, dict) and validation.get("ungrounded")
             ):
-                self.sessions.append(task.task_id, Decision("needle3", "rejected",
-                                     min(len(calls), 50)))
-                self.sessions.append(task.task_id, Completion("rejected", "unsafe_route"))
+                self.sessions.append(task.task_id, Decision(
+                    engine="needle3", route="rejected", call_count=min(len(calls), 50)))
+                self.sessions.append(task.task_id, Completion(outcome="rejected", reason="unsafe_route"))
                 self.feedback.tell("I couldn't safely determine that command. Please clarify.")
                 return
             floor=float(self.cfg["runtime"]["needle_confidence_floor"])
@@ -408,13 +414,13 @@ class Alfred:
                           or not math.isfinite(confidence) or not floor <= confidence <= 1):
                 self.store.event("route_uncertain",{
                     "confidence": confidence, "call_count": len(calls)})
-                self.sessions.append(task.task_id, Decision("needle3", "uncertain",
-                                     min(len(calls), 50)))
+                self.sessions.append(task.task_id, Decision(
+                    engine="needle3", route="uncertain", call_count=min(len(calls), 50)))
                 if self.cfg["runtime"]["escalation_enabled"]:
                     outcome=self._handoff(task, text, "uncertain",allow_actions=False)
                     self._finish_handoff(task, outcome, text)
                     return
-                self.sessions.append(task.task_id, Completion("rejected", "low_confidence"))
+                self.sessions.append(task.task_id, Completion(outcome="rejected", reason="low_confidence"))
                 self.feedback.tell("Command uncertain. Please repeat or be more specific.")
                 return
             corrected=adjust_status_calls(routed_text,calls)
@@ -431,8 +437,8 @@ class Alfred:
                 # System2.direct(), and never silently reinterpret the name
                 # as a privileged service/command. Only read-only clarification
                 # is permitted with the original wake-authorized request.
-                self.sessions.append(task.task_id, Decision("needle3", "rejected",
-                                                             min(len(calls), 50)))
+                self.sessions.append(task.task_id, Decision(
+                    engine="needle3", route="rejected", call_count=min(len(calls), 50)))
                 outcome=self._handoff(task, text, "unsupported", allow_actions=False)
                 self._finish_handoff(task, outcome, text)
                 return
@@ -444,7 +450,7 @@ class Alfred:
             })
             if (self.cfg["runtime"]["needle_loop_enabled"]
                     and len(calls) > self.cfg["runtime"]["needle_max_tools"]):
-                self.sessions.append(task.task_id, Completion("rejected", "unsafe_route"))
+                self.sessions.append(task.task_id, Completion(outcome="rejected", reason="unsafe_route"))
                 self.feedback.tell("Needle exceeded the per-task tool budget. Please clarify.")
                 return
             route = ("readonly" if not calls else
@@ -452,8 +458,9 @@ class Alfred:
                      calls[0].get("name")=="delegate_to_reasoner" else "direct")
             safe_confidence = (float(confidence) if type(confidence) in (float,int)
                                and 0 <= confidence <= 1 else None)
-            self.sessions.append(task.task_id, Decision("needle3", route,
-                                 min(len(calls), 50), safe_confidence))
+            self.sessions.append(task.task_id, Decision(
+                engine="needle3", route=route,
+                call_count=min(len(calls), 50), confidence=safe_confidence))
             loop_outcome = None
             if (self.cfg["runtime"]["needle_loop_enabled"] and
                     calls and route == "direct" and MULTISTEP.search(text)):
@@ -486,7 +493,7 @@ class Alfred:
                     # a version-1 handoff; do not hide/replay them in an error.
                     total_budget=min(self.cfg["runtime"]["max_plan_steps"], MAX_HANDOFF_TOOLS)
                     if len(completed)>total_budget:
-                        self.sessions.append(task.task_id, Completion("failed", "exception"))
+                        self.sessions.append(task.task_id, Completion(outcome="failed", reason="exception"))
                         self.feedback.tell(json.dumps({
                             "status":"incomplete", "partial":True,
                             "halt_reason":"handoff_budget_exhausted",
@@ -510,8 +517,8 @@ class Alfred:
                     halted["halt_reason"] = loop_outcome.stop
                     halted["partial"] = bool(halted.get("results"))
                     self.sessions.append(task.task_id, Completion(
-                        "rejected" if loop_outcome.stop == "unsafe" else "failed",
-                        "unsafe_route" if loop_outcome.stop == "unsafe" else "shutdown"))
+                        outcome="rejected" if loop_outcome.stop == "unsafe" else "failed",
+                        reason="unsafe_route" if loop_outcome.stop == "unsafe" else "shutdown"))
                     self.feedback.tell(json.dumps(halted, default=str)[:Truncation.RESULT * 3 // 2])
                     return
                 if (loop_outcome.stop not in ("completed", "protected", "partial")
@@ -520,8 +527,8 @@ class Alfred:
                     # that a requested tool ran. A completed read-only prefix
                     # is reported below, even when a later call was denied.
                     self.sessions.append(task.task_id, Completion(
-                        "rejected", "low_confidence" if loop_outcome.stop == "uncertain"
-                        else "unsafe_route"))
+                        outcome="rejected",
+                        reason="low_confidence" if loop_outcome.stop == "uncertain" else "unsafe_route"))
                     self.feedback.tell(loop_outcome.result["message"])
                     return
                 result = loop_outcome.result
@@ -533,7 +540,7 @@ class Alfred:
                     self._finish_handoff(task, outcome, text)
                     return
                 self.sessions.append(task.task_id,
-                                     Escalation("needle3", "qwen", "unsupported"))
+                                     Escalation(source_model="needle3", target_model="qwen", reason="unsupported"))
                 result=self.reason(text,allow_actions=False)
             elif len(calls)==1 and calls[0].get("name")=="delegate_to_reasoner":
                 if self.cfg["runtime"]["escalation_enabled"]:
@@ -541,19 +548,19 @@ class Alfred:
                     self._finish_handoff(task, outcome, text)
                     return
                 self.sessions.append(task.task_id,
-                                     Escalation("needle3", "qwen", "delegated"))
+                                     Escalation(source_model="needle3", target_model="qwen", reason="delegated"))
                 result=self.reason(text,allow_actions=True)
             else:
                 result=self.system2.direct(calls)
             if "approval" in result:
                 approval=result["approval"]
                 self.sessions.append(task.task_id,
-                                     ApprovalReference(approval["approval_id"]))
+                                     ApprovalReference(approval_id=approval["approval_id"]))
                 for call in calls:
                     if call.get("name") in SCHEMA_BY_NAME and call["name"] != "delegate_to_reasoner":
-                        self.sessions.append(task.task_id, Observation(call["name"], "staged"))
+                        self.sessions.append(task.task_id, Observation(tool=call["name"], outcome="staged"))
                 self.sessions.append(task.task_id,
-                                     Completion("pending_approval", "needs_approval"))
+                                     Completion(outcome="pending_approval", reason="needs_approval"))
                 message=(f"Local approval required for {approval['actions']}. "
                          f"On the Jetson, run: alfred --approve {approval['approval_id']}")
                 self.feedback.tell(message)
@@ -569,7 +576,7 @@ class Alfred:
                 if isinstance(observed, list):
                     if loop_outcome is None:
                         for item in trusted:
-                            self.sessions.append(task.task_id, Observation(item.tool, "returned"))
+                            self.sessions.append(task.task_id, Observation(tool=item.tool, outcome="returned"))
                         if route == "direct" and not trusted:
                             # Compatibility path for pre-typed legacy/fake
                             # direct Needle results; never infer Qwen names.
@@ -577,7 +584,7 @@ class Alfred:
                                 if (call.get("name") in SCHEMA_BY_NAME and
                                     call["name"] != "delegate_to_reasoner" and
                                     not (isinstance(value,dict) and value.get("skipped") is True)):
-                                    self.sessions.append(task.task_id, Observation(call["name"], "returned"))
+                                    self.sessions.append(task.task_id, Observation(tool=call["name"], outcome="returned"))
                     # Require locally returned read data and an explicit
                     # user-requested category; no model-authored observation.
                     for item in trusted:
@@ -611,16 +618,16 @@ class Alfred:
                 outcome = ("disabled" if not self.cfg["qwen"]["enabled"] and route != "direct"
                            else "no_action" if not observed else "executed")
                 incomplete = result.get("status") == "incomplete"
-                self.sessions.append(task.task_id,
-                                     Completion("failed" if incomplete or outcome == "disabled"
-                                                else "completed",
-                                                ("invalid_plan" if result.get("error")=="invalid_plan"
-                                                 else "exception") if incomplete else outcome))
+                self.sessions.append(task.task_id, Completion(
+                    outcome="failed" if incomplete or outcome == "disabled" else "completed",
+                    reason=("invalid_plan" if result.get("error") == "invalid_plan"
+                            else "exception") if incomplete else outcome,
+                ))
                 self.feedback.tell(json.dumps(result,default=str)[:Truncation.RESULT * 3 // 2])
         except Exception as exc:
             LOG.exception("Command failed")
             try:
-                self.sessions.append(task.task_id, Completion("failed", "exception"))
+                self.sessions.append(task.task_id, Completion(outcome="failed", reason="exception"))
             except Exception:
                 LOG.exception("Could not record failed command")
             self.feedback.tell(f"Could not complete command: {exc}")
@@ -670,8 +677,8 @@ class Alfred:
                     if re.fullmatch(r"(?:close|exit|quit|stop listening|shut down|shutdown)[.!?]*",
                                     command.strip(), flags=re.IGNORECASE):
                         task = self._start_task("voice", len(command))
-                        self.sessions.append(task.task_id, Decision("local", "shutdown", 0))
-                        self.sessions.append(task.task_id, Completion("completed", "shutdown"))
+                        self.sessions.append(task.task_id, Decision(engine="local", route="shutdown", call_count=0))
+                        self.sessions.append(task.task_id, Completion(outcome="completed", reason="shutdown"))
                         LOG.info("Wake-authorized spoken shutdown")
                         print("Stopping Alfred", flush=True)
                         break
@@ -1028,26 +1035,27 @@ def _main(argv=None):
             if args.resume_session:
                 app.resume_session(args.resume_session)
             task = app._start_task("reason", len(args.reason))
-            app.sessions.append(task.task_id, Decision("local", "delegate", 0))
+            app.sessions.append(task.task_id, Decision(engine="local", route="delegate", call_count=0))
             app.sessions.append(task.task_id,
-                                Escalation("local", "qwen", "explicit_reason"))
+                                Escalation(source_model="local", target_model="qwen", reason="explicit_reason"))
             try:
                 result = app.reason(args.reason)
                 if result.get("status") == "incomplete":
                     app.sessions.append(task.task_id,
-                                        Completion("failed", "invalid_plan"))
+                                        Completion(outcome="failed", reason="invalid_plan"))
                 elif "approval" in result:
                     app.sessions.append(task.task_id,
-                                        ApprovalReference(result["approval"]["approval_id"]))
+                                        ApprovalReference(approval_id=result["approval"]["approval_id"]))
                     app.sessions.append(task.task_id,
-                                        Completion("pending_approval", "needs_approval"))
+                                        Completion(outcome="pending_approval", reason="needs_approval"))
                 else:
-                    app.sessions.append(task.task_id,
-                                        Completion("completed" if cfg["qwen"]["enabled"] else "failed",
-                                                   "no_action" if cfg["qwen"]["enabled"] else "disabled"))
+                    app.sessions.append(task.task_id, Completion(
+                        outcome="completed" if cfg["qwen"]["enabled"] else "failed",
+                        reason="no_action" if cfg["qwen"]["enabled"] else "disabled",
+                    ))
                 print(json.dumps(result,default=str,indent=2))
             except Exception:
-                app.sessions.append(task.task_id, Completion("failed", "exception"))
+                app.sessions.append(task.task_id, Completion(outcome="failed", reason="exception"))
                 raise
         finally:
             app.close()

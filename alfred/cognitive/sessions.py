@@ -131,7 +131,10 @@ class SessionLedger:
     def begin_task(self, source, input_chars, session_id=None):
         started = int(time.time())
         sid = valid_id(session_id) if session_id is not None else new_id()
-        item = TaskEnvelope(sid, new_id(), source, input_chars, started)
+        item = TaskEnvelope(
+            session_id=sid, task_id=new_id(), source=source,
+            input_chars=input_chars, started_at=started,
+        )
         payload = item.to_json()
         with self.store.lock, self.store.db:
             row = self.store.db.execute(
@@ -182,7 +185,7 @@ class SessionLedger:
                 "SELECT id FROM cognitive_tasks WHERE session_id=? AND state='running'",
                 (sid,)).fetchall()]
             for task_id in running:
-                self.append(task_id, Completion("failed","shutdown"))
+                self.append(task_id, Completion(outcome="failed", reason="shutdown"))
         return sid
 
     def _history(self, task_id, session_id):

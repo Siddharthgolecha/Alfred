@@ -192,8 +192,12 @@ class NeedleAgentLoop:
                 safe_confidence = (float(confidence) if type(confidence) in (int, float)
                                    and math.isfinite(confidence) and 0 <= confidence <= 1
                                    else None)
-                self._record(Decision("needle3", "direct" if calls else "readonly",
-                                      min(len(calls), 50), safe_confidence))
+                self._record(Decision(
+                    engine="needle3",
+                    route="direct" if calls else "readonly",
+                    call_count=min(len(calls), 50),
+                    confidence=safe_confidence,
+                ))
             if response.get("suppressed_calls") or (
                 isinstance(response.get("validation"), dict)
                 and response["validation"].get("ungrounded")
@@ -259,7 +263,7 @@ class NeedleAgentLoop:
                 return self._stop("unsafe", accepted, observed, outputs)
             outputs.extend(batch)
             for call in calls:
-                self._record(Observation(call["name"], "returned"))
+                self._record(Observation(tool=call["name"], outcome="returned"))
                 observed.append(call["name"])
             if not permit_feedback or not all(call["name"] in READONLY for call in calls):
                 # Safe but non-chainable listings execute once through System2
