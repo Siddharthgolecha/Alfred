@@ -1,0 +1,213 @@
+# Issue #15: versioned Needle → Qwen same-task continuation
+
+**Status:** opt-in, Python-tested local integration. Native Needle 3 on the
+physical 8 GB Jetson remains gated by [#29](https://github.com/Siddharthgolecha/Alfred/issues/29).
+Independent review/merge is required before deployment. This is **not** a
+general autonomous tool agent.
+
+## Activation and rollback
+
+The new `runtime.escalation_enabled` defaults to `false`; `needle_loop_enabled`
+also defaults to `false`. To test only the handoff without native multi-turn
+Needle feedback, set `"escalation_enabled": true` in the existing `runtime`
+config and restart Alfred. Turn it off to immediately restore #14 / legacy
+Needle→Qwen behavior.
+
+```json
+{
+  "runtime": {
+    "escalation_enabled": true,
+    "needle_loop_enabled": false
+  }
+}
+```
+
+Do not copy a minimal config directly over your normal config (Alfred merges
+it with defaults; retain your local model URL/other settings). Qwen continues
+to use the existing `qwen.url` and configured backend (llama.cpp, Ollama,
+LM Studio or llama-server); the SDK is optional and does not start a separate
+model service. Disabled/unavailable Qwen produces an explicitly **incomplete**
+result; never a false claim of successful processing.
+
+## Precise ownership and policy
+
+`Alfred.handle_text()` creates exactly one durable `TaskEnvelope` after a
+trusted text CLI or wake-authorized transcript. A bounded ephemeral
+`EscalationEnvelope(version=1)` carries the **original authorized request**,
+canonical session/task IDs, *executed read-only tool names*, only finite/known
+telemetry metrics, remaining tool and Needle decision budget, reason for
+escalation and whether actions may be proposed. Completed action-bearing
+steps are **never resumable or auto-replayable**.
+
+- **Needle direct result:** regular `System2.direct` path, no Qwen or Harness.
+- **Unsupported / ordinary explanation:** optional read-only Qwen continuation.
+- **Low Needle confidence / unknown Needle function:** optional read-only Qwen
+  clarification, never convert an uncertain or unrecognized action into an
+  authorized call. Unknown names are rejected before System2.direct.
+- **Explicit Needle `delegate_to_reasoner`:** Qwen may *propose* tool actions
+  within existing concrete allowlists. Sensitive steps remain **pending** until
+  a separate trusted `alfred --approve ID`; unchanged Phase 4 graph workflow
+  digest protections still apply. `approve` is never present in model schemas.
+- **Needle loop budget/repeated/uncertain after successful reads:** pass only
+  whitelisted bounded values from already completed System2 reads to read-only
+  Qwen. It may propose new, distinct reads if remaining budget permits; it
+  cannot repeat the same tool+args or propose a side effect.
+- **Unsafe/suppressed tool, cancellation, wake authorization failure:** stop and
+  clarify. Do not start another model automatically. The already completed
+  read-only prefix remains visible with an explicit halt reason.
+- **Qwen or Harness failure:** no follow-up tools run, response contains
+  `status: "incomplete"`; already completed observations are retained.
+  A fresh direct Qwen inference may replace a crashed SDK *only before tool
+  execution begins*. Neither System2 execution nor approvals are inside a
+  retry/fallback handler.
+- **Native Needle feedback failure after a successful read:** return
+  `status: "incomplete"` with the completed read prefix, explicit
+  `feedback_unavailable` halt reason and failed task state. Never retry the
+  read or reinterpret this as permission for an actionable plan.
+- **Invalid/forged plan or attempted replay:** hard rejection before staging
+  or running tools. No second attempt to reinterpret it through Qwen.
+
+Only the protected Python `System2.parse_plan → EscalationEnvelope.reconcile →
+System2.execute_or_stage` pipeline can execute/stage a Qwen proposal.
+`allow_actions=false` rejects reminders, service control, arbitrary tasks,
+workflow saves, and other mutations. The precise service/task allowlists and
+approval decisions are still enforced by existing `System2.preflight` and
+`System2.approve`, not by a prompt.
+
+The active `NeedleAgentLoop` task lock still serializes native `reset → complete
+→ feedback`, so another authorized task cannot mix with this one. The session
+ledger records only structural decisions, handoff reason, tool names, and
+completed/pending/failure state. The ephemeral envelope's source request and
+observation values are **not** written to that cognitive ledger. Note that
+the older, separate `Store.event("tool",...)` system stores raw tool results and
+is not migrated by issue #15; do not mistake the cognitive-ledger privacy
+guarantee for a global no-logging claim.
+
+## Scoped context interaction (issue #16 / merged PR #33)
+
+The version-1 `EscalationEnvelope` deliberately contains **only this task's
+sanitized completed read names and bounded metrics**, plus its budgets and
+original authorized request. It does **not** additionally forward the broader
+`ContextManager` session slots or user-approved preference facts to Qwen or
+the Harness. Those are a separate opt-in, scoped data channel for non-handoff
+reasoning, not an implicit handoff authorization; extending the combined
+planner context requires independent privacy and trust review.
+
+When both `context_enabled` and `escalation_enabled` are enabled, a bounded
+native `NeedleAgentLoop` that returns early for read-only escalation or
+handoff-budget exhaustion passes only its **exactly aligned, successful**
+`System2.direct` read prefix to the local `ContextManager`. The loop's
+post-execution `observed` record must match the accepted calls and returned
+results; protected actions, skipped reads, unmatched or failed batches never
+create a slot. An invalid Qwen/SDK follow-up does not erase an already verified
+prefix. Newly executed Qwen reads use a *separate* typed `VerifiedRead`
+channel; they are never re-ingested as Needle results. The context manager
+enforces the original explicit user-requested category, task/owner scope,
+TTL and scalar whitelist before retaining any slot. Neither model-generated
+text nor raw tool output strings become session context. If both GPU and
+system-status slots are fresh, a generic "check it again" remains ambiguous
+and requires naming a metric.
+
+## Shared tool budget across Needle and Qwen
+
+`runtime.max_plan_steps` accepts **1–10** for ordinary System 2 plans.
+For a version-1 cross-model handoff, Alfred explicitly caps the *global*
+completed-plus-proposed tool-call budget at **five**:
+`min(runtime.max_plan_steps, 5)`. Already executed Needle reads consume
+slots from this same total; Qwen receives only the remainder. For example,
+the default `needle_max_tools=3` permits three Needle reads followed by at
+most two additional Qwen reads when `max_plan_steps>=5`. Configured values
+6–10 never invalidate a handoff or extend the v1 protocol cap. A smaller
+`max_plan_steps` (such as 1 or 2) might coexist with already completed
+Needle reads from multiple individually valid calls. If the completed prefix
+exceeds the configured total, Alfred reports the original observations as
+`status=incomplete` / `handoff_budget_exhausted` **without invoking Qwen,
+replaying a read, or losing the task history**. The
+`needle_max_decisions=3` limit is a separate bound on native Needle
+decision/feedback turns, not on Qwen reasoning turns. A lower configured
+total cannot be silently enlarged to replay already executed reads;
+unsupported over-budget histories must fail closed. Explanations with zero
+additional tools can still use Qwen when no tool budget remains.
+
+## Retention and live voice session ownership
+
+An Alfred voice process can own a session even when it is idle between
+commands and all its recorded tasks are complete. Explicit retention
+pruning excludes any session with a verified live or indeterminate owner;
+there is no time-only ownership expiry. Selection and deletion use the
+same SQLite write-transaction serialization as recovery, so a concurrent
+owner cannot be pruned after claiming the session. Once ownership is
+explicitly released after safe shutdown, or its PID/start identity is
+confirmed dead, finished sessions older than the requested cutoff may
+be pruned. Sessions with running tasks remain protected even if the
+previous owner died, until explicit recovery closes those traces.
+
+## Restart and uncertain side effects
+
+After an application restart, the model conversation and private transient
+handoff are **not** restored. A local operator can reuse the *correlation*
+session using a validated existing hex ID:
+
+```sh
+alfred --resume-session <32-hex-session-id> --text "Check GPU temperature"
+# Or, after native voice/microphone preflight succeeds:
+alfred --resume-session <32-hex-session-id>
+```
+
+The existing SQLite cognitive session is reused only when its previous owner
+has **exited** (or has explicitly released the session during safe shutdown).
+Each process owns its sessions through an SQLite claim tied to PID and (on
+Linux) process-start identity. A concurrent `--resume-session` while the owner
+is still alive is **refused without altering any running task**; the claim is
+serialized transactionally. Uncertain liveness is treated as active, not as a
+reason to steal a session. After verified termination, any interrupted
+`running` task is marked `failed/shutdown` and its actions are **not replayed**.
+Existing one-shot pending approvals remain in SQLite and can be reviewed with
+`alfred --pending`, then approved only from the trusted local CLI. A running
+or partially executed task is not implicitly retried, even if its status is
+indeterminate. Unknown/invalid session IDs fail closed. This preserves
+correlation across restarts, **not** the last transcript or native model state.
+
+## Local reproducible verification
+
+```sh
+python -m unittest discover -s tests -v
+PYTHONPATH=. python tests/bench_needle_fastpath.py
+PYTHONPATH=. python tests/bench_handoff.py
+```
+
+The new tests cover version/id/size validation, bounded prompt-injection
+resistance, matching executed tool signatures, no duplicate named tasks and
+services, zero elevated permissions on read-only handoff, single pending
+approval through the existing SQLite queue, one-shot execution, Qwen
+unavailability, SDK→Qwen pre-execution transport fallback, malformed or
+repeated-key SDK proposal hard rejection without replanning, native feedback
+failure after a returned read, no fallback after a partial side effect,
+same task/session ledger correlation, live process conflict rejection and
+interrupted dead-owner session recovery, live-owned idle retention protection, capped 6/10-step planner configuration, and a **real local HTTP /v1/chat/completions protocol smoke** using a
+deterministic stub server. That protocol smoke uses a stub instead of live
+Qwen weights; the separate CI `harness-sdk-smoke` job executes the pinned
+genuine SDK/Cordis process, but native Jetson/Needle weights are still untested.
+
+The paired `bench_handoff.py` compares clear direct status routing against
+Qwen-handoff routing on the **same CI host** with interleaved, deterministic
+fake model responses. It prints P50/P95 and Qwen/direct invocation counts.
+
+The verified prior GitHub Actions run #38625051862 (mock inference, 200
+measurements per condition) reported:
+| Runner | Direct P50/P95 | Handoff P50/P95 | Handoff minus direct |
+|---|---|---|---|
+| Python 3.10 | 1186.5 / 1729.8 μs | 1489.5 / 2338.5 μs | +303.0 / +608.7 μs |
+| Python 3.12 | 1562.3 / 2152.7 μs | 1941.7 / 2779.2 μs | +379.4 / +626.5 μs |
+
+This measures Python policy/ledger serialization overhead only; **it does not
+include actual Qwen inference, device throughput, power, RAM or audio capture.**
+Do not claim real-world performance improvement based on this benchmark.
+
+## Remaining rollout blocker
+
+[#29](https://github.com/Siddharthgolecha/Alfred/issues/29) must demonstrate
+native Needle manual `complete(JSON result)` compatibility on the actual Jetson,
+session/reset correctness, true device P50/P95 under load, and power/thermal/
+RAM headroom. Until qualified, both new multi-step continuation features
+remain default-off.

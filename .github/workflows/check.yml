@@ -27,9 +27,9 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Needle fast-path P50/P95 (mock inference, paired baseline)
         run: PYTHONPATH=. python tests/bench_needle_fastpath.py
-      - name: Scoped context overhead P50/P95 (mock inference, paired baseline)
-        run: PYTHONPATH=. python tests/bench_context_fastpath.py
-      - name: Phase 5 release matrix (144 fixtures x 3 stub modes; fail on replay)
+      - name: Needle-to-Qwen handoff P50/P95 (mock inference, paired baseline)
+        run: PYTHONPATH=. python tests/bench_handoff.py
+      - name: Phase 5 release matrix (12 families x 12 trials x 3 stub modes)
         run: PYTHONPATH=.:tests python tests/phase5_qa.py --out artifacts/phase5-offline
       - name: Upload raw OFFLINE STUB Phase 5 comparison results
         uses: actions/upload-artifact@v4
@@ -38,6 +38,8 @@ jobs:
           path: artifacts/phase5-offline/
           if-no-files-found: error
           retention-days: 30
+      - name: Scoped context overhead P50/P95 (mock inference, paired baseline)
+        run: PYTHONPATH=. python tests/bench_context_fastpath.py
 
   harness-sdk-smoke:
     runs-on: ubuntu-latest

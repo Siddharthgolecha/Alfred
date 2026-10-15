@@ -33,12 +33,12 @@ DEFAULT = {
         "tts": False, "voice_alerts": False, "telemetry": False,
         "cognitive_diagnostics": False,
         "harness_enabled": False, "harness_timeout_seconds": 45,
+        "needle_loop_enabled": False, "escalation_enabled": False, "context_enabled": False,
         "resource_admission_enabled": False,
         "resource_min_available_mib": 512,
         "resource_max_swap_used_mib": 1024,
         "resource_max_cpu_load_per_core": 3.0,
         "resource_max_wait_ms": 200,
-        "needle_loop_enabled": False, "context_enabled": False,
         "context_persistence_enabled": False,
         "context_owner": "local", "context_mode": "assistant",
         "context_ttl_seconds": 120, "context_budget_chars": 1200,
@@ -125,14 +125,14 @@ def load_config(path=None):
         raise ValueError("qwen.supervisor_poll_seconds must be 10..3600")
     ncfg = cfg["runtime"]
     from .inference_admission import InferenceAdmission
-    # Validate via the actual admission controller's strict constructor so
-    # permissive JSON bool-as-number coercions cannot weaken resource gates.
     InferenceAdmission(
         enabled=ncfg["resource_admission_enabled"],
         min_available_mib=ncfg["resource_min_available_mib"],
         max_swap_used_mib=ncfg["resource_max_swap_used_mib"],
         max_cpu_load_per_core=ncfg["resource_max_cpu_load_per_core"],
         max_wait_ms=ncfg["resource_max_wait_ms"])
+    if type(ncfg["escalation_enabled"]) is not bool:
+        raise ValueError("escalation_enabled must be a boolean")
     if type(ncfg["context_enabled"]) is not bool or type(ncfg["context_persistence_enabled"]) is not bool:
         raise ValueError("context toggles must be booleans")
     if ncfg["context_persistence_enabled"] and not ncfg["context_enabled"]:
