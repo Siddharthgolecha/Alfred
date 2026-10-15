@@ -166,7 +166,7 @@ class ContextManager:
         explicit = (bool(GPU_TEMP.search(explicit_text)) if tool=="get_gpu_status"
                     else bool(EXPLICIT_SYSTEM.search(explicit_text))
                          if tool=="get_system_status"
-                    else bool(re.search(r"\\bservices?\\b",explicit_text,re.I)))
+                    else bool(re.search(r"\bservices?\b",explicit_text,re.I)))
         # A model-chosen status tool is not enough: the user must have
         # explicitly requested the corresponding metric/category.
         if not explicit:
