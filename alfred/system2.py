@@ -13,6 +13,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
+from .models import QwenPlanResponseError
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, validate_plan
 
 LOG = logging.getLogger(__name__)
@@ -179,9 +180,19 @@ class System2:
         # Tool schemas, not just tool names, are provided to the planner.
         tool_catalog=[s for s in TOOL_SCHEMAS if s["name"] not in
                       ("delegate_to_reasoner","run_workflow")]
-        plan=self.qwen.complete(utterance, tool_catalog,
-                                allowed_services=self.tools.services,
-                                named_tasks=self.tools.tasks.keys())
+        try:
+            plan=self.qwen.complete(utterance, tool_catalog,
+                                    allowed_services=self.tools.services,
+                                    named_tasks=self.tools.tasks.keys())
+        except QwenPlanResponseError as exc:
+            # Invalid model output is not a plan. Do not stage, execute, save,
+            # or call a second inference; return a clear recovery path instead.
+            LOG.warning("System 2 plan unavailable: %s", exc)
+            return {"message": (
+                "I couldn't interpret that request as a valid plan, so no "
+                "actions were taken or scheduled. Please try again with a "
+                "specific action and time or interval."
+            ), "results": []}
         message,steps,save_as=parse_plan(plan,utterance,self.tools,
                                         self.cfg.get("max_plan_steps",5))
         outcome = self.execute_or_stage(steps,message,save_as,allow_actions)
