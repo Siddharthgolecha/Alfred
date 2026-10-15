@@ -27,14 +27,19 @@ def main(samples=200):
         cfg["runtime"]["database"]=str(Path(root)/"handoff.db")
         cfg["runtime"]["logs"]=root
         cfg["runtime"]["escalation_enabled"]=True
+        cfg["runtime"]["context_enabled"]=False
+        cfg["runtime"]["needle_loop_enabled"]=False
+        cfg["runtime"]["resource_admission_enabled"]=False
         app=Alfred(cfg, load_models=False)
         try:
             app.feedback.tell=Mock()
             app.cactus=Mock()
             app.system2.direct=Mock(return_value={
                 "message":"Completed","results":[{"available":True,"gpu_temp_c":64}]})
-            app.system2.qwen.complete=Mock(return_value={
-                "message":"Explanation from fake model","steps":[],"save_as":None})
+            app.supervisor.ensure_running=Mock(return_value=True)
+            app.harness=Mock()
+            app.harness.plan.return_value={
+                "message":"Explanation from fake model","steps":[],"save_as":None}
             durations={"direct":[],"escalation":[]}
             order=["direct","escalation"]*(samples+25)
             random.Random(15).shuffle(order)
@@ -53,7 +58,8 @@ def main(samples=200):
             assert len(durations["direct"])>100
             assert len(durations["escalation"])>100
             assert app.system2.direct.call_count==order.count("direct")
-            assert app.system2.qwen.complete.call_count==order.count("escalation")
+            assert app.harness.plan.call_count==order.count("escalation")
+            assert app.system2.qwen.complete.call_count==0
         finally:
             app.close()
     for kind,items in durations.items():
@@ -62,7 +68,7 @@ def main(samples=200):
     print(f"handoff-minus-direct P50="
           f"{percentile(durations['escalation'],.5)-percentile(durations['direct'],.5):+.1f}us "
           f"P95={percentile(durations['escalation'],.95)-percentile(durations['direct'],.95):+.1f}us")
-    print("FAKE inference only: no native Cactus/Qwen, no Jetson, no device speed claim.")
+    print("FAKE SDK planning only: no Cordis/native models/Jetson, no device speed claim.")
 
 
 if __name__=="__main__":

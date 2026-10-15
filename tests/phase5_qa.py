@@ -195,7 +195,9 @@ def run_matrix(output_dir):
             cfg["runtime"]["context_enabled"]=(mode!=MODES[0])
             cfg["runtime"]["context_persistence_enabled"]=False
             cfg["runtime"]["context_ttl_seconds"]=120
-            cfg["runtime"]["harness_enabled"]=False
+            # Required Cordis is represented by an offline SDK-shaped stub
+            # in every control arm; never bypass it using a legacy planner.
+            cfg["runtime"]["escalation_enabled"]=(mode!=MODES[0])
             # This must be enabled before Alfred constructs Qwen/Harness and
             # binds their shared admission controller, never retrofitted.
             unified=(mode==MODES[2])
@@ -330,7 +332,7 @@ def run_matrix(output_dir):
                         app.qwen.complete=Mock(return_value=proposal(case))
                         if name=="offline_reasoner_failure":
                             app.qwen.complete.side_effect=OSError("offline local model")
-                        app.harness=None
+                        app.harness=FakeHarness(case)
                     count_before=app.store.db.execute(
                         "SELECT COUNT(*) FROM events WHERE category='tool'").fetchone()[0]
                     reminders_before=app.store.db.execute(
