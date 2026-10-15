@@ -259,6 +259,21 @@ class LocalHarness:
                 "plugin_audit":"passed","cordis_tool_registry":"empty",
                 "published_wheel_hash":"verify-before-install"}
 
+    def configure_model(self, served_model):
+        """Use the verified, exact local backend model ID before SDK startup.
+
+        A configured Hugging Face alias may differ from the model identifier
+        actually advertised by llama.cpp, LM Studio or Ollama. Never silently
+        substitute the provider model mid-session.
+        """
+        if (not isinstance(served_model,str)
+                or not re.fullmatch(r"[a-zA-Z0-9_.:/-]{1,120}",served_model)):
+            raise HarnessUnavailable("Invalid advertised local model ID")
+        with self._lock:
+            if self._sdk is not None or self._closed:
+                raise HarnessUnavailable("Cannot change model after SDK startup")
+            self.model=served_model
+
     def require_ready(self):
         """Start official SDK, never a structural mock, and audit Cordis."""
         if self.factory is not None:

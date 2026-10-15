@@ -42,6 +42,24 @@ class HarnessRequiredTests(unittest.TestCase):
             finally:
                 app.close()
 
+    def test_model_id_switch_before_sdk_start_only(self):
+        class FakeSdk:
+            def __init__(self, **kwargs):
+                self.kwargs=kwargs
+            def run(self, prompt, session_id):
+                return Mock(final_response="ok", finish_reason="completed")
+            def close(self):
+                pass
+        client=LocalHarness("http://127.0.0.1:8080","Qwen",
+                            factory=FakeSdk)
+        try:
+            client.configure_model("Qwen3.5-4B-Q4_K_M.gguf")
+            self.assertEqual(client.run("hello","a"*32)["message"],"ok")
+            with self.assertRaisesRegex(HarnessUnavailable,"after SDK startup"):
+                client.configure_model("other-model")
+        finally:
+            client.close()
+
     def test_structural_mock_cannot_be_claimed_as_production_sdk(self):
         client=LocalHarness("http://127.0.0.1:8080","Qwen3.5-4B",
                             factory=lambda **kw:None)

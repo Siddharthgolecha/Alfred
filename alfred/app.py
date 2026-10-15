@@ -140,6 +140,7 @@ class Alfred:
             raise HarnessUnavailable("Required Harness needs Qwen enabled")
         diagnosis = self.harness.audit_installation()
         self.supervisor.ensure_running()
+        self.harness.configure_model(self.supervisor.model_id())
         self.harness.require_ready()
         LOG.info("Official Cordis SDK active (tool-free foundation, shared tools PENDING): sdk=%s runtime=%s profile=%s",
                  diagnosis["sdk_version"], diagnosis["runtime_version"],
@@ -775,10 +776,14 @@ def doctor(cfg):
         status=harness.audit_installation()
         print("Official DeepSeek Harness plugin audit:",json.dumps(status))
         print("Cordis tool bridge: NOT YET WIRED (Issue #58; zero model-facing tools)")
-        harness_ready=bool(cfg["qwen"]["enabled"] and backend["health"]=="ready"
-                           and backend["model"])
-        if not harness_ready:
+        if not (cfg["qwen"]["enabled"] and backend["health"]=="ready"
+                and backend["model"]):
             print("Harness NOT READY: Qwen model/endpoint not available")
+        else:
+            harness.configure_model(backend["model"])
+            harness.require_ready()  # Actual SDK child, not merely a YAML audit.
+            harness_ready=True
+            print("Official Cordis SDK subprocess: READY (restricted/tool-free)")
     except (HarnessUnavailable,OSError,ValueError) as exc:
         print("Harness NOT READY:",str(exc))
     finally:

@@ -177,5 +177,20 @@ class CLIFailFastTests(unittest.TestCase):
             result=main(["--doctor","--config","/does/not/exist.json"])
         self.assertEqual(result,0)
 
+    def test_doctor_rejects_sdk_startup_failure_despite_valid_plugin_audit(self):
+        from alfred.cognitive.harness_sdk import HarnessUnavailable
+        with patch("alfred.app.AudioManager.diagnostics",return_value=[]), \
+             patch("alfred.app.AudioManager.ensure_input",return_value=USB["name"]), \
+             patch("alfred.app.pactl_json",return_value=[]), \
+             patch("alfred.app.LlamaSupervisor") as supervisor, \
+             patch("alfred.app.LocalHarness") as harness:
+            supervisor.return_value.status.return_value={
+                "health":"ready","model":"Qwen3.5-4B"}
+            harness.return_value.audit_installation.return_value={
+                "sdk_version":"0.1.5rc1","runtime_version":"0.1.5rc1"}
+            harness.return_value.require_ready.side_effect=HarnessUnavailable(
+                "Cordis SDK child failed to boot")
+            self.assertEqual(main(["--doctor","--config","/does/not/exist.json"]),2)
+
 if __name__=="__main__":
     unittest.main()
