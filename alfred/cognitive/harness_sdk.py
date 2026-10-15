@@ -21,6 +21,16 @@ import threading
 from urllib.parse import urlsplit
 
 LOG = logging.getLogger(__name__)
+
+
+class HarnessInvalidPlan(ValueError):
+    """An SDK response was received but is not a trustworthy plan.
+
+    This is NOT a transport error: callers must never ask another planner to
+    reinterpret the same actionable request after malformed model output.
+    """
+
+
 SDK_VERSION = "0.1.5rc1"
 # Exact shipped sdk-minimal row IDs from the audited release family. The
 # overlay deliberately disables all model-facing tools and host side effects.
@@ -363,9 +373,9 @@ class LocalHarness:
                               parse_constant=lambda _: (_ for _ in ()).throw(
                                   ValueError("Nonfinite plan field")))
         except (ValueError, TypeError) as exc:
-            raise HarnessUnavailable("Invalid SDK plan") from exc
+            raise HarnessInvalidPlan("Invalid SDK plan") from exc
         if not isinstance(plan, dict) or set(plan) != {"message", "steps", "save_as"}:
-            raise HarnessUnavailable("SDK plan has invalid fields")
+            raise HarnessInvalidPlan("SDK plan has invalid fields")
         # System2.parse_plan is still the authoritative schema and policy check.
         return plan
 
