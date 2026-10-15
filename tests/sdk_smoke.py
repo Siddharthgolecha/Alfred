@@ -103,6 +103,12 @@ class DeepSeekGenuineSdkSmoke(TestCase):
                                        tools=TOOL_SCHEMAS)
                 self.assertEqual(proposed["steps"][0]["tool"], "get_gpu_status")
                 self.assertGreaterEqual(StubHandler.counter, 2)
+                # This checks the *effective wire request* as seen by the fake
+                # model; the fake's canned JSON is NOT a real-Qwen planning test.
+                all_messages=" ".join(json.dumps(req.get("messages",[]))
+                                      for req in StubHandler.inputs)
+                self.assertIn("MAY PROPOSE", all_messages)
+                self.assertIn("NOT execution or approval", all_messages)
                 self.assertFalse(any(request.get("tools") for request in StubHandler.inputs),
                                  "Cordis unexpectedly enabled model-facing tools")
                 self.assertTrue(all("localhost" not in str(request.get("tools", "")) for request in StubHandler.inputs))

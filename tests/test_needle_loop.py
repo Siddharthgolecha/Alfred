@@ -297,7 +297,11 @@ class AppWiringTests(unittest.TestCase):
         cfg=load_config()
         cfg["runtime"]["database"]=str(Path(self.tmp.name)/"alfred.db")
         cfg["runtime"]["logs"]=self.tmp.name
-        cfg["runtime"]["needle_loop_enabled"]=True  # Explicit opt-in for new feature.
+        cfg["runtime"]["needle_loop_enabled"]=True
+        # These tests isolate the bounded native loop, without independent
+        # context/SDK escalation behavior exercised in other suites.
+        cfg["runtime"]["context_enabled"]=False
+        cfg["runtime"]["escalation_enabled"]=False
         self.app=Alfred(cfg,load_models=False)
         self.app.cactus=Mock()
         self.app.feedback.tell=Mock()
@@ -314,8 +318,8 @@ class AppWiringTests(unittest.TestCase):
                 self.app.handle_text("Get system status")
                 self.app.system2.direct.assert_not_called()
 
-    def test_opt_in_default_off_preserves_literal_user_text(self):
-        self.assertFalse(load_config()["runtime"]["needle_loop_enabled"])
+    def test_explicit_needle_loop_disable_preserves_literal_user_text(self):
+        self.assertTrue(load_config()["runtime"]["needle_loop_enabled"])
         self.app.cfg["runtime"]["needle_loop_enabled"] = False
         self.app.cactus.route.return_value=call()
         self.app.system2.direct=Mock(return_value=result({"available":True,

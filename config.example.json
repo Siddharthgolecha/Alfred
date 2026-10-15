@@ -45,6 +45,11 @@
     "approval_ttl_seconds": 180,
     "tts": false,
     "voice_alerts": false,
-    "telemetry": false
+    "telemetry": false,
+    "needle_loop_enabled": true,
+    "escalation_enabled": true,
+    "context_enabled": true,
+    "resource_admission_enabled": true,
+    "harness_timeout_seconds": 45
   }
 }

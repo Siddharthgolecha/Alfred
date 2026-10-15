@@ -23,6 +23,6 @@
   "profile": "sdk-minimal",
   "patch": "alfred/cognitive/alfred_safe.patch.yml",
   "network": "loopback-only",
-  "default_enabled": false,
-  "notes": "Source revision is an audit reference, not the Python wheel source commit. Treat the PyPI wheel digests as authoritative bytes. No claim that aarch64 hardware was tested."
+  "default_enabled": true,
+  "notes": "Source revision is an audit reference, not the Python wheel source commit. Treat the PyPI wheel digests as authoritative bytes. Verify wheel bytes before install; installed distributions and real plugin graph are audited at startup. No aarch64 hardware claim."
 }

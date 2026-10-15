@@ -82,6 +82,20 @@ class EnvelopeTests(unittest.TestCase):
                          {"tool":"list_services","args":{}}])
 
 
+def _fake_harness_for_qwen(qwen):
+    """Test-only SDK-shaped plan stub; never used by production execution."""
+    client=Mock()
+    def propose(request, session_id, *, tools, allowed_services=(),
+                named_tasks=(), handoff=None, **_):
+        kwargs={"allowed_services":allowed_services,
+                "named_tasks":named_tasks}
+        if handoff is not None:
+            kwargs["handoff"]=handoff
+        return qwen.complete(request,tools,**kwargs)
+    client.plan.side_effect=propose
+    return client
+
+
 class ContinuationTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
@@ -94,6 +108,12 @@ class ContinuationTests(unittest.TestCase):
         self.qwen.cfg={"enabled":True}
         self.qwen.complete.return_value=plan()
         self.sys=System2(self.qwen,self.tools,self.store,{"max_plan_steps":5})
+        # The SDK mock is an explicit test dependency; no production legacy
+        # fallback is re-enabled by these structural continuation tests.
+        self.stub_harness=_fake_harness_for_qwen(self.qwen)
+        original=self.sys.continue_handoff
+        self.sys.continue_handoff=lambda h, **kw: original(
+            h, harness=kw.pop("harness",self.stub_harness), **kw)
         self.h=lambda **opts: build_handoff(
             SID,TID,"Check GPU then status","incomplete",
             calls=[READ],results=[OBS],max_tools=3,**opts)
@@ -244,16 +264,17 @@ class ContinuationTests(unittest.TestCase):
         self.assertNotIn("secret-token",str(result))
         self.assertEqual(self.sys.approvals.pending(),[])
 
-    def test_runtime_model_fallback_before_any_execution(self):
+    def test_runtime_sdk_failure_does_not_fallback_or_execute(self):
         bad=Mock()
         from alfred.cognitive.harness_sdk import HarnessUnavailable
         bad.plan.side_effect=HarnessUnavailable("sdk crashed before proposal")
         self.qwen.complete.return_value=plan([{"tool":"get_system_status","args":{}}])
         with patch.object(self.tools,"run_plan",return_value=[{"uptime_seconds":3}]) as run:
             out=self.sys.continue_handoff(self.h(),harness=bad)
-        self.assertEqual(run.call_count,1)
-        self.assertEqual(out["results"][1]["uptime_seconds"],3)
-        self.qwen.complete.assert_called_once()
+        run.assert_not_called()
+        self.assertEqual(out["status"],"incomplete")
+        self.assertEqual(len(out["results"]),1)
+        self.qwen.complete.assert_not_called()
 
     def test_malformed_sdk_plans_are_not_replanned_or_executed(self):
         from alfred.cognitive.harness_sdk import LocalHarness, HarnessInvalidPlan
@@ -334,10 +355,13 @@ class AppTraceTests(unittest.TestCase):
         cfg["runtime"]["database"]=str(Path(self.tmp.name)/"alfred.db")
         cfg["runtime"]["logs"]=self.tmp.name
         cfg["runtime"]["escalation_enabled"]=True
+        cfg["runtime"]["needle_loop_enabled"]=False
+        cfg["runtime"]["context_enabled"]=False
         self.app=Alfred(cfg,load_models=False)
         self.app.feedback.tell=Mock()
         self.app.cactus=Mock()
         self.app.system2.qwen.complete=Mock(return_value=plan(message="Answer without tools"))
+        self.app.harness=_fake_harness_for_qwen(self.app.system2.qwen)
         self.app.system2.qwen.cfg["enabled"]=True
         self.app.supervisor.ensure_running=Mock()
 
@@ -654,6 +678,7 @@ class EscalationContextIntegrationTests(unittest.TestCase):
         self.app.feedback.tell=Mock()
         self.app.supervisor.ensure_running=Mock()
         self.app.system2.qwen.complete=Mock()
+        self.app.harness=_fake_harness_for_qwen(self.app.system2.qwen)
 
     def tearDown(self):
         self.app.close()
