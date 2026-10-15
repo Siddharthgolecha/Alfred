@@ -12,6 +12,7 @@ import threading
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from alfred.backends import ModelSupervisor
 from alfred.config import load_config
@@ -82,6 +83,69 @@ class ShutdownTests(unittest.TestCase):
         self.child.send_signal(signal.SIGTERM)
         self.assertEqual(self.child.wait(timeout=8), 0)
         self.assertFalse(path.exists())
+
+    def test_sigint_during_socket_entry_removes_just_created_socket(self):
+        # Deterministically simulate a signal after bind(), before __enter__
+        # has returned to the with statement's exception cleanup.
+        path = control_dir(self.logdir) / "scheduler.sock"
+        with patch("alfred.lifecycle.threading.Thread.start",
+                   side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                with ShutdownSocket(self.logdir, "scheduler"):
+                    self.fail("Interrupted entry should not yield")
+        self.assertFalse(path.exists())
+        # The orphan cleanup must not prevent a subsequent safe start.
+        with ShutdownSocket(self.logdir,"scheduler"):
+            self.assertTrue(path.exists())
+        self.assertFalse(path.exists())
+
+    def test_bind_succeeded_then_keyboard_interrupt_cleans_only_owned_socket(self):
+        import socket
+        orphan=control_dir(self.logdir)/"scheduler.sock"
+        # Keep an unrelated live listener to verify cleanup cannot unlink it.
+        with ShutdownSocket(self.logdir,"voice") as other:
+            other_inode=other.path.stat().st_ino
+            original_bind=socket.socket.bind
+            def bound_then_interrupt(sock,address):
+                original_bind(sock,address)
+                raise KeyboardInterrupt("simulated signal immediately after bind")
+            with patch.object(socket.socket,"bind",bound_then_interrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    with ShutdownSocket(self.logdir,"scheduler"):
+                        self.fail("entry must not yield")
+            self.assertFalse(orphan.exists())
+            self.assertTrue(other.path.exists())
+            self.assertEqual(other.path.stat().st_ino,other_inode)
+        with ShutdownSocket(self.logdir,"scheduler"):
+            self.assertTrue(orphan.exists())
+        self.assertFalse(orphan.exists())
+
+    def test_bind_interruption_does_not_delete_replacement_listener(self):
+        import socket
+        path=control_dir(self.logdir)/"scheduler.sock"
+        replacement=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+        original_bind=socket.socket.bind
+        def bind_then_replace(sock,address):
+            original_bind(sock,address)
+            os.unlink(address)
+            original_bind(replacement,address)
+            replacement.listen(1)
+            raise KeyboardInterrupt("replacement bound after interrupted bind")
+        try:
+            with patch.object(socket.socket,"bind",bind_then_replace):
+                with self.assertRaises(KeyboardInterrupt):
+                    with ShutdownSocket(self.logdir,"scheduler"):
+                        self.fail("entry should not yield")
+            self.assertTrue(path.exists())
+            inode=path.stat().st_ino
+            self.assertEqual(inode,path.stat().st_ino)
+            with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
+                client.settimeout(1)
+                client.connect(str(path))
+        finally:
+            replacement.close()
+            if path.exists():
+                path.unlink()
 
     def test_single_instance_and_private_socket(self):
         with ShutdownSocket(self.logdir, "voice") as active:
