@@ -390,21 +390,55 @@ class MeetingPolicyTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.adapter.evidence(p)
         # No model or stale permit can trigger cleanup, including after restart.
-        recovered=OfflineMeetingAdapter(
-            self.device,journal=MeetingCleanupJournal(self.store),
-            clock=lambda:self.now[0])
+        # Reopen the actual on-disk journal with a second independent Store.
+        # Recovery must not depend on the original adapter or SQLite handle.
+        reopened=Store(Path(self.tmp.name)/"meetings.sqlite")
+        try:
+            recovered=OfflineMeetingAdapter(
+                self.device,journal=MeetingCleanupJournal(reopened),
+                clock=lambda:self.now[0])
+            with self.assertRaises(PermissionError):
+                recovered.recover_cleanup(session_id=SID,owner="local")
+            self.assertEqual(recovered.recover_cleanup(
+                session_id=SID2,owner="local",local_authorized=True),[])
+            self.assertEqual(recovered.recover_cleanup(
+                session_id=SID,owner="another_user",local_authorized=True),[])
+            self.assertEqual(recovered.recover_cleanup(
+                session_id=SID,owner="local",local_authorized=True),
+                [{"meeting_id":MEETING,"state":"purged"}])
+            self.assertEqual(self.journal.pending(SID,"local"),[])
+            self.assertEqual(self.device.discard_meeting.call_count,2)
+            self.assertEqual(recovered.recover_cleanup(
+                session_id=SID,owner="local",local_authorized=True),[])
+        finally:
+            reopened.db.close()
+
+    def test_stop_failure_keeps_durable_stopping_recovery(self):
+        self.start(retention=False)
+        p=self.grant()
+        original=self.device.stop_recording
+        self.device.stop_recording=Mock(side_effect=[OSError("transient"),None])
+        with self.assertRaises(OSError):
+            self.adapter.stop(p)
+        self.assertEqual(self.journal.pending(SID,"local")[0]["state"],"stopping")
         with self.assertRaises(PermissionError):
-            recovered.recover_cleanup(session_id=SID,owner="local")
-        with self.assertRaises(PermissionError):
-            recovered.recover_cleanup(session_id=SID2,owner="local",
-                                       local_authorized=False)
-        self.assertEqual(recovered.recover_cleanup(
+            self.adapter.evidence(p)
+        new=OfflineMeetingAdapter(self.device,journal=MeetingCleanupJournal(self.store))
+        self.assertEqual(new.recover_cleanup(
             session_id=SID,owner="local",local_authorized=True),
             [{"meeting_id":MEETING,"state":"purged"}])
         self.assertEqual(self.journal.pending(SID,"local"),[])
-        self.assertEqual(self.device.discard_meeting.call_count,2)
-        self.assertEqual(recovered.recover_cleanup(
-            session_id=SID,owner="local",local_authorized=True),[])
+        self.assertEqual(self.device.stop_recording.call_count,2)
+
+    def test_start_provider_raises_after_side_effect_and_rollback_remains_safe(self):
+        def start_after_effect(**kw):
+            self.device.active_operations.add(kw["operation_id"])
+            raise OSError("fake native recorder failed after opening stream")
+        self.device.start_recording=start_after_effect
+        with self.assertRaises(OSError):
+            self.start()
+        self.assertEqual(self.device.active_operations,set())
+        self.assertEqual(self.journal.pending(SID,"local"),[])
 
     def test_invalid_returned_meeting_id_rolls_back_using_transaction_token(self):
         self.device.next_id="../not-a-meeting"
