@@ -198,7 +198,7 @@ class Alfred:
         if (self.context.enabled and
                 re.fullmatch(r"(?:clear|forget) (?:this|current) session"
                              r"(?: context)?[.!?]*",text,re.I)):
-            self.context.clear_session(task.session_id)
+            self.context.clear_session(task.session_id,task_id=task.task_id)
             self.needle_slots.clear(task.session_id)
             self.sessions.append(task.task_id,Decision("local","direct",0))
             self.sessions.append(task.task_id,Completion("completed","no_action"))
@@ -209,9 +209,11 @@ class Alfred:
         from .cognitive.needle_loop import PRONOUN, GPU_TEMP
         routed_text = text
         if self.context.enabled:
-            self.context.invalidate_unrelated(self.session_id,text)
+            self.context.invalidate_unrelated(self.session_id,text,
+                                              task_id=task.task_id)
             try:
-                routed_text=self.context.resolve(self.session_id,text)
+                routed_text=self.context.resolve(self.session_id,text,
+                                                 task_id=task.task_id)
             except ContextUnavailable as exc:
                 self.sessions.append(task.task_id,Completion("rejected","unsafe_route"))
                 self.feedback.tell(str(exc))
