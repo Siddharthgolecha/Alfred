@@ -108,6 +108,7 @@ class ContextManager:
         self._lock=threading.RLock()
         self._slots={}
         self._tasks={}
+        self._task_scopes={}  # (session_id,task_id) -> immutable original scope
         self._facts={}  # scope -> key -> tagged value (nonpersistent only)
         if persist_facts:
             self._protect_db()
@@ -154,7 +155,12 @@ class ContextManager:
         if not self.enabled:
             return
         with self._lock:
-            self._tasks[(self._key(session_id),task_id)]=[]
+            scope=self._key(session_id)
+            identity=(session_id,task_id)
+            if identity in self._task_scopes:
+                raise ValueError("Task already started in a context scope")
+            self._task_scopes[identity]=scope
+            self._tasks[(scope,task_id)]=[]
 
     def observe(self, session_id, task_id, explicit_text, tool, output,
                 *, confidence=1.0):
@@ -181,10 +187,12 @@ class ContextManager:
         now=float(self.clock())
         if not math.isfinite(now):
             raise ValueError("Invalid clock")
-        key=self._key(session_id)
         with self._lock:
+            key=self._key(session_id)
             task_key=(key,task_id)
-            if task_key not in self._tasks:
+            # An owner/mode switch cannot reassign a running task or write
+            # observations across scopes. Cleanup retains the original key.
+            if self._task_scopes.get((session_id,task_id))!=key or task_key not in self._tasks:
                 return False
             if len(self._tasks[task_key])<MAX_TASK_OBSERVATIONS:
                 self._tasks[task_key].append({
@@ -209,7 +217,8 @@ class ContextManager:
         now=float(self.clock())
         with self._lock:
             key=self._key(session_id)
-            if (key,task_id) not in self._tasks:
+            if (self._task_scopes.get((session_id,task_id))!=key or
+                    (key,task_id) not in self._tasks):
                 return False
             self._slots.setdefault(key,{})["active_workflow"]=Slot(
                 "active_workflow",{"registered":True},"observed",1.0,
@@ -260,7 +269,9 @@ class ContextManager:
         if not self.enabled:
             return
         with self._lock:
-            self._tasks.pop((self._key(session_id),task_id),None)
+            key=self._task_scopes.pop((session_id,task_id),None)
+            if key is not None:
+                self._tasks.pop((key,task_id),None)
 
     def _validate_fact(self, key, value):
         if (type(key) is not str or not FACT_KEY.fullmatch(key)
@@ -276,12 +287,18 @@ class ContextManager:
             raise PermissionError("Only an explicitly approved local action can retain facts")
         key,value=self._validate_fact(key,value)
         with self._lock:
-            existing=self.list_facts()
-            if key not in existing and len(existing)>=MAX_FACTS:
-                raise ValueError("Persistent fact budget reached")
             now=int(self.clock())
             if self.persist_facts:
                 with self.store.lock,self.store.db:
+                    # BEGIN IMMEDIATE serializes all writer connections before
+                    # count+insert: two CLIs cannot each create an eighth fact.
+                    self.store.db.execute("BEGIN IMMEDIATE")
+                    rows=self.store.db.execute(
+                        "SELECT key FROM context_approved_facts WHERE owner=? AND mode=?",
+                        (self.owner,self.mode)).fetchall()
+                    existing={r["key"] for r in rows}
+                    if key not in existing and len(existing)>=MAX_FACTS:
+                        raise ValueError("Persistent fact budget reached")
                     self.store.db.execute(
                         "INSERT INTO context_approved_facts "
                         "(owner,mode,key,value,provenance,saved_at) VALUES(?,?,?,?,?,?) "
@@ -289,7 +306,10 @@ class ContextManager:
                         "value=excluded.value,saved_at=excluded.saved_at",
                         (self.owner,self.mode,key,value,"user_approved",now))
             else:
-                self._facts.setdefault((self.owner,self.mode),{})[key]={
+                existing=self._facts.setdefault((self.owner,self.mode),{})
+                if key not in existing and len(existing)>=MAX_FACTS:
+                    raise ValueError("Persistent fact budget reached")
+                existing[key]={
                     "value":value,"provenance":"user_approved","saved_at":now}
 
     def list_facts(self):
@@ -300,10 +320,10 @@ class ContextManager:
                 with self.store.lock:
                     rows=self.store.db.execute(
                         "SELECT key,value,provenance,saved_at FROM context_approved_facts "
-                        "WHERE owner=? AND mode=? ORDER BY key LIMIT ?",
-                        (self.owner,self.mode,MAX_FACTS+1)).fetchall()
+                        "WHERE owner=? AND mode=? ORDER BY key",
+                        (self.owner,self.mode)).fetchall()
                 return {r["key"]:{"value":r["value"],"provenance":r["provenance"],
-                                   "saved_at":r["saved_at"]} for r in rows[:MAX_FACTS]}
+                                   "saved_at":r["saved_at"]} for r in rows}
             return dict(self._facts.get((self.owner,self.mode),{}))
 
     def clear_facts(self, key=None, *, local_approval=False):
@@ -336,6 +356,9 @@ class ContextManager:
             for item in list(self._tasks):
                 if item[0]==key:
                     del self._tasks[item]
+            for identity,task_scope in list(self._task_scopes.items()):
+                if task_scope==key:
+                    del self._task_scopes[identity]
 
     def compact(self, session_id, task_id=None, *, for_needle=False):
         """Deterministic minimum-first packet, no model summary/authority."""
