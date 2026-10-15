@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass
 
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, validate_plan
+from .models import QwenPlanResponseError
 
 LOG = logging.getLogger(__name__)
 
@@ -175,6 +176,17 @@ class System2:
         results=self.tools.run_plan(steps)
         return {"message":message or "Completed","results":results}
 
+    @staticmethod
+    def _incomplete_plan():
+        # Explicit failure metadata prevents a failed inference from being
+        # recorded as a successful "no action" completion in the task ledger.
+        return {"status": "incomplete", "error": "invalid_plan",
+                "message": (
+                    "I couldn't interpret that request as a valid plan, so no "
+                    "actions were taken or scheduled. Please try again with a "
+                    "specific action and time or interval."
+                ), "results": []}
+
     def continue_handoff(self, handoff, *, harness=None, supervisor=None):
         """Continue one trusted, already-authorized task, never replay its tools.
 
@@ -236,20 +248,30 @@ class System2:
                     allowed_services=self.tools.services,
                     named_tasks=self.tools.tasks.keys(), handoff=handoff)
         except HarnessInvalidPlan:
-            # A completed but malformed SDK proposal is a hard rejection.
-            # Do not give an action-bearing request another planning attempt.
+            # Never give malformed Harness output another model attempt.
             raise
+        except QwenPlanResponseError as exc:
+            LOG.warning("Qwen handoff plan invalid: %s", exc)
+            return {**self._incomplete_plan(), "results":completed,
+                    "partial":bool(completed)}
         except (OSError, ValueError, RuntimeError, TimeoutError, ConnectionError):
             return {"status":"incomplete",
                     "message":"Local reasoner unavailable; no follow-up action executed.",
                     "results":completed, "partial":bool(completed)}
         # Never catch validation/execution failures as a signal to re-plan:
         # once delegated tool execution begins it cannot safely be replayed.
-        message, steps, save_as = parse_plan(
-            plan, handoff.request, self.tools, self.cfg.get("max_plan_steps",5))
-        handoff.reconcile(steps)
-        if not handoff.allow_actions and save_as:
-            raise PermissionError("Read-only handoff cannot save a workflow")
+        try:
+            message, steps, save_as = parse_plan(
+                plan, handoff.request, self.tools, self.cfg.get("max_plan_steps",5))
+            handoff.reconcile(steps)
+            if not handoff.allow_actions and save_as:
+                raise PermissionError("Read-only handoff cannot save a workflow")
+        except (ValueError, PermissionError) as exc:
+            # Reject unknown tools, duplicates, replay and privilege escalation;
+            # never replan or lose previously completed read-only telemetry.
+            LOG.warning("Qwen handoff rejected before execution: %s", exc)
+            return {**self._incomplete_plan(), "results":completed,
+                    "partial":bool(completed)}
         result = self.execute_or_stage(
             steps, message, save_as, allow_actions=handoff.allow_actions)
         result["handoff"] = {"version":handoff.version, "session_id":handoff.session_id,
@@ -274,11 +296,25 @@ class System2:
         # Tool schemas, not just tool names, are provided to the planner.
         tool_catalog=[s for s in TOOL_SCHEMAS if s["name"] not in
                       ("delegate_to_reasoner","run_workflow")]
-        plan=self.qwen.complete(utterance, tool_catalog,
-                                allowed_services=self.tools.services,
-                                named_tasks=self.tools.tasks.keys())
-        message,steps,save_as=parse_plan(plan,utterance,self.tools,
-                                        self.cfg.get("max_plan_steps",5))
+        try:
+            plan=self.qwen.complete(utterance, tool_catalog,
+                                    allowed_services=self.tools.services,
+                                    named_tasks=self.tools.tasks.keys())
+        except QwenPlanResponseError as exc:
+            # Invalid model output is not a plan. No tool authorization is
+            # retried or inferred from the failed completion.
+            LOG.warning("System 2 plan unavailable: %s", exc)
+            return self._incomplete_plan()
+        try:
+            message,steps,save_as=parse_plan(plan,utterance,self.tools,
+                                            self.cfg.get("max_plan_steps",5))
+        except (ValueError, PermissionError) as exc:
+            # Semantic failures (unknown tools, unapproved services, invalid
+            # typed arguments) MUST NOT be regenerated into new permissions.
+            # This is deliberately before execute_or_stage: never intercept a
+            # partially executed plan and treat it as retryable.
+            LOG.warning("System 2 plan rejected by preflight: %s", exc)
+            return self._incomplete_plan()
         outcome = self.execute_or_stage(steps,message,save_as,allow_actions)
         # Only a completed, read-only plan may generate a second explanation.
         # No output from this second inference is interpreted as a tool call.

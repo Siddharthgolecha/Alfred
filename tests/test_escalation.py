@@ -104,8 +104,10 @@ class ContinuationTests(unittest.TestCase):
     def test_observed_tool_never_reexecuted(self):
         self.qwen.complete.return_value=plan([{"tool":"get_gpu_status","args":{}}])
         with patch.object(self.tools,"run_plan") as execute:
-            with self.assertRaises(ValueError):
-                self.sys.continue_handoff(self.h())
+            rejected=self.sys.continue_handoff(self.h())
+            self.assertEqual(rejected["error"],"invalid_plan")
+            self.assertTrue(rejected["partial"])
+            self.assertEqual(len(rejected["results"]),1)
             execute.assert_not_called()
         self.assertEqual(self.sys.approvals.pending(),[])
 
@@ -148,9 +150,41 @@ class ContinuationTests(unittest.TestCase):
             {"tool":"list_reminders","args":{}},
             {"tool":"list_schedules","args":{}}])
         with patch.object(self.tools,"run_plan") as run:
-            with self.assertRaisesRegex(ValueError,"remaining tool budget"):
-                self.sys.continue_handoff(h)
+            rejected=self.sys.continue_handoff(h)
+            self.assertEqual(rejected["error"],"invalid_plan")
+            self.assertEqual(len(rejected["results"]),3)
             run.assert_not_called()
+
+    def test_hardened_qwen_handoff_rejects_invalid_model_or_semantic_plan(self):
+        from alfred.models import QwenPlanResponseError, Qwen
+        h=self.h()
+        for allow_actions in (False,True):
+            with self.subTest(actionable=allow_actions):
+                current=(build_handoff(SID,TID,"Check GPU then diagnose",
+                         "incomplete",calls=[READ],results=[OBS],
+                         allow_actions=allow_actions,max_tools=3))
+                for proposal in (QwenPlanResponseError("malformed JSON"),
+                                 plan([{"tool":"unlisted_tool","args":{}}])):
+                    self.qwen.complete.reset_mock(side_effect=True,return_value=True)
+                    if isinstance(proposal,Exception):
+                        self.qwen.complete.side_effect=proposal
+                    else:
+                        self.qwen.complete.return_value=proposal
+                    with (patch.object(self.tools,"run_plan") as run,
+                          patch.object(self.sys.approvals,"propose") as stage):
+                        result=self.sys.continue_handoff(current)
+                        self.assertEqual(result["status"],"incomplete")
+                        self.assertEqual(result["error"],"invalid_plan")
+                        self.assertEqual(len(result["results"]),1)
+                        self.qwen.complete.assert_called_once()
+                        run.assert_not_called()
+                        stage.assert_not_called()
+                self.qwen.complete.side_effect=None
+        # Actual #34 strict parsing is used even when handoff context exists.
+        with self.assertRaises(QwenPlanResponseError):
+            Qwen._parse_plan_response({"choices":[{"message":{"content":
+                '{"message":"ok","steps":[],"steps":[],"save_as":null}'},
+                "finish_reason":"stop"}]})
 
     def test_conditional_skip_is_not_misreported_as_executed(self):
         self.qwen.complete.return_value=plan([
@@ -178,8 +212,9 @@ class ContinuationTests(unittest.TestCase):
     def test_readonly_handoff_cannot_elevate_or_queue_approval(self):
         self.qwen.complete.return_value=plan([{"tool":"run_named_task","args":{"name":"safe"}}])
         with patch.object(self.tools,"run_plan") as run:
-            with self.assertRaises(PermissionError):
-                self.sys.continue_handoff(self.h())
+            rejected=self.sys.continue_handoff(self.h())
+            self.assertEqual(rejected["error"],"invalid_plan")
+            self.assertEqual(len(rejected["results"]),1)
             run.assert_not_called()
         self.assertEqual(self.sys.approvals.pending(),[])
 
@@ -379,6 +414,47 @@ class AppTraceTests(unittest.TestCase):
         self.assertEqual(self.app.sessions.list_tasks(self.app.session_id)[0]["state"],
                          "failed")
         self.assertIn("incomplete",self.app.feedback.tell.call_args.args[0])
+
+    def test_low_total_budget_retains_actual_needle_read_prefix_without_replay(self):
+        self.app.cfg["runtime"]["needle_loop_enabled"]=True
+        self.app.cfg["runtime"]["needle_max_decisions"]=3
+        self.app.cfg["runtime"]["needle_max_tools"]=3
+        self.app.cactus.route.return_value={
+            "confidence":.99,"function_calls":[READ]}
+        self.app.cactus.route_feedback.side_effect=[
+            {"confidence":.99,"function_calls":[
+                {"name":"get_system_status","arguments":{}}]},
+            {"confidence":.99,"function_calls":[
+                {"name":"list_services","arguments":{}}]}]
+        observations=[{"available":True,"gpu_temp_c":63.0},
+                      {"uptime_seconds":100}, {}]
+        self.app.system2.direct=Mock(side_effect=[
+            {"message":"read","results":[value]} for value in observations])
+        for maximum in (1,2):
+            with self.subTest(max_plan_steps=maximum):
+                self.app.cfg["runtime"]["max_plan_steps"]=maximum
+                self.app.system2.cfg["max_plan_steps"]=maximum
+                self.app.cactus.route_feedback.reset_mock(side_effect=True)
+                self.app.cactus.route_feedback.side_effect=[
+                    {"confidence":.99,"function_calls":[
+                        {"name":"get_system_status","arguments":{}}]},
+                    {"confidence":.99,"function_calls":[
+                        {"name":"list_services","arguments":{}}]}]
+                self.app.system2.direct.reset_mock(side_effect=True)
+                self.app.system2.direct.side_effect=[
+                    {"message":"read","results":[value]} for value in observations]
+                self.app.handle_text("Check GPU temperature then system status then services")
+                result=json.loads(self.app.feedback.tell.call_args.args[0])
+                self.assertEqual(result["status"],"incomplete")
+                self.assertEqual(result["halt_reason"],"handoff_budget_exhausted")
+                self.assertEqual(result["results"],observations)
+                self.assertEqual(self.app.system2.direct.call_count,3)
+                self.app.system2.qwen.complete.assert_not_called()
+                self.assertEqual(self.app.system2.approvals.pending(),[])
+                current=self.app.sessions.list_tasks(self.app.session_id)[-1]
+                self.assertEqual(current["state"],"failed")
+                self.assertEqual(len([event for event in self.app.sessions.events(current["id"])
+                                      if event.kind=="observation"]),3)
 
     def test_native_feedback_crash_keeps_completed_read_and_reports_incomplete(self):
         self.app.cfg["runtime"]["needle_loop_enabled"]=True

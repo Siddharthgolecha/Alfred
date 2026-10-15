@@ -338,6 +338,20 @@ class Alfred:
                     used_decisions=sum(1 for event in self.sessions.events(task.task_id)
                                        if isinstance(event, Decision)
                                        and event.engine == "needle3")
+                    # max_plan_steps can be lower than Needle's independent
+                    # native read budget. Already executed reads may not fit
+                    # a version-1 handoff; do not hide/replay them in an error.
+                    total_budget=min(self.cfg["runtime"]["max_plan_steps"], MAX_HANDOFF_TOOLS)
+                    if len(completed)>total_budget:
+                        self.sessions.append(task.task_id, Completion("failed", "exception"))
+                        self.feedback.tell(json.dumps({
+                            "status":"incomplete", "partial":True,
+                            "halt_reason":"handoff_budget_exhausted",
+                            "message":"Previously completed read-only checks are preserved. "
+                                      "No Qwen continuation or repeated tool call was allowed.",
+                            "results":completed,
+                        },default=str)[:1800])
+                        return
                     outcome=self._handoff(
                         task,text,"incomplete",calls=calls,results=completed,
                         allow_actions=False,used_decisions=used_decisions)
@@ -408,7 +422,8 @@ class Alfred:
                 self.sessions.append(task.task_id,
                                      Completion("failed" if incomplete or outcome == "disabled"
                                                 else "completed",
-                                                "exception" if incomplete else outcome))
+                                                ("invalid_plan" if result.get("error")=="invalid_plan"
+                                                 else "exception") if incomplete else outcome))
                 self.feedback.tell(json.dumps(result,default=str)[:1800])
         except Exception as exc:
             LOG.exception("Command failed")
@@ -747,7 +762,10 @@ def _main(argv=None):
                                 Escalation("local", "qwen", "explicit_reason"))
             try:
                 result = app.reason(args.reason)
-                if "approval" in result:
+                if result.get("status") == "incomplete":
+                    app.sessions.append(task.task_id,
+                                        Completion("failed", "invalid_plan"))
+                elif "approval" in result:
                     app.sessions.append(task.task_id,
                                         ApprovalReference(result["approval"]["approval_id"]))
                     app.sessions.append(task.task_id,
@@ -762,7 +780,8 @@ def _main(argv=None):
                 raise
         finally:
             app.close()
-        return 0
+        # Unsuccessful planning must propagate a failing CLI exit code.
+        return 1 if result.get("status") == "incomplete" else 0
     if not args.text:
         # Fail before loading native Whistle/Needle models or starting services.
         # Merely seeing a Pulse "Built-in Audio" entry is not enough.

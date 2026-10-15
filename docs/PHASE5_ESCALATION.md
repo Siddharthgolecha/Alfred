@@ -92,7 +92,12 @@ completed-plus-proposed tool-call budget at **five**:
 slots from this same total; Qwen receives only the remainder. For example,
 the default `needle_max_tools=3` permits three Needle reads followed by at
 most two additional Qwen reads when `max_plan_steps>=5`. Configured values
-6–10 never invalidate a handoff or extend the v1 protocol cap. The
+6–10 never invalidate a handoff or extend the v1 protocol cap. A smaller
+`max_plan_steps` (such as 1 or 2) might coexist with already completed
+Needle reads from multiple individually valid calls. If the completed prefix
+exceeds the configured total, Alfred reports the original observations as
+`status=incomplete` / `handoff_budget_exhausted` **without invoking Qwen,
+replaying a read, or losing the task history**. The
 `needle_max_decisions=3` limit is a separate bound on native Needle
 decision/feedback turns, not on Qwen reasoning turns. A lower configured
 total cannot be silently enlarged to replay already executed reads;
