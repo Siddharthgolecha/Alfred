@@ -321,10 +321,22 @@ class OfflineMeetingAdapter:
         with self._lock:
             meeting=self._meetings[permit.meeting_id]
             meeting["active"]=False
-            if not meeting["retention"]:
-                self._permits.pop((permit.task_id,permit.meeting_id),None)
+            retained=meeting["retention"]
+            if not retained:
+                for key in tuple(self._permits):
+                    if key[1]==permit.meeting_id:
+                        del self._permits[key]
+                        self._validated_minutes.pop(key,None)
+                for key in tuple(self._artifacts):
+                    if key[0]==permit.meeting_id:
+                        del self._artifacts[key]
+        if not retained:
+            # Do not claim nonretention without an actual device discard.
+            purge=getattr(self._provider,"discard_meeting",None)
+            if not callable(purge) or purge(permit.meeting_id) is not True:
+                raise RuntimeError("Recorder stopped, but secure meeting discard unverified")
         return {"meeting_id":permit.meeting_id,"state":"stopped",
-                "retained":meeting["retention"]}
+                "retained":retained}
 
     def evidence(self, permit):
         self._verify(permit,skill="transcript_retrieval")
@@ -344,8 +356,12 @@ class OfflineMeetingAdapter:
         digest=hashlib.sha256(json.dumps(
             checked,sort_keys=True,separators=(",",":"),ensure_ascii=True
         ).encode("utf-8")).hexdigest()
+        packet_digest=hashlib.sha256(json.dumps(
+            packet,sort_keys=True,separators=(",",":"),ensure_ascii=True
+        ).encode("utf-8")).hexdigest()
         with self._lock:
-            self._validated_minutes[(permit.task_id,permit.meeting_id)]=digest
+            self._validated_minutes[(permit.task_id,permit.meeting_id)]=(
+                digest,packet_digest)
         return checked
 
     def export_pdf(self, permit, minutes):
@@ -356,9 +372,13 @@ class OfflineMeetingAdapter:
         digest=hashlib.sha256(json.dumps(
             minutes,sort_keys=True,separators=(",",":"),ensure_ascii=True
         ).encode("utf-8")).hexdigest()
+        packet_digest=hashlib.sha256(json.dumps(
+            packet,sort_keys=True,separators=(",",":"),ensure_ascii=True
+        ).encode("utf-8")).hexdigest()
         with self._lock:
-            if self._validated_minutes.get((permit.task_id,permit.meeting_id))!=digest:
-                raise PermissionError("PDF contents not evidence-validated for this task")
+            if self._validated_minutes.get((permit.task_id,permit.meeting_id))!=(
+                digest,packet_digest):
+                raise PermissionError("PDF contents/evidence not validated for this task")
         # Provider implementation MUST call existing GuardedSSD PDF writer and
         # return an opaque artifact ID, never an arbitrary destination path.
         handle=self._provider.save_pdf(permit.meeting_id,minutes,list(packet))
