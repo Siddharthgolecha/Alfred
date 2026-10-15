@@ -50,8 +50,8 @@ class Contract:
         return {"kind": self.kind, "version": VERSION, **asdict(self)}
 
     def to_json(self):
-        encoded = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"),
-                             ensure_ascii=True, allow_nan=False)
+        from ..validators import to_compact_json
+        encoded = to_compact_json(self.to_dict())
         if len(encoded.encode("utf-8")) > MAX_EVENT_BYTES:
             raise ValueError("Contract exceeds maximum size")
         return encoded

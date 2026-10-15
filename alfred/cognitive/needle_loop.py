@@ -52,8 +52,8 @@ def _arguments(call):
 
 
 def _fingerprint(call):
-    return json.dumps({"name": call["name"], "arguments": _arguments(call)},
-                      sort_keys=True, separators=(",", ":"), allow_nan=False)
+    from ..validators import to_compact_json
+    return to_compact_json({"name": call["name"], "arguments": _arguments(call)})
 
 
 def _bounded_metrics(value):
@@ -288,8 +288,8 @@ class NeedleAgentLoop:
             except ValueError:
                 return self._stop("unsafe", accepted, observed, outputs)
             try:
-                response = self.feedback(json.dumps(feedback, sort_keys=True,
-                                                   separators=(",", ":")))
+                from ..validators import to_compact_json
+                response = self.feedback(to_compact_json(feedback))
             except Exception:
                 # Inference may crash AFTER the read returned. Keep that
                 # observation visible, do not replay or attempt an action.

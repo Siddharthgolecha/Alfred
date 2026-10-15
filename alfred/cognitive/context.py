@@ -415,5 +415,5 @@ class ContextManager:
             return packet
 
     def as_model_json(self, session_id, task_id=None, *, for_needle=False):
-        return json.dumps(self.compact(session_id,task_id,for_needle=for_needle),
-                          sort_keys=True,separators=(",",":"),allow_nan=False)
+        from ..validators import to_compact_json
+        return to_compact_json(self.compact(session_id, task_id, for_needle=for_needle))

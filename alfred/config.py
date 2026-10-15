@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .constants import Limits, Patterns, Timeouts, TTL
+from .validators import validate_bool, validate_int, validate_ttl_seconds
 
 DEFAULT = {
     "audio": {
@@ -133,10 +134,9 @@ def load_config(path=None):
         max_swap_used_mib=ncfg["resource_max_swap_used_mib"],
         max_cpu_load_per_core=ncfg["resource_max_cpu_load_per_core"],
         max_wait_ms=ncfg["resource_max_wait_ms"])
-    if type(ncfg["escalation_enabled"]) is not bool:
-        raise ValueError("escalation_enabled must be a boolean")
-    if type(ncfg["context_enabled"]) is not bool or type(ncfg["context_persistence_enabled"]) is not bool:
-        raise ValueError("context toggles must be booleans")
+    validate_bool(ncfg["escalation_enabled"], "escalation_enabled")
+    validate_bool(ncfg["context_enabled"], "context_enabled")
+    validate_bool(ncfg["context_persistence_enabled"], "context_persistence_enabled")
     if ncfg["context_persistence_enabled"] and not ncfg["context_enabled"]:
         raise ValueError("context_persistence_enabled requires context_enabled")
     if (type(ncfg["context_owner"]) is not str
@@ -144,22 +144,22 @@ def load_config(path=None):
         raise ValueError("Invalid context owner")
     if ncfg["context_mode"] not in ("assistant","meeting"):
         raise ValueError("Invalid context mode")
-    if type(ncfg["context_ttl_seconds"]) is not int or not TTL.CONTEXT_MIN <= ncfg["context_ttl_seconds"] <= TTL.CONTEXT_MAX:
-        raise ValueError(f"context_ttl_seconds must be {TTL.CONTEXT_MIN}..{TTL.CONTEXT_MAX}")
-    if type(ncfg["context_budget_chars"]) is not int or not Limits.CONTEXT_BUDGET_CHARS_MIN <= ncfg["context_budget_chars"] <= Limits.CONTEXT_BUDGET_CHARS_MAX:
+    validate_ttl_seconds(ncfg["context_ttl_seconds"], min_val=TTL.CONTEXT_MIN, max_val=TTL.CONTEXT_MAX, label="context_ttl_seconds")
+    validate_int(ncfg["context_budget_chars"], "context_budget_chars")
+    if not Limits.CONTEXT_BUDGET_CHARS_MIN <= ncfg["context_budget_chars"] <= Limits.CONTEXT_BUDGET_CHARS_MAX:
         raise ValueError(f"context_budget_chars must be {Limits.CONTEXT_BUDGET_CHARS_MIN}..{Limits.CONTEXT_BUDGET_CHARS_MAX}")
-    if type(ncfg["needle_loop_enabled"]) is not bool:
-        raise ValueError("needle_loop_enabled must be a boolean")
-    if type(ncfg["needle_max_decisions"]) is not int or not 1 <= ncfg["needle_max_decisions"] <= Limits.NEEDLE_MAX_DECISIONS:
+    validate_bool(ncfg["needle_loop_enabled"], "needle_loop_enabled")
+    validate_int(ncfg["needle_max_decisions"], "needle_max_decisions")
+    if not 1 <= ncfg["needle_max_decisions"] <= Limits.NEEDLE_MAX_DECISIONS:
         raise ValueError(f"needle_max_decisions must be 1..{Limits.NEEDLE_MAX_DECISIONS}")
-    if type(ncfg["needle_max_tools"]) is not int or not 1 <= ncfg["needle_max_tools"] <= Limits.NEEDLE_MAX_TOOLS:
+    validate_int(ncfg["needle_max_tools"], "needle_max_tools")
+    if not 1 <= ncfg["needle_max_tools"] <= Limits.NEEDLE_MAX_TOOLS:
         raise ValueError(f"needle_max_tools must be 1..{Limits.NEEDLE_MAX_TOOLS}")
-    if type(ncfg["needle_context_ttl_seconds"]) is not int or not TTL.NEEDLE_SLOT_MIN <= ncfg["needle_context_ttl_seconds"] <= TTL.NEEDLE_SLOT_MAX:
-        raise ValueError(f"needle_context_ttl_seconds must be {TTL.NEEDLE_SLOT_MIN}..{TTL.NEEDLE_SLOT_MAX}")
-    if type(cfg["runtime"]["harness_timeout_seconds"]) is not int or not Timeouts.HARNESS_TIMEOUT_MIN <= cfg["runtime"]["harness_timeout_seconds"] <= Timeouts.HARNESS_TIMEOUT_MAX:
+    validate_ttl_seconds(ncfg["needle_context_ttl_seconds"], min_val=TTL.NEEDLE_SLOT_MIN, max_val=TTL.NEEDLE_SLOT_MAX, label="needle_context_ttl_seconds")
+    validate_int(cfg["runtime"]["harness_timeout_seconds"], "harness_timeout_seconds")
+    if not Timeouts.HARNESS_TIMEOUT_MIN <= cfg["runtime"]["harness_timeout_seconds"] <= Timeouts.HARNESS_TIMEOUT_MAX:
         raise ValueError(f"harness_timeout_seconds must be {Timeouts.HARNESS_TIMEOUT_MIN}..{Timeouts.HARNESS_TIMEOUT_MAX}")
-    if type(cfg["runtime"]["cognitive_diagnostics"]) is not bool:
-        raise ValueError("cognitive_diagnostics must be a boolean")
+    validate_bool(cfg["runtime"]["cognitive_diagnostics"], "cognitive_diagnostics")
     if not 0.0 < float(cfg["runtime"]["needle_confidence_floor"]) <= 1.0:
         raise ValueError("needle_confidence_floor must be in (0,1]")
     if not TTL.APPROVAL_MIN <= int(cfg["runtime"]["approval_ttl_seconds"]) <= TTL.APPROVAL_MAX:
