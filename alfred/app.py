@@ -441,14 +441,16 @@ class Alfred:
                 loop_outcome = loop.run(
                     {**response, "function_calls":calls}, permit_feedback=True)
                 calls = list(loop_outcome.accepted_calls)
+                # The loop itself executed these validated read-only calls.
+                # Ingest its aligned post-execution evidence exactly once,
+                # regardless of success, handoff, cancellation or failure.
+                # Qwen's separate VerifiedRead path only covers NEW reads.
+                self._observe_needle_prefix(task, text, loop_outcome)
                 if (self.cfg["runtime"]["escalation_enabled"]
                         and loop_outcome.stop in ("uncertain", "repeated", "partial", "budget")
                         and "approval" not in loop_outcome.result):
-                    # This branch returns early, bypassing the ordinary
-                    # post-tool context ingestion. Commit ONLY the already
-                    # executed, exactly aligned Needle read prefix once,
-                    # regardless of later Qwen success or failure.
-                    self._observe_needle_prefix(task, text, loop_outcome)
+                    # Previously completed Needle reads were observed above
+                    # before any later handoff model is consulted.
                     completed = loop_outcome.result.get("results") or []
                     used_decisions=sum(1 for event in self.sessions.events(task.task_id)
                                        if isinstance(event, Decision)
@@ -471,6 +473,20 @@ class Alfred:
                         task,text,"incomplete",calls=calls,results=completed,
                         allow_actions=False,used_decisions=used_decisions)
                     self._finish_handoff(task, outcome, text)
+                    return
+                if loop_outcome.stop in ("unsafe", "cancelled"):
+                    # The successful read prefix belongs in the response and
+                    # context, but the full task did NOT complete. Never turn
+                    # an unsafe/cancelled follow-up into a Qwen action or a
+                    # ledger Completion(completed, executed).
+                    halted = dict(loop_outcome.result)
+                    halted["status"] = "incomplete"
+                    halted["halt_reason"] = loop_outcome.stop
+                    halted["partial"] = bool(halted.get("results"))
+                    self.sessions.append(task.task_id, Completion(
+                        "rejected" if loop_outcome.stop == "unsafe" else "failed",
+                        "unsafe_route" if loop_outcome.stop == "unsafe" else "shutdown"))
+                    self.feedback.tell(json.dumps(halted, default=str)[:1800])
                     return
                 if (loop_outcome.stop not in ("completed", "protected", "partial")
                         and not loop_outcome.result.get("partial", False)):
