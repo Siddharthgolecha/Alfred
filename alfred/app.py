@@ -404,9 +404,11 @@ class Alfred:
                                 self.session_id, routed_text, "get_gpu_status", item)
                 outcome = ("disabled" if not self.cfg["qwen"]["enabled"] and route != "direct"
                            else "no_action" if not observed else "executed")
+                incomplete = result.get("status") == "incomplete"
                 self.sessions.append(task.task_id,
-                                     Completion("failed" if outcome == "disabled" else "completed",
-                                                outcome))
+                                     Completion("failed" if incomplete or outcome == "disabled"
+                                                else "completed",
+                                                "exception" if incomplete else outcome))
                 self.feedback.tell(json.dumps(result,default=str)[:1800])
         except Exception as exc:
             LOG.exception("Command failed")
