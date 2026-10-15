@@ -477,6 +477,7 @@ class AppWiringTests(unittest.TestCase):
         self.app.cactus.route_feedback.assert_not_called()
 
     def test_failed_followup_preserves_executed_prefix_and_no_replay(self):
+        seen_task_ids=set()
         for final in (call(), call(confidence=.2),
                       call("run_named_task", {"name":"danger"})):
             with self.subTest(final=final):
@@ -488,8 +489,13 @@ class AppWiringTests(unittest.TestCase):
                 self.app.feedback.tell.reset_mock()
                 self.app.handle_text("Check GPU temperature then check status")
                 self.app.system2.direct.assert_called_once()
-                # The loop creates a fresh task for every subtest.
-                last=self.app.sessions.list_tasks(self.app.session_id)[-1]
+                # list_tasks sorts by second-resolution timestamp + UUID;
+                # the last sorted element is not necessarily the newest task.
+                current=[task for task in self.app.sessions.list_tasks(self.app.session_id)
+                         if task["id"] not in seen_task_ids]
+                self.assertEqual(len(current),1)
+                last=current[0]
+                seen_task_ids.add(last["id"])
                 expected="rejected" if final["function_calls"][0]["name"] == "run_named_task" else "completed"
                 self.assertEqual(last["state"],expected)
                 if expected=="rejected":
