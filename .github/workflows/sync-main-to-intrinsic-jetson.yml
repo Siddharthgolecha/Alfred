@@ -22,11 +22,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
+      - name: Enforce main-only synchronization
+        # A manual workflow_dispatch can specify --ref on another branch/tag.
+        # Fail closed before loading a helper or granting target checkout credentials.
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$WORKFLOW_REF" != "refs/heads/main" ]]; then
+            echo "::error::Sync is only allowed from refs/heads/main (got $WORKFLOW_REF)"
+            exit 1
+          fi
+
       - name: Check out trusted sync helper from main
         uses: actions/checkout@v4
         with:
-          # For push, schedule and workflow_dispatch this is the triggering main SHA.
-          ref: ${{ github.sha }}
+          # Always use the trusted default-branch helper, regardless of dispatch SHA.
+          ref: main
           fetch-depth: 1
           persist-credentials: false
 
@@ -176,7 +189,7 @@ jobs:
             --jq '.[] | select(.title | startswith("[sync] main to intrinsic_jetson blocked")) | .number')"
           found="$(printf '%s\n' "$matches" | sed '/^$/d' | sort -n | head -n 1)"
           if [[ -n "$found" ]]; then
-            gh issue edit "$found" -R "$GITHUB_REPOSITORY" --body-file /tmp/alfred-sync-issue.md
+            gh issue edit "$found" -R "$GITHUB_REPOSITORY" --title "$title" --body-file /tmp/alfred-sync-issue.md
             echo "Updated existing sync-blocker issue #$found"
             while IFS= read -r issue_number; do
               [[ -n "$issue_number" && "$issue_number" != "$found" ]] || continue
