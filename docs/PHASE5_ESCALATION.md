@@ -83,6 +83,31 @@ the older, separate `Store.event("tool",...)` system stores raw tool results and
 is not migrated by issue #15; do not mistake the cognitive-ledger privacy
 guarantee for a global no-logging claim.
 
+## Scoped context interaction (issue #16 / merged PR #33)
+
+The version-1 `EscalationEnvelope` deliberately contains **only this task's
+sanitized completed read names and bounded metrics**, plus its budgets and
+original authorized request. It does **not** additionally forward the broader
+`ContextManager` session slots or user-approved preference facts to Qwen or
+the Harness. Those are a separate opt-in, scoped data channel for non-handoff
+reasoning, not an implicit handoff authorization; extending the combined
+planner context requires independent privacy and trust review.
+
+When both `context_enabled` and `escalation_enabled` are enabled, a bounded
+native `NeedleAgentLoop` that returns early for read-only escalation or
+handoff-budget exhaustion passes only its **exactly aligned, successful**
+`System2.direct` read prefix to the local `ContextManager`. The loop's
+post-execution `observed` record must match the accepted calls and returned
+results; protected actions, skipped reads, unmatched or failed batches never
+create a slot. An invalid Qwen/SDK follow-up does not erase an already verified
+prefix. Newly executed Qwen reads use a *separate* typed `VerifiedRead`
+channel; they are never re-ingested as Needle results. The context manager
+enforces the original explicit user-requested category, task/owner scope,
+TTL and scalar whitelist before retaining any slot. Neither model-generated
+text nor raw tool output strings become session context. If both GPU and
+system-status slots are fresh, a generic "check it again" remains ambiguous
+and requires naming a metric.
+
 ## Shared tool budget across Needle and Qwen
 
 `runtime.max_plan_steps` accepts **1–10** for ordinary System 2 plans.
