@@ -120,7 +120,7 @@ class AudioManager:
     def _headset_card(self):
         try:
             cards = pactl_json("cards")
-        except Exception as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
             LOG.warning("Cannot query audio cards: %s", exc)
             return None
         address = self.cfg.get("bluetooth_address", "").lower().replace(":", "_")
@@ -158,7 +158,7 @@ class AudioManager:
                 LOG.info("Switched %s to %s", card["name"], p["name"])
                 time.sleep(0.5)
                 return True
-            except Exception as exc:
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
                 LOG.warning("Bluetooth profile %s failed: %s", p.get("name"), exc)
         return False
 
@@ -178,7 +178,8 @@ class AudioManager:
                             "eligible":ok,"reason":reason})
         return entries
 
-    def candidate_sources(self):
+    def candidate_sources(self) -> list:
+        """Return eligible source names ordered by preference."""
         mode=self.cfg["mode"]
         if mode!="direct":
             if self._headset_card() is None:
@@ -212,7 +213,8 @@ class AudioManager:
         return [s["name"] for s in bt]+(
             [s["name"] for s in direct] if self.cfg.get("auto_fallback",True) else [])
 
-    def choose_source(self):
+    def choose_source(self) -> str | None:
+        """Return the highest-priority eligible source, or None."""
         candidates=self.candidate_sources()
         return candidates[0] if candidates else None
 

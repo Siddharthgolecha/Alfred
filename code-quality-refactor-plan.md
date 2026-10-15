@@ -200,7 +200,7 @@ The `Slot` dataclass uses manual `__post_init__` checks and raw dict storage. Re
 
 ### Sub-Task 9 — General code quality, readability, and technical debt reduction
 
-**Status**: [ ] pending
+**Status**: [x] done
 
 **Intent**  
 Beyond structural splits and Pydantic adoption, the codebase has accumulated technical debt across the remaining files that were not fully addressed in earlier sub-tasks: broad `except Exception` clauses that swallow errors, missing docstrings on all public methods, SQLite thread-safety issues, complex nested conditionals that could be flattened, dead code, and inconsistent naming conventions. This sub-task addresses all of that in a single focused pass.

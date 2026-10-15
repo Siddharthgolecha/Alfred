@@ -208,7 +208,8 @@ class WorkflowEngine:
                 (int(time.time()),runid))
         return {"changed":True,"interrupted_steps":[r["step_id"] for r in running]}
 
-    def draft(self,spec):
+    def draft(self, spec: dict) -> dict:
+        """Validate and persist *spec* as an unapproved workflow draft."""
         valid=validate_graph(spec,self.tools)
         encoded=_canonical(valid)
         stamp=int(time.time())
@@ -222,7 +223,8 @@ class WorkflowEngine:
         return {"name":valid["name"],"state":"draft","steps":len(valid["steps"]),
                 "digest":_digest(valid)}
 
-    def approve(self,name):
+    def approve(self, name: str) -> dict:
+        """Re-validate and locally approve a previously drafted workflow."""
         if not isinstance(name,str) or not _ID.fullmatch(name):
             raise ValueError("Invalid workflow name")
         with self.store.lock,self.store.db:
@@ -239,7 +241,8 @@ class WorkflowEngine:
                 (int(time.time()),name))
         return {"name":name,"state":"approved","digest":row["digest"]}
 
-    def get(self,name,require_approved=True):
+    def get(self, name: str, require_approved: bool = True) -> dict:
+        """Return a workflow spec by name; raises if missing or not approved."""
         with self.store.lock:
             row=self.store.db.execute(
                 "SELECT * FROM workflow_graphs WHERE name=?",(name,)).fetchone()
@@ -518,7 +521,7 @@ class WorkflowEngine:
                     raise RuntimeError("Approved systemctl action failed")
                 if (time.monotonic()-started)>node["timeout_seconds"]:
                     raise TimeoutError("Tool exceeded its configured wall-clock budget")
-            except Exception as exc:
+            except (OSError, ValueError, RuntimeError, TypeError, TimeoutError) as exc:
                 error=str(exc)[:500]
             elapsed=round((time.monotonic()-started)*1000)
             with self.store.lock,self.store.db:

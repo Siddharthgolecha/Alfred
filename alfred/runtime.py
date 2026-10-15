@@ -17,17 +17,26 @@ from .constants import Limits, Timeouts, Truncation
 
 LOG = logging.getLogger(__name__)
 
-def schema(name, description, properties=None, required=None):
-    return {"name":name, "description":description,
-            "parameters":{"type":"object", "properties":properties or {},
-                          "required":required or [], "additionalProperties":False}}
+def schema(name: str, description: str, properties: dict | None = None,
+           required: list | None = None) -> dict:
+    """Return a JSON Schema tool definition object."""
+    return {"name": name, "description": description,
+            "parameters": {"type": "object", "properties": properties or {},
+                           "required": required or [], "additionalProperties": False}}
+
 
 def _str_schema(description: str) -> dict:
     """Return a JSON Schema string property with the standard max length."""
     return {"type": "string", "description": description, "maxLength": Limits.TOOL_STR_MAX_LENGTH}
 
+
+def _num_schema(description: str, lo: int, hi: int) -> dict:
+    """Return a JSON Schema integer property with an explicit range."""
+    return {"type": "integer", "description": description, "minimum": lo, "maximum": hi}
+
+
 STR = _str_schema
-NUM = lambda description,lo,hi: {"type":"integer","description":description,"minimum":lo,"maximum":hi}
+NUM = _num_schema
 TOOL_SCHEMAS = [
     schema("get_system_status", "Report memory, CPU load, disk and uptime on Jetson"),
     schema("get_gpu_status", "Report Jetson GPU status, temperature and tegrastats sample"),
@@ -119,18 +128,21 @@ class Store:
             """)
             self.db.commit()
 
-    def event(self, category, detail):
+    def event(self, category: str, detail: dict) -> None:
+        """Insert a single structured event row into the events table."""
         with self.lock, self.db:
             self.db.execute("INSERT INTO events(at,category,detail) VALUES(?,?,?)",
                             (utc_now(),category,json.dumps(detail,default=str)[:6000]))
 
-    def create_reminder(self, message, delay_minutes):
+    def create_reminder(self, message: str, delay_minutes: int) -> dict:
+        """Insert a pending reminder due in *delay_minutes* and return its record."""
         with self.lock, self.db:
             cur = self.db.execute("INSERT INTO reminders(message,due_at) VALUES(?,?)",
                                   (message,utc_now()+delay_minutes*60))
             return {"id":cur.lastrowid,"message":message,"due_at":utc_now()+delay_minutes*60}
 
-    def list_reminders(self):
+    def list_reminders(self) -> list:
+        """Return all pending reminders ordered by due time."""
         with self.lock:
             return [dict(r) for r in self.db.execute(
                 "SELECT * FROM reminders WHERE status='pending' ORDER BY due_at LIMIT 100")]
@@ -402,14 +414,14 @@ class Scheduler:
                     else:
                         result=self.tools.execute(event["tool"],{},from_plan=True)
                         self.store.event("scheduled_result",{"id":event["id"],"result":result})
-                except Exception as exc:
-                    LOG.exception("Scheduled event failed: %s",exc)
-                    self.store.event("scheduler_error",{"event":event,"error":str(exc)})
+                except (OSError, ValueError, RuntimeError, TypeError, KeyError) as exc:
+                    LOG.exception("Scheduled event failed: %s", exc)
+                    self.store.event("scheduler_error", {"event": event, "error": str(exc)})
             try:
-                self.automations.tick(self.tools,self.on_reminder)
-            except Exception as exc:
-                LOG.exception("Phase 3 scheduler iteration failed: %s",exc)
-                self.store.event("automation_tick_error",{"error":str(exc)})
+                self.automations.tick(self.tools, self.on_reminder)
+            except (OSError, ValueError, RuntimeError, TypeError, KeyError) as exc:
+                LOG.exception("Phase 3 scheduler iteration failed: %s", exc)
+                self.store.event("automation_tick_error", {"error": str(exc)})
 
 
     def _workflow_loop(self):
@@ -417,6 +429,6 @@ class Scheduler:
         while not self.stop_flag.wait(2):
             try:
                 self.tools.workflow_engine.tick()
-            except Exception as exc:
-                LOG.exception("Phase 4 workflow worker failed: %s",exc)
-                self.store.event("workflow_tick_error",{"error":str(exc)})
+            except (OSError, ValueError, RuntimeError, TypeError, KeyError) as exc:
+                LOG.exception("Phase 4 workflow worker failed: %s", exc)
+                self.store.event("workflow_tick_error", {"error": str(exc)})

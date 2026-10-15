@@ -70,7 +70,8 @@ def _bounded_metrics(value):
     return safe
 
 
-def _feedback_metrics(tool, value):
+def _feedback_metrics(tool: str, value: object) -> dict:
+    """Return bounded scalar metrics for Needle feedback; never raw text."""
     if tool == "list_services":
         # The local registry returns a mapping of service name -> status. The
         # model only learns an integer count, never text from service responses.
@@ -294,7 +295,7 @@ class NeedleAgentLoop:
             try:
                 from ..validators import to_compact_json
                 response = self.feedback(to_compact_json(feedback))
-            except Exception:
+            except (OSError, RuntimeError, ValueError, TypeError):
                 # Inference may crash AFTER the read returned. Keep that
                 # observation visible, do not replay or attempt an action.
                 outcome = self._stop("feedback_unavailable", accepted, observed, outputs)

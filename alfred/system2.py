@@ -74,7 +74,8 @@ class Approvals:
                 )
             """)
 
-    def propose(self, steps, save_as=None):
+    def propose(self, steps: list, save_as: str | None = None) -> dict:
+        """Stage an approval record for *steps* and return the proposal metadata."""
         if not isinstance(steps, list) or (not steps and not save_as):
             raise ValueError("Nothing to approve")
         now = int(time.time())
@@ -86,7 +87,8 @@ class Approvals:
             return {"approval_id":cur.lastrowid, "expires_at":now+self.ttl,
                     "actions":concise_plan(steps), "save_as":save_as}
 
-    def pending(self):
+    def pending(self) -> list:
+        """Return all unexpired pending approval records."""
         now=int(time.time())
         with self.store.lock:
             rows=self.store.db.execute(
@@ -97,7 +99,8 @@ class Approvals:
                  "actions":concise_plan(json.loads(r["steps_json"])),"save_as":r["save_as"]}
                 for r in rows]
 
-    def claim(self, approval_id):
+    def claim(self, approval_id: int) -> dict:
+        """Atomically claim ownership of *approval_id* for execution."""
         now=int(time.time())
         with self.store.lock, self.store.db:
             row=self.store.db.execute(
@@ -346,8 +349,8 @@ class System2:
                     step["tool"]!="create_reminder" for step in steps)):
             try:
                 outcome["message"]=self.qwen.explain(utterance,outcome["results"])
-            except Exception as exc:
-                LOG.warning("Post-tool explanation unavailable; retaining observed data: %s",exc)
+            except (OSError, ValueError, RuntimeError, TypeError) as exc:
+                LOG.warning("Post-tool explanation unavailable; retaining observed data: %s", exc)
         return outcome
 
     def direct(self, calls):
@@ -413,6 +416,6 @@ class System2:
                 result=self.tools.run_plan(steps,allow_cancellations=True)
             self.approvals.finish(approval_id,result=result)
             return result
-        except Exception as exc:
-            self.approvals.finish(approval_id,error=exc)
+        except (OSError, ValueError, RuntimeError, TypeError, PermissionError) as exc:
+            self.approvals.finish(approval_id, error=exc)
             raise

@@ -128,7 +128,9 @@ class SessionLedger:
                 "DELETE FROM cognitive_session_owners WHERE owner_token=? AND owner_pid=?",
                 (self._owner_token,os.getpid()))
 
-    def begin_task(self, source, input_chars, session_id=None):
+    def begin_task(self, source: str, input_chars: int,
+                   session_id: str | None = None) -> TaskEnvelope:
+        """Create a new task and its TaskEnvelope ledger entry; return the envelope."""
         started = int(time.time())
         sid = valid_id(session_id) if session_id is not None else new_id()
         item = TaskEnvelope(
@@ -248,7 +250,8 @@ class SessionLedger:
                 (now, task["session_id"]))
         return event
 
-    def events(self, task_id):
+    def events(self, task_id: str) -> list:
+        """Return all contracts for *task_id* in chronological order."""
         valid_id(task_id)
         with self.store.lock:
             task = self.store.db.execute(
@@ -263,7 +266,8 @@ class SessionLedger:
                 raise ValueError("Corrupt task state")
             return history
 
-    def list_tasks(self, session_id, limit=100):
+    def list_tasks(self, session_id: str, limit: int = 100) -> list:
+        """Return task metadata rows for *session_id* ordered by start time."""
         valid_id(session_id)
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("Invalid list limit")
