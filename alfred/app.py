@@ -565,7 +565,11 @@ class Alfred:
                                 and item.tool == "get_gpu_status"):
                             self.needle_slots.remember(
                                 self.session_id,routed_text,item.tool,item.output)
-                    if route == "direct" and not trusted:
+                    if (route == "direct" and not trusted
+                            and (loop_outcome is None or not self.context.enabled)):
+                        # Real Needle-loop read evidence was already ingested
+                        # once above; legacy fallback applies only to
+                        # one-shot/direct paths (or old SessionSlots mode).
                         for call, value in zip(calls, observed):
                             if (isinstance(value,dict) and value.get("skipped") is True):
                                 continue
