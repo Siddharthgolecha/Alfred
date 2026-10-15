@@ -99,6 +99,27 @@ class ShutdownTests(unittest.TestCase):
             self.assertTrue(path.exists())
         self.assertFalse(path.exists())
 
+    def test_bind_succeeded_then_keyboard_interrupt_cleans_only_owned_socket(self):
+        import socket
+        orphan=control_dir(self.logdir)/"scheduler.sock"
+        # Keep an unrelated live listener to verify cleanup cannot unlink it.
+        with ShutdownSocket(self.logdir,"voice") as other:
+            other_inode=other.path.stat().st_ino
+            original_bind=socket.socket.bind
+            def bound_then_interrupt(sock,address):
+                original_bind(sock,address)
+                raise KeyboardInterrupt("simulated signal immediately after bind")
+            with patch.object(socket.socket,"bind",bound_then_interrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    with ShutdownSocket(self.logdir,"scheduler"):
+                        self.fail("entry must not yield")
+            self.assertFalse(orphan.exists())
+            self.assertTrue(other.path.exists())
+            self.assertEqual(other.path.stat().st_ino,other_inode)
+        with ShutdownSocket(self.logdir,"scheduler"):
+            self.assertTrue(orphan.exists())
+        self.assertFalse(orphan.exists())
+
     def test_single_instance_and_private_socket(self):
         with ShutdownSocket(self.logdir, "voice") as active:
             self.assertEqual(stat.S_IMODE(active.path.parent.stat().st_mode), 0o700)
