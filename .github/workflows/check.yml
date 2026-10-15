@@ -27,6 +27,8 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Phase 6 deterministic golden baseline (mock-only)
         run: PYTHONPATH=. python scripts/bench_phase6.py --partition all --output /tmp/phase6-baseline.json
+      - name: Phase 6 host-only mock P50/P95 and tracemalloc peak
+        run: PYTHONPATH=. python scripts/bench_phase6.py --measure --samples 5 | python -c 'import json,sys; print(json.load(sys.stdin)["host_only_metrics"])'
       - name: Needle fast-path P50/P95 (mock inference, paired baseline)
         run: PYTHONPATH=. python tests/bench_needle_fastpath.py
       - name: Scoped context overhead P50/P95 (mock inference, paired baseline)
