@@ -79,7 +79,16 @@ class ShutdownSocket:
             # socket we bound; otherwise a dead scheduler socket survives.
             self._stop.set()
             try:
-                if bound_here:
+                # A signal can arrive INSIDE bind(), after the kernel has
+                # created the socket path but before Python sets bound_here.
+                # getsockname identifies whether THIS descriptor bound the
+                # exact requested pathname; never delete an unrelated path
+                # merely because it appeared while trying to bind.
+                try:
+                    descriptor_bound = sock.getsockname() == str(self.path)
+                except OSError:
+                    descriptor_bound = False
+                if bound_here or descriptor_bound:
                     try:
                         info = self.path.lstat()
                         if (stat.S_ISSOCK(info.st_mode) and
