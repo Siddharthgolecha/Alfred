@@ -224,7 +224,7 @@ def run(partition: str = "all", verify: bool = True) -> dict:
             raise AssertionError(
                 f"Phase 5 drift: {case['id']}: expected {expected!r}; got {actual!r}")
         observed.append(actual)
-    return {
+    result = {
         "schema_version": 1,
         "source_baseline_sha": manifest["baseline_main_sha"],
         "evidence": "synthetic Needle + fake read-only tools; real merged Python routing/ledger",
@@ -233,6 +233,13 @@ def run(partition: str = "all", verify: bool = True) -> dict:
         "cases": observed,
         "native_jetson": "not_measured",
     }
+    if partition == "all" and verify:
+        raw = (FIXTURES / "baseline_outputs_v1.json").read_bytes()
+        if _git_blob_sha1(raw) != manifest["captured_baseline_blob_sha1"]:
+            raise ValueError("Frozen baseline output integrity mismatch")
+        if result != json.loads(raw):
+            raise AssertionError("Full Phase 5 captured baseline snapshot drift")
+    return result
 
 
 def measure(samples: int = 5) -> dict:

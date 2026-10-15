@@ -37,6 +37,12 @@ class Phase6BaselineTests(unittest.TestCase):
         b = json.dumps(run(), sort_keys=True, separators=(",", ":"))
         self.assertEqual(a, b)
 
+    def test_committed_baseline_snapshot_is_exact(self):
+        frozen = json.loads((FIXTURES / "baseline_outputs_v1.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(run(), frozen)
+        self.assertEqual(len(frozen["cases"]), 12)
+
     def test_heldout_cannot_be_silently_modified(self):
         with tempfile.TemporaryDirectory() as d:
             target = Path(d)

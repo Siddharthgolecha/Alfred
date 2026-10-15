@@ -83,3 +83,5 @@ The final #51 trial must freeze **>=250** cases with **>=50 adversarial** and ho
 ## Rollback / privacy
 
 Only docs, synthetic test data, independent script and CI invocation change; no `alfred/` module, runtime default or approval behavior is altered. Revert these files to roll back this issue; existing SQLite data requires no migration. No fixture contains live audio, meeting transcripts, account credentials or external API endpoints. The existing legacy runtime event tables have different logging rules from the cognitive ledger and are **not** represented as globally redacted.
+
+**Captured machine-readable baseline:** `tests/fixtures/phase6/baseline_outputs_v1.json` contains the whole-corpus deterministic mock projection observed and asserted by Python 3.10/3.12 CI. Its exact bytes are Git-blob-hash locked in `manifest.json` and compared to every full replay. This baseline is not evidence of native model correctness or Phase 6 outcome verification.
