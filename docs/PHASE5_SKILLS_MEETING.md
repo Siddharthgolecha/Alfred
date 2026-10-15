@@ -45,11 +45,20 @@ The host-owned provider must expose:
 - `capability(feature) -> bool` for each exact primitive:
   `microphone`, `guarded_ssd`, `recording`, `transcription`,
   `qwen`, `safe_pdf`, `qr_obex`. Return **false** if unverified.
-- `start_recording(consent=True, retention=bool) -> opaque meeting_id`,
-  `recording_status(meeting_id)`, `stop_recording(meeting_id)`.
+- `start_recording(consent=True, retention=bool, operation_id=<host 32-hex>)`
+  returns an opaque meeting ID; `rollback_start(operation_id) -> True`
+  must atomically and idempotently undo **only that attempted start**, even
+  if `start_recording` raised or returned a malformed/duplicate ID.
+  Both methods are REQUIRED BEFORE microphone activation, together with
+  the trusted host `MeetingCleanupJournal(Store)`. Registration writes
+  the opaque transaction token to durable SQLite BEFORE invoking the device.
+  Failed rollback stays `rollback_pending`, never silently leaks a recorder.
+  `recording_status(meeting_id)` and `stop_recording(meeting_id)` must
+  be idempotent (stop may have succeeded just before process interruption).
   When retention is **false**, `discard_meeting(meeting_id) -> True`
-  must confirm device-side deletion; otherwise the main adapter raises
-  rather than falsely report that private recording data was discarded.
+  must idempotently attest actual device-side deletion. A false/exception
+  leaves `purge_pending` in the durable local journal; read permits are
+  revoked and no deletion success is reported.
 - `get_segments(meeting_id) -> current authorized segments`, never a
   historical meeting list or filesystem search.
 - `suggest_minutes({task_id,meeting_id,untrusted_evidence,policy}) ->
@@ -75,13 +84,24 @@ new **task-bound**, time-limited `MeetingPermit` with the exact canonical
 session ID, owner and *opted-in meeting ID*. Never enumerate historical
 transcripts or try to derive an ID from general session context.
 Meeting/permit/validated PDF metadata is in-memory, not persisted to
-cognitive facts, and `clear_session` revokes permits/handles. With
-retention disabled, stopping the recorder revokes transcript access.
+cognitive facts, and `clear_session` revokes permits/handles. The
+**only** new persisted meeting data is an opaque transaction-cleanup
+journal (operation ID, meeting ID, owner/session/task IDs, retention bit,
+state; NO audio/transcripts). Cleanup survives process restart.
+With retention disabled, initiating stop immediately revokes transcript
+access and transitions to `stopping` then `purge_pending` until the
+device confirms deletion. An explicitly authorized local operator can
+call `adapter.recover_cleanup(session_id=..., owner=...,
+local_authorized=True)` with a freshly injected provider and the same
+SQLite journal, retrying stop/discard or transaction rollback idempotently.
+No automatic model or historical transcript retrieval may invoke recovery.
 An owner/scope mismatch or expired/revoked/forged permit is denied.
 
 `sanitize_segments` preserves source mic channel, UTC start/end timestamps,
 overlap references, optional bounded per-word decoder-estimated timing,
-ambiguous and likely cross-talk flags, and sync uncertainty; it forces `identity_type=microphone_channel` and **never**
+ambiguous and likely cross-talk flags, and sync uncertainty; timestamps
+are normalized to UTC `Z` regardless of source offset before downstream
+cross-microphone comparisons; it forces `identity_type=microphone_channel` and **never**
 promotes a device to a real person's identity. All text is size-bounded
 and known obvious tokens/emails are redacted. Max 64 segments/16k evidence
 JSON bytes. Redaction is **best effort**, not a guarantee against every
@@ -90,8 +110,10 @@ credential string; device adapters must follow retention/data policy.
 `validate_minutes_proposal` enforces a *citation + verbatim quote* from a
 current sanitized segment for **every summary, point, decision, risk, question
 and action item**. Due dates must appear explicitly as ISO dates in the
-cited excerpt or be `Not specified`. Owners must occur in that quoted
-excerpt or be `Unassigned`. Mic channel labels cannot be owners. No
+**specific cited action quote**, not merely elsewhere in the source segment,
+or be `Not specified`. Owners must also occur in that exact action quote
+or be `Unassigned`. Each normalized action records its
+`source_segment_id` and `evidence_quote` for independent PDF audit. Mic channel labels cannot be owners. No
 invented attendance or speaker identity fields are allowed. Qwen's
 generated output is untrusted until this validation succeeds. Only the
 validated exact digest *and matching cited evidence snapshot* may be sent
