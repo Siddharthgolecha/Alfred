@@ -109,6 +109,31 @@ class GitBranchSyncTests(unittest.TestCase):
         self.assertEqual(failed.returncode,3)
         self.assertIn("advanced since checkout",failed.stderr)
 
+    def test_workflow_bootstraps_helper_from_main_before_jetson_checkout(self):
+        workflow=(Path(__file__).resolve().parents[1]/
+                  ".github/workflows/sync-main-to-intrinsic-jetson.yml").read_text()
+        self.assertIn("ref: ${{ github.sha }}",workflow)
+        self.assertLess(workflow.index("Check out trusted sync helper from main"),
+                        workflow.index("Check out intrinsic_jetson without discarding its history"))
+        self.assertLess(workflow.index("Stage sync helper outside the worktree"),
+                        workflow.index("Check out intrinsic_jetson without discarding its history"))
+        self.assertIn('cp scripts/sync_main_into_jetson.sh "$RUNNER_TEMP/alfred-sync-main-into-jetson.sh"',
+                      workflow)
+        self.assertIn('run: bash "$RUNNER_TEMP/alfred-sync-main-into-jetson.sh"',workflow)
+        self.assertNotIn("run: bash scripts/sync_main_into_jetson.sh",workflow)
+
+    def test_workflow_consolidates_sync_incidents_and_verifies_before_closure(self):
+        workflow=(Path(__file__).resolve().parents[1]/
+                  ".github/workflows/sync-main-to-intrinsic-jetson.yml").read_text()
+        self.assertIn('startswith("[sync] main to intrinsic_jetson blocked")',workflow)
+        self.assertIn('gh issue edit "$found"',workflow)
+        self.assertNotIn('--label "maestaris:task"',workflow)
+        self.assertIn("git merge-base --is-ancestor refs/remotes/origin/main refs/remotes/origin/intrinsic_jetson",
+                      workflow)
+        self.assertLess(workflow.index("Verify published Jetson contains latest main"),
+                        workflow.index("Close resolved sync blockers only after remote verification"))
+        self.assertIn("steps.verify.outcome == 'failure'",workflow)
+
 
 if __name__=="__main__":
     unittest.main()
