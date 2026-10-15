@@ -363,7 +363,7 @@ class LocalHarness:
                 return {"message": response, "results": []}
             except BaseException as exc:
                 self.close()
-                raise HarnessUnavailable("Required local DeepSeek Harness turn failed") from exc
+                raise HarnessUnavailable("Required local DeepSeek Harness unavailable") from exc
 
     def plan(self, utterance, session_id, *, tools, allowed_services=(),
              named_tasks=(), max_steps=5, handoff=None, context=None):

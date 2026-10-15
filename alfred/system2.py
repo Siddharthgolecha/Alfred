@@ -206,10 +206,10 @@ class System2:
                     "specific action and time or interval."
                 ), "results": []}
 
-    def continue_handoff(self, handoff, *, harness=None, supervisor=None):
+    def continue_handoff(self, handoff, *, harness=None, supervisor=None, session_context=None):
         """Continue one trusted, already-authorized task, never replay its tools.
 
-        Model inference can fail or fall back before execution. Validation and
+        Model inference can fail before execution; it may not fall back. Validation and
         execution are *outside* the exception handler, preventing a partially
         executed plan from being retried. Observations sent to Qwen contain
         only bounded telemetry; no raw stdout, names, or tool result strings.
@@ -252,7 +252,8 @@ class System2:
                 handoff.request,handoff.session_id,tools=catalog,
                 allowed_services=self.tools.services,
                 named_tasks=self.tools.tasks.keys(),
-                max_steps=self.cfg.get("max_plan_steps",5),handoff=handoff)
+                max_steps=self.cfg.get("max_plan_steps",5),handoff=handoff,
+                **({"context":session_context} if session_context else {}))
         except HarnessInvalidPlan as exc:
             # A malformed SDK proposal is a hard stop, not a transport error.
             # Returning the already executed, sanitized Needle prefix keeps

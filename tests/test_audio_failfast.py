@@ -169,8 +169,11 @@ class CLIFailFastTests(unittest.TestCase):
         with patch("alfred.app.AudioManager.diagnostics",return_value=[]), \
              patch("alfred.app.AudioManager.ensure_input",return_value=USB["name"]), \
              patch("alfred.app.pactl_json",return_value=[]), \
-             patch("alfred.app.LlamaSupervisor") as supervisor:
-            supervisor.return_value.status.return_value={"health":"ready"}
+             patch("alfred.app.LlamaSupervisor") as supervisor, \
+             patch("alfred.app.LocalHarness") as harness:
+            supervisor.return_value.status.return_value={"health":"ready","model":"Qwen3.5-4B"}
+            harness.return_value.audit_installation.return_value={
+                "sdk_version":"0.1.5rc1","runtime_version":"0.1.5rc1","profile":"sdk-minimal"}
             result=main(["--doctor","--config","/does/not/exist.json"])
         self.assertEqual(result,0)
 

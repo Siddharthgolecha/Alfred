@@ -160,7 +160,7 @@ class AlfredSdkIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             app = self.make_app(home)
             fake = Mock()
-            fake.run.return_value = {"message":"hello", "results":[]}
+            fake.plan.return_value = {"message":"hello","steps":[],"save_as":None}
             app.harness = fake
             app.supervisor.ensure_running = Mock()
             app.system2.reason = Mock()
@@ -169,7 +169,7 @@ class AlfredSdkIntegrationTests(unittest.TestCase):
                 app.handle_text("What is an atom?")
                 app.system2.reason.assert_not_called()
                 app.supervisor.ensure_running.assert_called_once()
-                self.assertEqual(fake.run.call_args.args[1], app.session_id)
+                self.assertEqual(fake.plan.call_args.args[1], app.session_id)
                 self.assertEqual(len(app.sessions.list_tasks(app.session_id)), 1)
                 events = app.sessions.events(app.sessions.list_tasks(app.session_id)[0]["id"])
                 self.assertIn("escalation", [x.kind for x in events])
@@ -326,18 +326,18 @@ class AlfredSdkIntegrationTests(unittest.TestCase):
             finally:
                 app.close()
 
-    def test_sdk_crash_falls_back_without_new_tool_grants(self):
+    def test_sdk_crash_fails_closed_without_new_tool_grants(self):
         with tempfile.TemporaryDirectory() as home:
             app = self.make_app(home)
             fake = Mock()
-            fake.run.side_effect = HarnessUnavailable("SDK crash")
+            fake.plan.side_effect = HarnessUnavailable("SDK crash")
             app.harness = fake
             app.supervisor.ensure_running = Mock()
             app.cactus.route.return_value = {"confidence": .95, "function_calls": []}
             app.system2.reason = Mock(return_value={"message":"fallback", "results":[]})
             try:
                 app.handle_text("simple explanation")
-                fake.run.assert_called_once()
+                fake.plan.assert_called_once()
                 app.system2.reason.assert_not_called()
             finally:
                 app.close()

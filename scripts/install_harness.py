@@ -30,8 +30,11 @@ def verified_wheels(wheelhouse, target=None):
         path = Path(wheelhouse).resolve() / name
         if not path.is_file() or path.is_symlink():
             raise FileNotFoundError("Missing pinned wheel: " + name)
+        digest = hashlib.sha256()
         with path.open("rb") as stream:
-            sha = hashlib.file_digest(stream, "sha256").hexdigest()
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        sha = digest.hexdigest()
         if sha != row["sha256"]:
             raise ValueError("Published SHA-256 mismatch: " + name)
         wheels.append(path)

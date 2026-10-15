@@ -487,6 +487,9 @@ class RoutingTests(unittest.TestCase):
         cfg=load_config()
         cfg["runtime"]["database"]=str(Path(self.tmp.name)/"state.db")
         cfg["runtime"]["logs"]=self.tmp.name
+        cfg["runtime"]["needle_loop_enabled"]=False
+        cfg["runtime"]["context_enabled"]=False
+        cfg["runtime"]["escalation_enabled"]=False
         self.app=Alfred(cfg,load_models=False)
         self.app.cactus=Mock()
         self.app.feedback.tell=Mock()
@@ -516,9 +519,9 @@ class RoutingTests(unittest.TestCase):
         self.app.cactus.route.return_value={"function_calls":[
             {"name":"delegate_to_reasoner","arguments":{"request":"stop all services"}}
         ],"confidence":0.94}
-        self.app.system2.reason=Mock(return_value={"message":"Understood","results":[]})
+        self.app.reason=Mock(return_value={"message":"Understood","results":[]})
         self.app.handle_text("Explain what GPU memory means")
-        self.app.system2.reason.assert_called_once_with(
+        self.app.reason.assert_called_once_with(
             "Explain what GPU memory means",allow_actions=True)
 
     def test_bad_qwen_result_is_persisted_as_failed_not_completed(self):
@@ -526,7 +529,8 @@ class RoutingTests(unittest.TestCase):
         self.app.cactus.route.return_value={"function_calls":[{
             "name":"delegate_to_reasoner","arguments":{"request":"Create a schedule"}}],
             "confidence":0.95}
-        self.app.qwen.complete=Mock(side_effect=QwenPlanResponseError("bad output"))
+        self.app.reason=Mock(return_value={"status":"incomplete","error":"invalid_plan",
+                                         "message":"No actions were taken","results":[]})
         self.app.handle_text("Create a status schedule")
         tasks=self.app.sessions.list_tasks(self.app.session_id)
         self.assertEqual(len(tasks),1)
@@ -542,7 +546,8 @@ class RoutingTests(unittest.TestCase):
     def test_readonly_qwen_failure_is_also_ledger_failure(self):
         from alfred.cognitive import Completion
         self.app.cactus.route.return_value={"function_calls":[],"confidence":0.99}
-        self.app.qwen.complete=Mock(side_effect=QwenPlanResponseError("missing steps"))
+        self.app.reason=Mock(return_value={"status":"incomplete","error":"invalid_plan",
+                                         "message":"No actions were taken","results":[]})
         self.app.handle_text("Create a schedule")
         task_id=self.app.sessions.list_tasks(self.app.session_id)[0]["id"]
         self.assertEqual(self.app.sessions.events(task_id)[-1],
@@ -551,9 +556,9 @@ class RoutingTests(unittest.TestCase):
 
     def test_empty_needle_call_invokes_read_only_qwen(self):
         self.app.cactus.route.return_value={"function_calls":[],"confidence":0.99}
-        self.app.system2.reason=Mock(return_value={"message":"Answer","results":[]})
+        self.app.reason=Mock(return_value={"message":"Answer","results":[]})
         self.app.handle_text("What is quantum computing?")
-        self.app.system2.reason.assert_called_once_with(
+        self.app.reason.assert_called_once_with(
             "What is quantum computing?",allow_actions=False)
 
 class PlannerCliTests(unittest.TestCase):
@@ -564,6 +569,7 @@ class PlannerCliTests(unittest.TestCase):
             cfg["runtime"]["database"]=str(Path(tmp)/"store.db")
             cfg["runtime"]["logs"]=tmp
             with patch("alfred.app.load_config",return_value=cfg), patch(
+                     "alfred.app.Alfred.require_cognitive_runtime"), patch(
                      "alfred.app.Alfred.reason",return_value={
                          "status":"incomplete","error":"invalid_plan",
                          "message":"No actions were taken","results":[]}), patch(

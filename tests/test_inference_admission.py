@@ -322,6 +322,9 @@ class IntegrationAdmissionTests(unittest.TestCase):
             app.cactus.route=Mock(side_effect=needle)
             app.cactus.route_feedback=Mock(side_effect=feedback)
             app.qwen.complete=Mock(side_effect=qwen_plan)
+            app.harness=Mock()
+            app.harness.plan.side_effect=lambda request,sid,*,tools,**kw: qwen_plan(
+                request,tools,**kw)
             try:
                 with patch("alfred.runtime.gpu_status",return_value={
                     "available":True,"gpu_temp_c":64,

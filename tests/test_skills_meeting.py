@@ -693,6 +693,9 @@ class CombinedHandoffSkillBoundaryTests(unittest.TestCase):
                 "message":"Try recording", "steps":[
                     {"tool":"meeting_recording","args":{}}],
                 "save_as":None})
+            app.harness=Mock()
+            app.harness.plan.side_effect=lambda request,sid,*,tools,**kw: app.qwen.complete(
+                request,tools,**kw)
             try:
                 available={item["name"]:item for item in app.skills.metadata()}
                 self.assertTrue(available["meeting_recording"]["available"])
@@ -717,7 +720,7 @@ class CombinedHandoffSkillBoundaryTests(unittest.TestCase):
                                         "ORDER BY rowid DESC LIMIT 1").fetchone()[0]
                                 )[-1].outcome, "failed")
                             self.assertEqual(app.system2.approvals.pending(),[])
-                            catalog=app.qwen.complete.call_args.args[1]
+                            catalog=app.harness.plan.call_args.kwargs["tools"]
                             self.assertNotIn("meeting_recording",{
                                 schema["name"] for schema in catalog})
                     run.assert_not_called()

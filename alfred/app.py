@@ -141,7 +141,7 @@ class Alfred:
         diagnosis = self.harness.audit_installation()
         self.supervisor.ensure_running()
         self.harness.require_ready()
-        LOG.info("DeepSeek Harness ACTIVE: sdk=%s runtime=%s profile=%s tools=none",
+        LOG.info("Official Cordis SDK active (tool-free foundation, shared tools PENDING): sdk=%s runtime=%s profile=%s",
                  diagnosis["sdk_version"], diagnosis["runtime_version"],
                  diagnosis["profile"])
         return diagnosis
@@ -192,8 +192,11 @@ class Alfred:
         self.sessions.append(task.task_id, Escalation("needle3", "qwen", reason))
         self.sessions.append(task.task_id, Decision(
             "qwen", "delegate" if allow_actions else "readonly", 0))
+        bounded_context=(self.context.compact(task.session_id,task.task_id)
+                         if self.context.enabled else None)
         return self.system2.continue_handoff(
-            envelope, harness=self.harness, supervisor=self.supervisor)
+            envelope, harness=self.harness, supervisor=self.supervisor,
+            **({"session_context":bounded_context} if bounded_context else {}))
 
     def _observe_needle_prefix(self, task, original, outcome):
         """Preserve verified Needle-loop reads before an early handoff/stop.
