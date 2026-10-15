@@ -61,6 +61,10 @@ PLAN_RESPONSE_SCHEMA = {
     "additionalProperties": False
 }
 
+class QwenPlanResponseError(ValueError):
+    """The inference backend did not return a complete, schema-shaped plan."""
+
+
 class Qwen:
     """Schema-constrained System 2 planner across compatible local services."""
     def __init__(self, cfg, supervisor):
@@ -119,15 +123,62 @@ class Qwen:
         }
         if model:
             payload["model"] = model
-        out = request_json(self._endpoint() + "/v1/chat/completions",
-                           payload, timeout=90)
-        content = out["choices"][0]["message"].get("content") or ""
+        # Qwen3.5 can spend its entire generation budget thinking, and some
+        # llama.cpp versions fail to enforce JSON grammar in thinking mode.
+        # Both forms are best-effort for differently aged llama.cpp servers.
+        # Do not send backend-specific options to Ollama or LM Studio.
+        if getattr(self.supervisor, "backend", None) in ("llama_cpp", "llama_server"):
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
+            payload["reasoning_effort"] = "none"
+
+        # A retry is generation-only: no returned text can become a tool call
+        # until it passes System2.parse_plan and preflight. Never reinterpret a
+        # failed plan as a successful schedule or silently discard its steps.
+        for attempt in range(2):
+            out = request_json(self._endpoint() + "/v1/chat/completions",
+                               payload, timeout=90)
+            try:
+                return self._parse_plan_response(out)
+            except QwenPlanResponseError as exc:
+                if attempt:
+                    raise QwenPlanResponseError(
+                        "Qwen could not produce a valid plan after one retry. "
+                        "No actions were executed; check the model chat template "
+                        "and qwen.max_tokens."
+                    ) from exc
+                LOG.warning("Invalid Qwen plan (%s); retrying once", exc)
+                payload["messages"][0]["content"] += (
+                    " RETRY: Your previous reply was incomplete or malformed. "
+                    "Return ONLY one JSON object with exactly these three keys: "
+                    'message (string), steps (array), save_as (string or null). '
+                    "For a missing schedule detail, ask in message and set "
+                    "steps=[] and save_as=null. No markdown or reasoning text."
+                )
+
+    @staticmethod
+    def _parse_plan_response(response):
+        """Validate the envelope and top-level fields before any action path."""
+        try:
+            choice = response["choices"][0]
+            finish_reason = choice.get("finish_reason")
+            content = choice["message"]["content"]
+        except (KeyError, IndexError, TypeError, AttributeError) as exc:
+            raise QwenPlanResponseError("Missing chat completion content") from exc
+        if finish_reason == "length":
+            raise QwenPlanResponseError("Qwen completion ran out of output tokens")
+        if not isinstance(content, str) or not content.strip():
+            raise QwenPlanResponseError("Empty plan content (possibly thinking-only)")
         try:
             plan = json.loads(content)
-        except (TypeError,ValueError) as exc:
-            raise ValueError("Qwen did not return valid JSON (check llama.cpp chat template and token budget)") from exc
-        if not isinstance(plan,dict) or not isinstance(plan.get("steps"),list):
-            raise ValueError("Qwen response missing required plan fields")
+        except (TypeError, ValueError) as exc:
+            raise QwenPlanResponseError("Plan content is not JSON") from exc
+        if (not isinstance(plan, dict)
+                or set(plan) != {"message", "steps", "save_as"}
+                or not isinstance(plan["message"], str)
+                or len(plan["message"]) > 800
+                or not isinstance(plan["steps"], list)
+                or not (plan["save_as"] is None or isinstance(plan["save_as"], str))):
+            raise QwenPlanResponseError("Qwen response missing required plan fields")
         return plan
 
     def explain(self, user_request, observed_results):
