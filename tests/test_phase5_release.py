@@ -122,7 +122,15 @@ class ReleasePolicyTests(unittest.TestCase):
                 self.assertEqual(early[0]["accepted_tools"],"0")
             contested=[r for r in unified if r["gate_capture_contended"]=="1"]
             self.assertEqual(len(contested),12)
-            self.assertTrue(all(int(r["gate_rejected"])>=1 for r in contested))
+            # A context pronoun without any verified prior read fails
+            # in the trusted resolver, before the model/gate is consulted.
+            admitted=[r for r in contested if r["scenario"]!="context_pronoun"]
+            self.assertEqual(len(admitted),11)
+            self.assertTrue(all(int(r["gate_rejected"])>=1 for r in admitted))
+            denied=[r for r in contested if r["scenario"]=="context_pronoun"]
+            self.assertEqual(len(denied),1)
+            self.assertEqual(denied[0]["task_state"],"rejected")
+            self.assertEqual(denied[0]["accepted_tools"],"0")
             self.assertGreater(sum(int(r["gate_needle_attempts"]) for r in unified),0)
             for mode in MODES[1:]:
                 enhanced=[r for r in raw if r["mode"]==mode]
