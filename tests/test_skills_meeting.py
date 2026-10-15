@@ -378,6 +378,103 @@ class MeetingPolicyTests(unittest.TestCase):
             self.adapter.export_pdf(p,verified)
         self.assertFalse(any(call[0]=="save_pdf" for call in self.device.calls))
 
+    def test_failed_purge_recovers_after_adapter_restart(self):
+        self.start(retention=False)
+        p=self.grant()
+        self.device.discard_meeting=Mock(side_effect=[False,True])
+        with self.assertRaisesRegex(RuntimeError,"discard unverified"):
+            self.adapter.stop(p)
+        rows=self.journal.pending(SID,"local")
+        self.assertEqual(len(rows),1)
+        self.assertEqual(rows[0]["state"],"purge_pending")
+        with self.assertRaises(PermissionError):
+            self.adapter.evidence(p)
+        # No model or stale permit can trigger cleanup, including after restart.
+        recovered=OfflineMeetingAdapter(
+            self.device,journal=MeetingCleanupJournal(self.store),
+            clock=lambda:self.now[0])
+        with self.assertRaises(PermissionError):
+            recovered.recover_cleanup(session_id=SID,owner="local")
+        with self.assertRaises(PermissionError):
+            recovered.recover_cleanup(session_id=SID2,owner="local",
+                                       local_authorized=False)
+        self.assertEqual(recovered.recover_cleanup(
+            session_id=SID,owner="local",local_authorized=True),
+            [{"meeting_id":MEETING,"state":"purged"}])
+        self.assertEqual(self.journal.pending(SID,"local"),[])
+        self.assertEqual(self.device.discard_meeting.call_count,2)
+        self.assertEqual(recovered.recover_cleanup(
+            session_id=SID,owner="local",local_authorized=True),[])
+
+    def test_invalid_returned_meeting_id_rolls_back_using_transaction_token(self):
+        self.device.next_id="../not-a-meeting"
+        with self.assertRaises(ValueError):
+            self.start()
+        self.assertEqual(self.device.active_operations,set())
+        self.assertEqual(self.journal.pending(SID,"local"),[])
+        self.assertEqual(len([x for x in self.device.calls if x[0]=="rollback"]),1)
+
+    def test_duplicate_id_rolls_back_only_second_operation(self):
+        self.start()
+        first=set(self.device.active_operations)
+        self.assertEqual(len(first),1)
+        with self.assertRaisesRegex(ValueError,"Duplicate meeting ID"):
+            self.adapter.start(session_id=SID,task_id=TASK2,owner="local",
+                consent=True,retention=True,local_authorized=True)
+        self.assertEqual(self.device.active_operations,first)
+        self.assertEqual(len(self.journal.pending(SID,"local")),1)
+        self.assertEqual(self.grant().meeting_id,MEETING)
+
+    def test_failed_start_rollback_persists_for_recovery(self):
+        self.device.next_id="!!invalid"
+        self.device.rollback_start=Mock(side_effect=[False,True])
+        with self.assertRaisesRegex(RuntimeError,"rollback unverified"):
+            self.start()
+        pending=self.journal.pending(SID,"local")
+        self.assertEqual(len(pending),1)
+        self.assertEqual(pending[0]["state"],"rollback_pending")
+        recovered=OfflineMeetingAdapter(
+            self.device,journal=MeetingCleanupJournal(self.store))
+        self.assertEqual(recovered.recover_cleanup(
+            session_id=SID,owner="local",local_authorized=True)[0]["state"],
+            "rolled_back")
+        self.assertEqual(self.journal.pending(SID,"local"),[])
+
+    def test_start_without_durable_journal_does_not_activate_microphones(self):
+        adapter=OfflineMeetingAdapter(self.device)
+        with self.assertRaisesRegex(RuntimeError,"durable journal"):
+            adapter.start(session_id=SID,task_id=TASK,owner="local",
+                consent=True,local_authorized=True)
+        self.assertFalse(any(x[0]=="start" for x in self.device.calls))
+
+    def test_multi_action_in_one_segment_cannot_steal_owner_or_date(self):
+        packet=sanitize_segments([
+            {"id":"two-actions","source":"usb_mic_1",
+             "start_utc":"2026-10-15T01:00:00Z",
+             "end_utc":"2026-10-15T01:00:04Z",
+             "text":"Bob prepares slides. Alice handles contracts by 2026-10-20."}])
+        draft={"summary":[],"agenda":[],"key_points":[],"decisions":[],
+               "risks":[],"open_questions":[],
+               "action_items":[{
+                   "task":{"segment_id":"two-actions","quote":"Bob prepares slides."},
+                   "owner":"Alice","due":"2026-10-20"}]}
+        with self.assertRaises(ValueError):
+            validate_minutes_proposal(draft,packet,meeting_title="Tasks")
+        draft["action_items"][0]["owner"]="Bob"
+        draft["action_items"][0]["due"]="Not specified"
+        good=validate_minutes_proposal(draft,packet,meeting_title="Tasks")
+        self.assertEqual(good["action_items"][0]["source_segment_id"],"two-actions")
+        self.assertEqual(good["action_items"][0]["owner"],"Bob")
+
+    def test_non_utc_offset_normalized_for_cross_channel_comparison(self):
+        case=copy.deepcopy(SEGMENTS)
+        case[0]["start_utc"]="2026-10-15T06:30:00+05:30"
+        case[0]["end_utc"]="2026-10-15T06:30:04+05:30"
+        packet=sanitize_segments(case)
+        self.assertEqual(packet[0]["start_utc"],"2026-10-15T01:00:00Z")
+        self.assertEqual(packet[0]["end_utc"],"2026-10-15T01:00:04Z")
+        self.assertLess(packet[0]["start_utc"],packet[1]["end_utc"])
+
     def test_unavailable_qwen_or_obex_reports_missing(self):
         device=FakeMeetingDevice(features={"microphone","guarded_ssd",
                                           "recording","transcription"})
