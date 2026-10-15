@@ -893,6 +893,108 @@ class EscalationContextIntegrationTests(unittest.TestCase):
                 task=self.app.sessions.list_tasks(self.app.session_id)[-1]
                 self.assertEqual(task["state"],"failed")
 
+    def test_completed_needle_loop_populates_context_without_handoff(self):
+        # Ordinary completion is not a handoff. Only one post-execution
+        # prefix ingestion is allowed, for either escalation setting.
+        for escalation in (True, False):
+            with self.subTest(escalation=escalation):
+                self.app.cfg["runtime"]["escalation_enabled"]=escalation
+                self.app.cfg["runtime"]["needle_loop_enabled"]=True
+                self.app.cfg["runtime"]["needle_max_decisions"]=3
+                self.app.cactus.route.return_value={
+                    "confidence":.99,"function_calls":[
+                        {"name":"get_system_status","arguments":{}}]}
+                self.app.cactus.route_feedback.return_value={
+                    "confidence":1.0,"function_calls":[]}
+                self.app.system2.tools.run_plan=Mock(side_effect=[
+                    [{"uptime_seconds":144,"raw":"NEVER_STORE"}],
+                    [{"uptime_seconds":145}]])
+                self.app.handle_text("Check system status then explain")
+                first=self.app.sessions.list_tasks(self.app.session_id)[-1]
+                self.assertEqual(first["state"],"completed")
+                events=self.app.sessions.events(first["id"])
+                self.assertEqual([(e.tool,e.outcome) for e in events
+                                  if e.kind=="observation"],
+                                 [("get_system_status","returned")])
+                self.assertEqual(self.app.context.compact(self.app.session_id)
+                                 ["slots"]["system_status"]["metrics"],
+                                 {"uptime_seconds":144})
+                self.assertNotIn("NEVER_STORE",
+                                 str(self.app.context.compact(self.app.session_id)))
+                self.assertEqual(self.app.context.resolve(
+                    self.app.session_id,"check it again"),"Get system status again")
+                self.assertEqual(self._assert_private_read_channel_is_hidden()
+                                 ["results"][0]["uptime_seconds"],144)
+                self.app.cactus.route_feedback.assert_called_once()
+                self.app.system2.qwen.complete.assert_not_called()
+                self.app.handle_text("check it again")
+                self.assertIn("Get system status again",
+                              self.app.cactus.route.call_args.args[0])
+                self.assertEqual(self.app.system2.tools.run_plan.call_count,2)
+                self.app.system2.qwen.complete.assert_not_called()
+                self.assertEqual(self.app.system2.approvals.pending(),[])
+                # Later independent subtests must not inherit the same slot.
+                self.app.context.clear_session(self.app.session_id)
+
+    def test_read_then_unsafe_followup_rejected_without_replay(self):
+        self.app.cfg["runtime"]["needle_loop_enabled"]=True
+        self.app.cactus.route.return_value={
+            "confidence":.99,"function_calls":[
+                {"name":"get_system_status","arguments":{}}]}
+        self.app.cactus.route_feedback.return_value={
+            "confidence":.99,"function_calls":[
+                {"name":"run_named_task","arguments":{"name":"danger"}}]}
+        self.app.system2.tools.run_plan=Mock(return_value=[
+            {"uptime_seconds":301,"raw":"DO_NOT_RETAIN"}])
+        self.app.handle_text("Check system status then run the task")
+        outcome=self._assert_private_read_channel_is_hidden()
+        self.assertEqual(outcome["status"],"incomplete")
+        self.assertEqual(outcome["halt_reason"],"unsafe")
+        self.assertTrue(outcome["partial"])
+        self.assertEqual(outcome["results"],[{"uptime_seconds":301,
+                                              "raw":"DO_NOT_RETAIN"}])
+        self.assertEqual(self.app.system2.tools.run_plan.call_count,1)
+        self.app.system2.qwen.complete.assert_not_called()
+        self.assertEqual(self.app.system2.approvals.pending(),[])
+        task=self.app.sessions.list_tasks(self.app.session_id)[0]
+        self.assertEqual(task["state"],"rejected")
+        events=self.app.sessions.events(task["id"])
+        self.assertEqual(events[-1].reason,"unsafe_route")
+        self.assertEqual([e.tool for e in events if e.kind=="observation"],
+                         ["get_system_status"])
+        self.assertEqual(self.app.context.resolve(self.app.session_id,
+                         "check it again"),"Get system status again")
+        self.assertNotIn("DO_NOT_RETAIN",
+                         str(self.app.context.compact(self.app.session_id)))
+
+    def test_read_then_cancelled_followup_fails_without_replay(self):
+        self.app.cfg["runtime"]["needle_loop_enabled"]=True
+        self.app.cactus.route.return_value={
+            "confidence":.99,"function_calls":[
+                {"name":"get_system_status","arguments":{}}]}
+        def cancel_after_read(_):
+            self.app._needle_cancel.set()
+            return [{"uptime_seconds":208}]
+        self.app.system2.tools.run_plan=Mock(side_effect=cancel_after_read)
+        try:
+            self.app.handle_text("Check system status then inspect it")
+        finally:
+            self.app._needle_cancel.clear()
+        outcome=self._assert_private_read_channel_is_hidden()
+        self.assertEqual(outcome["status"],"incomplete")
+        self.assertEqual(outcome["halt_reason"],"cancelled")
+        self.assertTrue(outcome["partial"])
+        self.assertEqual(outcome["results"],[{"uptime_seconds":208}])
+        self.assertEqual(self.app.system2.tools.run_plan.call_count,1)
+        self.app.cactus.route_feedback.assert_not_called()
+        self.app.system2.qwen.complete.assert_not_called()
+        self.assertEqual(self.app.system2.approvals.pending(),[])
+        task=self.app.sessions.list_tasks(self.app.session_id)[0]
+        self.assertEqual(task["state"],"failed")
+        self.assertEqual(self.app.sessions.events(task["id"])[-1].reason,"shutdown")
+        self.assertEqual(self.app.context.resolve(self.app.session_id,
+                         "check it again"),"Get system status again")
+
     def test_approval_and_incomplete_handoff_never_leak_private_read_channel(self):
         from alfred.system2 import VerifiedRead
         self.app.cactus.route.return_value={"confidence":.99,"function_calls":[]}
