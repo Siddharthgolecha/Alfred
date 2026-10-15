@@ -108,7 +108,7 @@ class LocalHarness:
         if self.factory is not None:
             return  # Unit-test fake adapter; real runtime smoke covers this.
         try:
-            from deepseek_harness_runtime import resolve_bundled_launch_args
+            from deepseek_harness_runtime import resolve_bundled_launch_args  # type: ignore[import-untyped]
             args = (*resolve_bundled_launch_args(), "--profile", "sdk-minimal",
                     "--patch", str(self.patch), "--dump-config")
             env = dict(os.environ)
@@ -195,7 +195,7 @@ class LocalHarness:
                 runtime_version = importlib.metadata.version("deepseek-harness-runtime-bin")
                 if version != SDK_VERSION or runtime_version != SDK_VERSION:
                     raise HarnessUnavailable("Unexpected SDK/runtime version")
-                from deepseek_harness import DeepSeekHarness
+                from deepseek_harness import DeepSeekHarness  # type: ignore[import-untyped]
             except (ImportError, importlib.metadata.PackageNotFoundError) as exc:
                 raise HarnessUnavailable("Pinned DeepSeek SDK not installed") from exc
             factory = DeepSeekHarness

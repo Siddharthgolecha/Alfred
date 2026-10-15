@@ -97,7 +97,8 @@ def sanitize_segments(raw: Any) -> tuple[dict[str, Any], ...]:
         ids.add(sid)
         uncertainty = entry.get("synchronization_uncertainty_ms")
         if uncertainty is not None and (
-            type(uncertainty) not in (float, int)
+            not isinstance(uncertainty, (int, float))
+            or isinstance(uncertainty, bool)
             or not math.isfinite(uncertainty)
             or not 0 <= uncertainty <= 30000
         ):
@@ -119,10 +120,13 @@ def sanitize_segments(raw: Any) -> tuple[dict[str, Any], ...]:
         for word in raw_words:
             if type(word) is not dict:
                 raise ValueError("Invalid timestamped word")
-            a, b = word.get("start_seconds"), word.get("end_seconds")
+            a = word.get("start_seconds")
+            b = word.get("end_seconds")
             if (
-                type(a) not in (float, int)
-                or type(b) not in (float, int)
+                not isinstance(a, (int, float))
+                or isinstance(a, bool)
+                or not isinstance(b, (int, float))
+                or isinstance(b, bool)
                 or not math.isfinite(a)
                 or not math.isfinite(b)
                 or not 0 <= a <= b

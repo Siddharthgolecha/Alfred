@@ -309,7 +309,7 @@ class Cactus:
     """One long-lived Needle instance; native inference kept on calling thread."""
     def __init__(self, schemas, admission=None):
         self.admission = admission
-        import needle
+        import needle  # type: ignore[import-untyped]
         self.needle = needle
         self.agent = needle.Needle(tools=schemas)
         self.whistle = needle.Whistle()

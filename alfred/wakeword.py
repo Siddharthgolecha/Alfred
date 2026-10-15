@@ -100,8 +100,8 @@ class AcousticWakeDetector:
                 "wake_word.model_path (trained for the configured wake phrase)"
             )
         try:
-            import numpy as np
-            from openwakeword.model import Model
+            import numpy as np  # type: ignore[import-not-found]
+            from openwakeword.model import Model  # type: ignore[import-not-found]
         except ImportError as exc:
             raise RuntimeError(
                 "Acoustic wake detection requires: pip install '.[wakeword]' "
