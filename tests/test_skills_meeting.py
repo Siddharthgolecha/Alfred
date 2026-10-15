@@ -510,6 +510,20 @@ class MeetingPolicyTests(unittest.TestCase):
         self.assertEqual(packet[0]["end_utc"],"2026-10-15T01:00:04Z")
         self.assertLess(packet[0]["start_utc"],packet[1]["end_utc"])
 
+    def test_forged_or_stale_permit_cannot_revoke_another_task(self):
+        self.start(retention=True)
+        p=self.grant()
+        forged=MeetingPermit(SID,TASK,"local",MEETING,True,True,
+                             p.granted_at,p.expires_at)
+        with self.assertRaises(PermissionError):
+            self.adapter.revoke(forged)
+        self.assertEqual(self.adapter.status(p)["state"],"recording")
+        self.adapter.revoke(p)
+        with self.assertRaises(PermissionError):
+            self.adapter.revoke(p)
+        with self.assertRaises(PermissionError):
+            self.adapter.evidence(p)
+
     def test_read_permit_never_authorizes_recording_stop(self):
         self.start(retention=False)
         p=self.grant()
