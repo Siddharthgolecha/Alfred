@@ -36,8 +36,12 @@ A single `InferenceAdmission` object is shared by:
 - Qwen model-supervisor watchdog startup also uses the slot when opt-in.
 
 One Python Condition-protected inference owner is admitted at a time; queue
-capacity is one ordinary waiter, timeout 0–10,000ms, and Whistle gets
-priority on the next free slot. During active voice ASR, the watchdog
+capacity is **one ordinary waiter plus at most two reserved Whistle
+waiters** (three total), timeout 0–10,000ms, and Whistle gets
+priority on the next free slot **FIFO among Whistle tickets**. A third
+queued Whistle request is explicitly rejected with no hidden retries or tool
+side effects. Background turns cannot wait indefinitely: each ticket has a
+strict deadline and can be rejected during a sustained voice burst. During active voice ASR, the watchdog
 defers Qwen cold startup and no new optional Qwen/Harness turn can be
 admitted. Linux `/proc/meminfo` and load average are sampled without a
 separate `tegrastats` subprocess inside the hot path. Missing/unreadable
@@ -83,7 +87,16 @@ failure, and attempted plugin/network egress.
 
 The comparison uses **real System2 preflight/approval queue, SQLite task
 ledger and reminder engine**, but deliberately **mocks native Needle,
-Whistle, Qwen, Harness, and device telemetry**. The "unified" path is a
+Whistle, Qwen, Harness, and device telemetry**. In the unified mode,
+`resource_admission_enabled=true` is configured **before** Alfred's Qwen
+client is created. Deterministic admitted Needle, Needle-feedback, Whistle,
+Qwen and Harness stub calls enter the **real Condition-backed gate**.
+The matrix includes explicit capture contention (variant 08), low available
+RAM (09), excessive swap (10) and CPU load (11) per category, and its
+raw CSV records gate-enabled, granted, queued, rejection, pressure and
+resource-fixture fields for every one of the 432 cases. This validates
+offline cooperative policy wiring only, not native performance or
+real concurrent device behavior. The "unified" path is a
 Harness/admission policy proxy, **NOT issue #15 or #16's currently unmerged
 implementation** and NOT full native latency. `/proc/meminfo` and
 normalized host CPU load are measured locally; **Jetson GPU load, power
@@ -94,7 +107,8 @@ The script writes:
 - `raw.csv` — one row per case/configuration (432 rows), actual local
   wall-clock policy/SQLite latency, task state, Qwen/Harness model-stub
   turn counts, stage/accepted tool counts, reminder side effects,
-  model escalation rate and resource snapshot;
+  model escalation rate, resource snapshots and per-fixture admission
+  grants/rejections/pressure/capture probes;
 - `report.json` — measured aggregates with p50/p95, task-completion
   fraction and all critical safety gates;
 - `report.md` — readable side-by-side comparison and caveats.
