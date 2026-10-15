@@ -60,6 +60,10 @@ steps are **never resumable or auto-replayable**.
   A fresh direct Qwen inference may replace a crashed SDK *only before tool
   execution begins*. Neither System2 execution nor approvals are inside a
   retry/fallback handler.
+- **Native Needle feedback failure after a successful read:** return
+  `status: "incomplete"` with the completed read prefix, explicit
+  `feedback_unavailable` halt reason and failed task state. Never retry the
+  read or reinterpret this as permission for an actionable plan.
 - **Invalid/forged plan or attempted replay:** hard rejection before staging
   or running tools. No second attempt to reinterpret it through Qwen.
 
@@ -91,8 +95,14 @@ alfred --resume-session <32-hex-session-id> --text "Check GPU temperature"
 alfred --resume-session <32-hex-session-id>
 ```
 
-The existing SQLite cognitive session is reused, but any interrupted `running`
-task is marked `failed/shutdown` and its actions are **not replayed**.
+The existing SQLite cognitive session is reused only when its previous owner
+has **exited** (or has explicitly released the session during safe shutdown).
+Each process owns its sessions through an SQLite claim tied to PID and (on
+Linux) process-start identity. A concurrent `--resume-session` while the owner
+is still alive is **refused without altering any running task**; the claim is
+serialized transactionally. Uncertain liveness is treated as active, not as a
+reason to steal a session. After verified termination, any interrupted
+`running` task is marked `failed/shutdown` and its actions are **not replayed**.
 Existing one-shot pending approvals remain in SQLite and can be reviewed with
 `alfred --pending`, then approved only from the trusted local CLI. A running
 or partially executed task is not implicitly retried, even if its status is
@@ -111,9 +121,11 @@ The new tests cover version/id/size validation, bounded prompt-injection
 resistance, matching executed tool signatures, no duplicate named tasks and
 services, zero elevated permissions on read-only handoff, single pending
 approval through the existing SQLite queue, one-shot execution, Qwen
-unavailability, SDK→Qwen pre-execution fallback, no fallback after a partial
-side effect, same task/session ledger correlation, interrupted session
-recovery, and a **real local HTTP /v1/chat/completions protocol smoke** using a
+unavailability, SDK→Qwen pre-execution transport fallback, malformed or
+repeated-key SDK proposal hard rejection without replanning, native feedback
+failure after a returned read, no fallback after a partial side effect,
+same task/session ledger correlation, live process conflict rejection and
+interrupted dead-owner session recovery, and a **real local HTTP /v1/chat/completions protocol smoke** using a
 deterministic stub server. That protocol smoke uses a stub instead of live
 Qwen weights; the separate CI `harness-sdk-smoke` job executes the pinned
 genuine SDK/Cordis process, but native Jetson/Needle weights are still untested.
