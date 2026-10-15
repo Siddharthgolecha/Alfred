@@ -88,6 +88,19 @@ class ShutdownSocket:
                     descriptor_bound = sock.getsockname() == str(self.path)
                 except OSError:
                     descriptor_bound = False
+                if descriptor_bound and not bound_here:
+                    # This is the narrow bind-interruption window. If a new
+                    # live listener replaced our unlinked pathname, the
+                    # descriptor still reports its old name; do NOT remove
+                    # the replacement. This socket has not called listen yet.
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                        probe.settimeout(0.2)
+                        try:
+                            probe.connect(str(self.path))
+                        except OSError:
+                            pass
+                        else:
+                            descriptor_bound = False
                 if bound_here or descriptor_bound:
                     try:
                         info = self.path.lstat()
