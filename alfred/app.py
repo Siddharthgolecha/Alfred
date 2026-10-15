@@ -541,6 +541,12 @@ def _main(argv=None):
     group.add_argument("--automation-tick",action="store_true",
                        help="Run one scheduler cycle for debugging and exit")
     group.add_argument("--reason",help="Test Qwen planner on a text input; no Cactus engine required")
+    group.add_argument("--memory-set",metavar="KEY=VALUE",
+                       help="Explicitly retain a short preference from the local CLI")
+    group.add_argument("--memory-list",action="store_true",
+                       help="List approved retained facts for this context scope")
+    group.add_argument("--memory-clear",metavar="KEY|ALL",
+                       help="Delete one/all retained facts in this scope")
     group.add_argument("--pending",action="store_true",help="List proposed tool actions awaiting approval")
     group.add_argument("--approve",type=int,metavar="ID",help="Locally approve and execute a proposal once")
     group.add_argument("--reject",type=int,metavar="ID",help="Locally reject a proposal")
@@ -580,13 +586,35 @@ def _main(argv=None):
     if args.command == "close":
         if any((args.doctor, args.text, args.ensure_backend, args.scheduler_only,
                 args.automations, args.automation_tick, args.reason,
-                args.pending, args.approve is not None, args.reject is not None)):
+                args.pending, args.approve is not None, args.reject is not None,
+                args.memory_set is not None, args.memory_list, args.memory_clear is not None)):
             parser.error("'close' cannot be combined with another operation")
         stopped = []
         for role in ("voice", "scheduler"):
             if request_close(logs, role):
                 stopped.append(role)
         print("Alfred stopped: " + ", ".join(stopped) if stopped else "Alfred is not running")
+        return 0
+    if args.memory_set is not None or args.memory_list or args.memory_clear is not None:
+        if not (cfg["runtime"]["context_enabled"]
+                and cfg["runtime"]["context_persistence_enabled"]):
+            parser.error("context and context persistence must both be opted into")
+        app=Alfred(cfg,load_models=False)
+        try:
+            if args.memory_set is not None:
+                if "=" not in args.memory_set:
+                    parser.error("--memory-set requires KEY=VALUE")
+                key,value=args.memory_set.split("=",1)
+                app.context.set_explicit_fact(key,value,local_approval=True)
+                print(json.dumps({"retained":key,"scope":cfg["runtime"]["context_mode"]}))
+            elif args.memory_list:
+                print(json.dumps(app.context.list_facts(),indent=2))
+            else:
+                app.context.clear_facts(None if args.memory_clear == "ALL"
+                                        else args.memory_clear,local_approval=True)
+                print(json.dumps({"cleared":args.memory_clear}))
+        finally:
+            app.close()
         return 0
     if args.doctor:
         return 0 if doctor(cfg) else 2
