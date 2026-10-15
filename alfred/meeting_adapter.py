@@ -16,6 +16,7 @@ import hashlib
 import json
 import math
 import re
+import secrets
 import threading
 import time
 
@@ -53,7 +54,12 @@ def _clock_time(value):
         raise ValueError("Invalid timestamp") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("Timezone is mandatory")
-    return parsed.astimezone(timezone.utc).timestamp()
+    return parsed.astimezone(timezone.utc)
+
+
+def _canonical_utc(value):
+    return _clock_time(value).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z").replace(".000000Z", "Z")
 
 
 def sanitize_segments(raw):
@@ -73,6 +79,8 @@ def sanitize_segments(raw):
         if type(source) is not str or not SOURCE.fullmatch(source):
             raise ValueError("Invalid microphone channel identifier")
         start,end=entry.get("start_utc"),entry.get("end_utc")
+        canonical_start=_canonical_utc(start)
+        canonical_end=_canonical_utc(end)
         if _clock_time(end)<_clock_time(start):
             raise ValueError("Meeting segment timestamps reversed")
         sid=entry.get("id")
@@ -108,7 +116,7 @@ def sanitize_segments(raw):
                 raise ValueError("Empty word")
             words.append({"word":value,"start_seconds":a,"end_seconds":b})
         row={
-            "id":sid, "start_utc":start, "end_utc":end,
+            "id":sid, "start_utc":canonical_start, "end_utc":canonical_end,
             "source":source,"speaker":source, "identity_type":"microphone_channel",
             "verified_identity":False,
             "text":_text(entry.get("text"),260),
@@ -171,21 +179,27 @@ def validate_minutes_proposal(proposal, segments, *, meeting_title):
     for item in actions:
         if type(item) is not dict or set(item)!={"task","owner","due"}:
             raise ValueError("Invalid action item fields")
-        task,excerpt=_quote(item["task"],by_id)
+        task,_=_quote(item["task"],by_id)
+        # Entity/date attribution MUST come from the cited action quote,
+        # never from another sentence in the same transcript segment.
         owner=item["owner"]
         due=item["due"]
         if type(owner) is not str or len(owner)>80 or (
-            owner!=UNKNOWN_OWNER and (not owner.strip() or owner.casefold() not in excerpt.casefold())):
+            owner!=UNKNOWN_OWNER and (not owner.strip() or owner.casefold() not in task.casefold())):
             raise ValueError("Owner must be explicitly supported or unassigned")
         if type(due) is not str or (
             due!=UNKNOWN_DATE and (
                 not re.fullmatch(r"\d{4}-\d{2}-\d{2}",due)
-                or due not in excerpt)):
+                or due not in task)):
             raise ValueError("Due date must be explicitly supported or unspecified")
         # Never turn a microphone channel label into a verified identity.
         if owner in {item["source"] for item in segments}:
             raise ValueError("Microphone channel is not a verified person")
-        out["action_items"].append({"task":task,"owner":owner,"due":due})
+        out["action_items"].append({
+            "task":task, "owner":owner,"due":due,
+            "source_segment_id":item["task"]["segment_id"],
+            "evidence_quote":task,
+        })
     return out
 
 
@@ -227,8 +241,9 @@ class OfflineMeetingAdapter:
     OPERATIONS=frozenset(("meeting_recording","transcript_retrieval",
                           "qwen_minutes","qr_obex_handoff"))
 
-    def __init__(self, provider=None, *, clock=time.time):
+    def __init__(self, provider=None, *, journal=None, clock=time.time):
         self._provider=provider
+        self._journal=journal
         self._clock=clock
         self._lock=threading.RLock()
         self._meetings={}       # meeting_id -> trusted session/owner/retention
