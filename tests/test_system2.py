@@ -174,8 +174,12 @@ class System2Tests(unittest.TestCase):
 
     def test_unknown_qwen_tool_cannot_execute(self):
         self.qwen.complete.return_value={"message":"Done","steps":[{"tool":"run_shell","args":{"cmd":"rm -rf /"}}]}
-        with self.assertRaises(ValueError):
-            self.sys.reason("delete everything")
+        result=self.sys.reason("delete everything")
+        self.assertEqual(result["status"],"incomplete")
+        self.assertEqual(result["error"],"invalid_plan")
+        self.assertEqual(self.sys.approvals.pending(),[])
+        self.assertEqual(self.store.list_schedules(),[])
+        self.qwen.complete.assert_called_once()
 
     def test_qwen_service_plan_is_staged(self):
         self.qwen.complete.return_value={
