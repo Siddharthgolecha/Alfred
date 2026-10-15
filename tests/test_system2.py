@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from alfred.config import load_config
-from alfred.models import Qwen
+from alfred.models import Qwen, QwenPlanResponseError
 from alfred.runtime import Store, Tools, TOOL_SCHEMAS
 from alfred.system2 import Approvals, System2, parse_plan, preflight
 
@@ -97,6 +97,26 @@ class System2Tests(unittest.TestCase):
         result=self.sys.reason("What is a qubit?",allow_actions=False)
         self.assertEqual(result["message"],"I can explain that.")
         self.assertEqual(result["results"],[])
+
+    def test_invalid_qwen_reply_does_not_create_a_schedule(self):
+        self.qwen.complete.side_effect=QwenPlanResponseError("missing fields")
+        out=self.sys.reason("Create a status schedule every 10 minutes")
+        self.assertIn("no actions were taken or scheduled",out["message"])
+        self.assertEqual(out["results"],[])
+        self.assertEqual(self.store.list_schedules(),[])
+        self.assertEqual(self.sys.approvals.pending(),[])
+
+    def test_valid_qwen_schedule_requires_local_approval(self):
+        self.qwen.complete.return_value={
+            "message":"Proposed a recurring GPU status check",
+            "steps":[{"tool":"schedule_every","args":{
+                "tool":"get_gpu_status","interval_minutes":10}}],
+            "save_as":None}
+        out=self.sys.reason("Schedule GPU status checks every ten minutes")
+        self.assertIn("approval",out)
+        self.assertEqual(self.store.list_schedules(),[])
+        self.sys.approve(out["approval"]["approval_id"])
+        self.assertEqual(len(self.store.list_schedules()),1)
 
     def test_unknown_qwen_tool_cannot_execute(self):
         self.qwen.complete.return_value={"message":"Done","steps":[{"tool":"run_shell","args":{"cmd":"rm -rf /"}}]}
@@ -240,6 +260,82 @@ class QwenSchemaTests(unittest.TestCase):
         with patch("alfred.models.request_json",return_value={"choices":[{"message":{"content":"hello"}}]}):
             with self.assertRaises(ValueError):
                 qwen.complete("command",TOOL_SCHEMAS[:2])
+
+
+    def test_missing_plan_fields_retry_preserves_schedule(self):
+        cfg=load_config()["qwen"]
+        supervisor=Mock()
+        supervisor.model_id.return_value=""
+        qwen=Qwen(cfg,supervisor)
+        malformed={"choices":[{"message":{"content":json.dumps({
+            "message":"Scheduled","action":"schedule_every"})}}]}
+        plan={"message":"I can schedule that","steps":[{"tool":"schedule_every",
+              "args":{"tool":"get_gpu_status","interval_minutes":10}}],
+              "save_as":None}
+        repaired={"choices":[{"message":{"content":json.dumps(plan)}}]}
+        with patch("alfred.models.request_json",side_effect=[malformed,repaired]) as send:
+            out=qwen.complete("Schedule GPU check every 10 minutes",TOOL_SCHEMAS)
+        self.assertEqual(out,plan)
+        self.assertEqual(send.call_count,2)
+        self.assertIn("RETRY:",send.call_args.args[1]["messages"][0]["content"])
+        self.assertEqual(send.call_args.args[1]["messages"][1]["content"],
+                         "Schedule GPU check every 10 minutes")
+
+    def test_persistent_invalid_plan_fails_after_one_retry(self):
+        cfg=load_config()["qwen"]
+        supervisor=Mock()
+        supervisor.model_id.return_value=""
+        qwen=Qwen(cfg,supervisor)
+        malformed={"choices":[{"message":{"content":'{"message":"scheduled"}'}}]}
+        with patch("alfred.models.request_json",return_value=malformed) as send:
+            with self.assertRaisesRegex(QwenPlanResponseError,
+                                        "No actions were executed"):
+                qwen.complete("Create a schedule",TOOL_SCHEMAS)
+        self.assertEqual(send.call_count,2)
+
+    def test_length_truncated_response_retried_not_executed(self):
+        cfg=load_config()["qwen"]
+        supervisor=Mock()
+        supervisor.model_id.return_value=""
+        qwen=Qwen(cfg,supervisor)
+        truncated={"choices":[{"finish_reason":"length","message":{
+            "content":'{"message":"done","steps":[],"save_as":null}'}}]}
+        repaired={"choices":[{"finish_reason":"stop","message":{"content":
+            '{"message":"Need an interval","steps":[],"save_as":null}'}}]}
+        with patch("alfred.models.request_json",side_effect=[truncated,repaired]) as send:
+            plan=qwen.complete("Create a schedule",TOOL_SCHEMAS)
+        self.assertEqual(send.call_count,2)
+        self.assertEqual(plan["message"],"Need an interval")
+        self.assertEqual(plan["steps"],[])
+
+    def test_llama_structured_plan_asks_for_non_thinking(self):
+        cfg=load_config()["qwen"]
+        supervisor=Mock()
+        supervisor.backend="llama_cpp"
+        supervisor.model_id.return_value=""
+        qwen=Qwen(cfg,supervisor)
+        valid={"choices":[{"message":{"content":
+            '{"message":"No actions","steps":[],"save_as":null}'}}]}
+        with patch("alfred.models.request_json",return_value=valid) as send:
+            qwen.complete("What is status?",TOOL_SCHEMAS)
+        payload=send.call_args.args[1]
+        self.assertEqual(payload["chat_template_kwargs"],{"enable_thinking":False})
+        self.assertEqual(payload["reasoning_effort"],"none")
+
+    def test_other_backends_do_not_receive_llama_specific_options(self):
+        cfg=load_config()["qwen"]
+        valid={"choices":[{"message":{"content":
+            '{"message":"No actions","steps":[],"save_as":null}'}}]}
+        for backend in ("ollama","lm_studio"):
+            supervisor=Mock()
+            supervisor.backend=backend
+            supervisor.model_id.return_value=""
+            with self.subTest(backend=backend):
+                with patch("alfred.models.request_json",return_value=valid) as send:
+                    Qwen(cfg,supervisor).complete("Status?",TOOL_SCHEMAS)
+                payload=send.call_args.args[1]
+                self.assertNotIn("reasoning_effort",payload)
+                self.assertNotIn("chat_template_kwargs",payload)
 
 
 
