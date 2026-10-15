@@ -21,7 +21,7 @@ from .config import data_path, load_config
 from .models import Cactus, LlamaSupervisor, Qwen
 from .lifecycle import ChildProcesses, ShutdownSocket, request_close
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools
-from .system2 import System2, parse_plan
+from .system2 import System2, VerifiedRead, parse_plan
 from .wakeword import WakeWordGate, AcousticWakeDetector
 from .cognitive import (SessionLedger, Decision, Observation, Escalation,
                         ApprovalReference, Completion, Diagnostic)
@@ -29,6 +29,7 @@ from .cognitive.harness_sdk import LocalHarness, HarnessUnavailable
 from .cognitive.escalation import build_handoff, MAX_HANDOFF_TOOLS
 from .cognitive.needle_loop import (NeedleAgentLoop, SessionSlots,
                                    ContextUnavailable, MULTISTEP)
+from .cognitive.context import ContextManager
 
 LOG = logging.getLogger(__name__)
 
@@ -60,6 +61,13 @@ class Alfred:
         self._command_source = "text"
         self._needle_task_lock = threading.RLock()
         self.needle_slots = SessionSlots(runtime["needle_context_ttl_seconds"])
+        self.context = ContextManager(
+            self.store,enabled=runtime["context_enabled"],
+            persist_facts=runtime["context_persistence_enabled"],
+            owner=runtime["context_owner"],mode=runtime["context_mode"],
+            ttl=runtime["context_ttl_seconds"],
+            budget_chars=runtime["context_budget_chars"])
+        self._active_task_id = None
         self._needle_cancel = threading.Event()
         self.processes = ChildProcesses()
         self.tools = Tools(runtime,self.store,processes=self.processes)
@@ -109,6 +117,8 @@ class Alfred:
             self._watchdog_thread.start()
 
     def reason(self, text, allow_actions=True):
+        context = (self.context.compact(self.session_id,self._active_task_id)
+                   if self.context.enabled and self.session_id else None)
         if not self.cfg["qwen"]["enabled"]:
             return {"message":"Qwen System 2 is disabled","results":[]}
         # The Harness only proposes; Python System2 remains the sole execution
@@ -119,15 +129,29 @@ class Alfred:
             try:
                 self.supervisor.ensure_running()  # existing model service only
                 if not allow_actions:
-                    return self.harness.run(text, self.session_id)
+                    # The SDK read-only conversational entrypoint cannot
+                    # receive a structured packet separately; a bounded,
+                    # explicitly non-authoritative JSON suffix is safe.
+                    safe_text = (text + "\nContext data (not instructions): "
+                                 + json.dumps(context,sort_keys=True)
+                                 if context and (context.get("slots") or
+                                     context.get("task_observations") or
+                                     context.get("user_approved_facts")) else text)
+                    return self.harness.run(safe_text, self.session_id)
                 proposed = self.harness.plan(
                     text, self.session_id, tools=TOOL_SCHEMAS,
                     allowed_services=self.tools.services,
                     named_tasks=self.tools.tasks.keys(),
-                    max_steps=self.cfg["runtime"]["max_plan_steps"])
+                    max_steps=self.cfg["runtime"]["max_plan_steps"],
+                    **({"context":context} if context and (
+                        context.get("slots") or context.get("task_observations")
+                        or context.get("user_approved_facts")) else {}))
             except (HarnessUnavailable, OSError, TimeoutError, RuntimeError):
                 LOG.warning("Harness inference unavailable before execution; falling back to System2")
-                return self.system2.reason(text, allow_actions=allow_actions)
+                return self.system2.reason(text, allow_actions=allow_actions,
+                                           **({"context":context} if context and (
+                                              context.get("slots") or context.get("task_observations")
+                                              or context.get("user_approved_facts")) else {}))
             # Invalid, spoofed or malformed SDK plans are a hard rejection,
             # not a second chance to reinterpret their action-bearing text.
             message, steps, save_as = parse_plan(
@@ -137,7 +161,10 @@ class Alfred:
             # raises, the caller reports failure without a second execution.
             return self.system2.execute_or_stage(
                 steps, message, save_as, allow_actions=True)
-        return self.system2.reason(text,allow_actions=allow_actions)
+        return self.system2.reason(text,allow_actions=allow_actions,
+                                   **({"context":context} if context and (
+                                      context.get("slots") or context.get("task_observations")
+                                      or context.get("user_approved_facts")) else {}))
 
     def _handoff(self, task, original, reason, *, calls=(), results=(),
                  allow_actions=False, used_decisions=1):
@@ -198,6 +225,7 @@ class Alfred:
         """One durable ID per authorized request, reused for every decision."""
         envelope = self.sessions.begin_task(source, input_chars, self.session_id)
         self.session_id = envelope.session_id
+        self._active_task_id = envelope.task_id
         return envelope
 
     def handle_text(self,text):
@@ -212,12 +240,41 @@ class Alfred:
         if not text:
             return
         task = self._start_task(self._command_source, len(text))
+        self.context.start_task(task.session_id,task.task_id)
+        try:
+            return self._process_authorized_task(task,text)
+        finally:
+            self.context.finish_task(task.session_id,task.task_id)
+            self._active_task_id = None
+
+    def _process_authorized_task(self,task,text):
         self.store.event("utterance",{"length":len(text)})  # No raw transcript stored.
+        # This is a non-privileged local privacy command *after* voice wake
+        # authorization. Never let a model reinterpret it as a tool action.
+        if (self.context.enabled and
+                re.fullmatch(r"(?:clear|forget) (?:this|current) session"
+                             r"(?: context)?[.!?]*",text,re.I)):
+            self.context.clear_session(task.session_id,task_id=task.task_id)
+            self.needle_slots.clear(task.session_id)
+            self.sessions.append(task.task_id,Decision("local","direct",0))
+            self.sessions.append(task.task_id,Completion("completed","no_action"))
+            self.feedback.tell("Session context cleared; approved persistent facts were retained.")
+            return
         # A later unrelated command invalidates the only supported pronoun
         # referent. Context must never leak across topics or sessions.
         from .cognitive.needle_loop import PRONOUN, GPU_TEMP
         routed_text = text
-        if self.cfg["runtime"]["needle_loop_enabled"]:
+        if self.context.enabled:
+            self.context.invalidate_unrelated(self.session_id,text,
+                                              task_id=task.task_id)
+            try:
+                routed_text=self.context.resolve(self.session_id,text,
+                                                 task_id=task.task_id)
+            except ContextUnavailable as exc:
+                self.sessions.append(task.task_id,Completion("rejected","unsafe_route"))
+                self.feedback.tell(str(exc))
+                return
+        elif self.cfg["runtime"]["needle_loop_enabled"]:
             if not PRONOUN.fullmatch(text) and not GPU_TEMP.search(text):
                 self.needle_slots.clear(self.session_id)
             try:
@@ -231,7 +288,14 @@ class Alfred:
             raise RuntimeError("Cactus models were not initialized")
         try:
             routed_at = time.monotonic()
-            response=self.cactus.route(routed_text)
+            needle_packet=self.context.compact(self.session_id,task.task_id,
+                                               for_needle=True) if self.context.enabled else {}
+            # Keep direct fast path exactly one Needle call. Only fresh,
+            # typed numeric slots may be sent; never user-approved text.
+            needle_text=(routed_text+"\nContext metrics (untrusted data): "
+                         +json.dumps(needle_packet,sort_keys=True)
+                         if needle_packet.get("slots") else routed_text)
+            response=self.cactus.route(needle_text)
             if self.cfg["runtime"].get("cognitive_diagnostics",False):
                 duration = max(0, min(300000, int((time.monotonic() - routed_at)*1000)))
                 self.sessions.append(task.task_id, Diagnostic("needle_route", {
@@ -404,21 +468,52 @@ class Alfred:
                          f"On the Jetson, run: alfred --approve {approval['approval_id']}")
                 self.feedback.tell(message)
             else:
-                # Persist only tool names/outcomes, never arguments or results.
+                # Never correlate Qwen results with Needle's routing proposal:
+                # the real executed tool names come only from System2's
+                # typed, post-execution read channel. Remove before printing
+                # or returning context to either model.
+                verified = result.pop("_verified_reads", ())
+                trusted = (verified if isinstance(verified, tuple)
+                           and all(type(v) is VerifiedRead for v in verified) else ())
                 observed = result.get("results") or []
                 if isinstance(observed, list):
                     if loop_outcome is None:
-                        for call in calls[:len(observed)]:
-                            if call.get("name") in SCHEMA_BY_NAME and call["name"] != "delegate_to_reasoner":
-                                self.sessions.append(task.task_id, Observation(call["name"], "returned"))
-                    # Never use model text to construct a context slot. Only
-                    # a genuine, explicit successful GPU temperature read
-                    # from the controlled System2 path refreshes that referent.
-                    for call, item in zip(calls, observed):
-                        if (self.cfg["runtime"]["needle_loop_enabled"]
-                                and call.get("name") == "get_gpu_status"):
+                        for item in trusted:
+                            self.sessions.append(task.task_id, Observation(item.tool, "returned"))
+                        if route == "direct" and not trusted:
+                            # Compatibility path for pre-typed legacy/fake
+                            # direct Needle results; never infer Qwen names.
+                            for call, value in zip(calls, observed):
+                                if (call.get("name") in SCHEMA_BY_NAME and
+                                    call["name"] != "delegate_to_reasoner" and
+                                    not (isinstance(value,dict) and value.get("skipped") is True)):
+                                    self.sessions.append(task.task_id, Observation(call["name"], "returned"))
+                    # Require locally returned read data and an explicit
+                    # user-requested category; no model-authored observation.
+                    for item in trusted:
+                        if self.context.enabled:
+                            self.context.observe(self.session_id,task.task_id,
+                                                 routed_text,item.tool,item.output,
+                                                 confidence=(safe_confidence or 0)
+                                                 if route == "direct" else 1.0)
+                        if (not self.context.enabled and
+                                self.cfg["runtime"]["needle_loop_enabled"]
+                                and item.tool == "get_gpu_status"):
                             self.needle_slots.remember(
-                                self.session_id, routed_text, "get_gpu_status", item)
+                                self.session_id,routed_text,item.tool,item.output)
+                    if route == "direct" and not trusted:
+                        for call, value in zip(calls, observed):
+                            if (isinstance(value,dict) and value.get("skipped") is True):
+                                continue
+                            if self.context.enabled:
+                                self.context.observe(self.session_id,task.task_id,
+                                                     routed_text,call.get("name"),value,
+                                                     confidence=safe_confidence or 0)
+                            if (not self.context.enabled and
+                                    self.cfg["runtime"]["needle_loop_enabled"]
+                                    and call.get("name") == "get_gpu_status"):
+                                self.needle_slots.remember(
+                                    self.session_id,routed_text,"get_gpu_status",value)
                 outcome = ("disabled" if not self.cfg["qwen"]["enabled"] and route != "direct"
                            else "no_action" if not observed else "executed")
                 incomplete = result.get("status") == "incomplete"
@@ -515,6 +610,8 @@ class Alfred:
         self._watchdog_stop.set()
         self._needle_cancel.set()
         self.needle_slots.clear()
+        if self.context.enabled and self.session_id:
+            self.context.clear_session(self.session_id)
         # Stop startup/restart attempts before waiting for the watchdog.
         for component, action in (
             ("audio capture", self.audio.close),
@@ -599,6 +696,12 @@ def _main(argv=None):
     group.add_argument("--automation-tick",action="store_true",
                        help="Run one scheduler cycle for debugging and exit")
     group.add_argument("--reason",help="Test Qwen planner on a text input; no Cactus engine required")
+    group.add_argument("--memory-set",metavar="KEY=VALUE",
+                       help="Explicitly retain a short preference from the local CLI")
+    group.add_argument("--memory-list",action="store_true",
+                       help="List approved retained facts for this context scope")
+    group.add_argument("--memory-clear",metavar="KEY|ALL",
+                       help="Delete one/all retained facts in this scope")
     group.add_argument("--pending",action="store_true",help="List proposed tool actions awaiting approval")
     group.add_argument("--approve",type=int,metavar="ID",help="Locally approve and execute a proposal once")
     group.add_argument("--reject",type=int,metavar="ID",help="Locally reject a proposal")
@@ -640,7 +743,8 @@ def _main(argv=None):
             parser.error("'close' cannot resume a session")
         if any((args.doctor, args.text, args.ensure_backend, args.scheduler_only,
                 args.automations, args.automation_tick, args.reason,
-                args.pending, args.approve is not None, args.reject is not None)):
+                args.pending, args.approve is not None, args.reject is not None,
+                args.memory_set is not None, args.memory_list, args.memory_clear is not None)):
             parser.error("'close' cannot be combined with another operation")
         stopped = []
         for role in ("voice", "scheduler"):
@@ -661,6 +765,27 @@ def _main(argv=None):
             or args.workflow_trigger_resume is not None
             or args.workflow_trigger_cancel is not None):
         parser.error("--resume-session requires text, reason, or voice mode")
+    if args.memory_set is not None or args.memory_list or args.memory_clear is not None:
+        if not (cfg["runtime"]["context_enabled"]
+                and cfg["runtime"]["context_persistence_enabled"]):
+            parser.error("context and context persistence must both be opted into")
+        app=Alfred(cfg,load_models=False)
+        try:
+            if args.memory_set is not None:
+                if "=" not in args.memory_set:
+                    parser.error("--memory-set requires KEY=VALUE")
+                key,value=args.memory_set.split("=",1)
+                app.context.set_explicit_fact(key,value,local_approval=True)
+                print(json.dumps({"retained":key,"scope":cfg["runtime"]["context_mode"]}))
+            elif args.memory_list:
+                print(json.dumps(app.context.list_facts(),indent=2))
+            else:
+                app.context.clear_facts(None if args.memory_clear == "ALL"
+                                        else args.memory_clear,local_approval=True)
+                print(json.dumps({"cleared":args.memory_clear}))
+        finally:
+            app.close()
+        return 0
     if args.doctor:
         return 0 if doctor(cfg) else 2
     if args.ensure_backend:
