@@ -145,6 +145,13 @@ def parse_plan(plan, text, tools, max_steps):
     return message,steps,save_as
 
 
+@dataclass(frozen=True)
+class VerifiedRead:
+    """Python-authenticated returned read, never a model-authored claim."""
+    tool: str
+    output: object
+
+
 class System2:
     """Single entry for Qwen plans, with explicit read-only fallback."""
     def __init__(self, qwen, tools, store, cfg):
@@ -173,7 +180,19 @@ class System2:
         if not steps:
             return {"message":message or "No tool action required","results":[]}
         results=self.tools.run_plan(steps)
-        return {"message":message or "Completed","results":results}
+        # Bind observations to *preflighted and actually returned* step names.
+        # The planner's text and any unexecuted/skipped step are not evidence.
+        # This opaque typed channel is consumed by Alfred, then removed before
+        # showing JSON to users or passing anything back to a language model.
+        from .cognitive.context import READS
+        verified = tuple(
+            VerifiedRead(step["tool"], value)
+            for step, value in zip(steps, results)
+            if step["tool"] in READS and not (
+                isinstance(value,dict) and value.get("skipped") is True)
+        ) if isinstance(results,list) and len(results)==len(steps) else ()
+        return {"message":message or "Completed","results":results,
+                "_verified_reads":verified}
 
     def reason(self, utterance, allow_actions=True, *, context=None):
         # Tool schemas, not just tool names, are provided to the planner.
