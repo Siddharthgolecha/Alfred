@@ -271,22 +271,39 @@ class SessionLedger:
                 (session_id, limit))]
 
     def prune(self, before_epoch):
-        """Explicit retention; only finished, inactive sessions can be pruned."""
+        """Prune only finished sessions that have no *live* process owner.
+
+        A voice agent can be alive between commands with no running task.
+        Checking the task table alone would erase its session and owner claim.
+        Serialize selection/deletion against a concurrent resume/begin_task
+        with a SQLite write lock; uncertain owner liveness fails closed.
+        """
         if type(before_epoch) is not int or before_epoch < 0:
             raise ValueError("Invalid cutoff")
         with self.store.lock, self.store.db:
+            self.store.db.execute("BEGIN IMMEDIATE")
             rows = self.store.db.execute(
-                "SELECT id FROM cognitive_sessions WHERE last_active_at<? "
+                "SELECT s.id, o.owner_pid, o.owner_started "
+                "FROM cognitive_sessions s LEFT JOIN cognitive_session_owners o "
+                "ON o.session_id=s.id "
+                "WHERE s.last_active_at<? "
                 "AND NOT EXISTS (SELECT 1 FROM cognitive_tasks t "
-                "WHERE t.session_id=cognitive_sessions.id AND t.state='running')",
+                "WHERE t.session_id=s.id AND t.state='running')",
                 (before_epoch,)).fetchall()
+            removed = 0
             for row in rows:
+                # Dead owners can be pruned; a live/indeterminate owner cannot,
+                # even when all of its current tasks are finished.
+                if (row["owner_pid"] is not None and
+                        _is_live_owner(row["owner_pid"], row["owner_started"])):
+                    continue
                 sid = row["id"]
                 self.store.db.execute("DELETE FROM cognitive_events WHERE session_id=?", (sid,))
                 self.store.db.execute("DELETE FROM cognitive_tasks WHERE session_id=?", (sid,))
                 self.store.db.execute("DELETE FROM cognitive_session_owners WHERE session_id=?", (sid,))
                 self.store.db.execute("DELETE FROM cognitive_sessions WHERE id=?", (sid,))
-            return len(rows)
+                removed += 1
+            return removed
 
 
 class MemorySessionLedger:
