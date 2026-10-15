@@ -362,25 +362,28 @@ class AppIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.app.sessions.list_tasks(self.app.session_id)),2)
 
     def test_unsupported_needle_qwen_read_creates_verified_fresh_slot(self):
+        # Explicit GPU temperature is intentionally corrected to the direct
+        # GPU tool before Qwen. System status exercises a real unsupported
+        # Needle -> Qwen read without overriding that existing fast path.
         self.app.cactus.route.side_effect=[
             {"confidence":.95,"function_calls":[]},
             {"confidence":.95,"function_calls":[
-                {"name":"get_gpu_status","arguments":{}}]}]
+                {"name":"get_system_status","arguments":{}}]}]
         self.app.system2.qwen.complete=Mock(return_value={
-            "message":"GPU checked","steps":[{"tool":"get_gpu_status","args":{}}],
+            "message":"System checked","steps":[{"tool":"get_system_status","args":{}}],
             "save_as":None})
         self.app.system2.tools.run_plan=Mock(return_value=[
-            {"available":True,"gpu_temp_c":64}])
-        self.app.handle_text("Check GPU temperature")
+            {"uptime_seconds":120}])
+        self.app.handle_text("Check system status")
         self.app.system2.qwen.complete.assert_called_once()
         self.assertEqual(self.app.context.resolve(self.app.session_id,
-                         "check it again"),"Show GPU temperature again")
+                         "check it again"),"Get system status again")
         first=self.app.sessions.list_tasks(self.app.session_id)[0]
         returned=[e.tool for e in self.app.sessions.events(first["id"])
                   if e.kind=="observation" and e.outcome=="returned"]
-        self.assertEqual(returned,["get_gpu_status"])
+        self.assertEqual(returned,["get_system_status"])
         self.app.handle_text("check it again")
-        self.assertIn("Show GPU temperature again",
+        self.assertIn("Get system status again",
                       self.app.cactus.route.call_args.args[0])
         self.app.system2.qwen.complete.assert_called_once()
         self.assertEqual(self.app.system2.tools.run_plan.call_count,2)
@@ -405,20 +408,22 @@ class AppIntegrationTests(unittest.TestCase):
                          self.app.feedback.tell.call_args.args[0])
 
     def test_skipped_denied_or_invalid_qwen_plan_cannot_create_slot(self):
+        # Avoid GPU routing's intentional direct-read correction so these
+        # cases really run through System2 Qwen before any tool execution.
         self.app.cactus.route.return_value={"confidence":.95,"function_calls":[]}
         self.app.system2.qwen.complete=Mock(return_value={
-            "message":"Skipped","steps":[{"tool":"get_gpu_status","args":{}}],
+            "message":"Skipped","steps":[{"tool":"get_system_status","args":{}}],
             "save_as":None})
         self.app.system2.tools.run_plan=Mock(return_value=[{"skipped":True}])
-        self.app.handle_text("Check GPU temperature")
+        self.app.handle_text("Check system status")
         self.assertEqual(self.app.context.compact(self.app.session_id)["slots"],{})
         self.app.system2.qwen.complete.return_value={
             "message":"Unsafe","steps":[{"tool":"run_named_task",
                                           "args":{"name":"unknown"}}],"save_as":None}
-        self.app.handle_text("Check GPU temperature")
+        self.app.handle_text("Check system status")
         self.assertEqual(self.app.context.compact(self.app.session_id)["slots"],{})
         self.app.system2.qwen.complete.side_effect=OSError("Qwen down")
-        self.app.handle_text("Check GPU temperature")
+        self.app.handle_text("Check system status")
         self.assertEqual(self.app.context.compact(self.app.session_id)["slots"],{})
         self.assertEqual(self.app.system2.tools.run_plan.call_count,1)
 
