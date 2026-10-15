@@ -5,6 +5,8 @@ history remain untouched. No user words or tool output are persisted.
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
 import sqlite3
 import threading
 import time
@@ -16,15 +18,50 @@ SCHEMA_VERSION = 1
 MAX_TASK_EVENTS = 64
 
 
+def _process_start(pid):
+    """Best-effort Linux process birth marker to distinguish a reused PID.
+
+    On platforms without /proc, liveness is conservative: an existing PID
+    blocks recovery, even if it has been recycled.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        return stat.rsplit(") ", 1)[1].split()[19]  # Linux stat field 22
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _is_live_owner(pid, started):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True  # Unknown process state: fail closed.
+    current = _process_start(pid)
+    return not (started is not None and current is not None and started != current)
+
+
+
 class SessionLedger:
     def __init__(self, store):
         self.store = store
+        self._owner_token = new_id()
+        self._owner_pid = os.getpid()
+        self._owner_started = _process_start(self._owner_pid)
         with store.lock, store.db:
             store.db.execute("PRAGMA busy_timeout=5000")
             store.db.executescript("""
                 CREATE TABLE IF NOT EXISTS cognitive_sessions(
                     id TEXT PRIMARY KEY, started_at INTEGER NOT NULL,
                     last_active_at INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS cognitive_session_owners(
+                    session_id TEXT PRIMARY KEY REFERENCES cognitive_sessions(id),
+                    owner_token TEXT NOT NULL,
+                    owner_pid INTEGER NOT NULL,
+                    owner_started TEXT);
                 CREATE TABLE IF NOT EXISTS cognitive_tasks(
                     id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL REFERENCES cognitive_sessions(id),
@@ -52,6 +89,45 @@ class SessionLedger:
             if version < 0:
                 raise ValueError("Invalid database user_version")
 
+    def _claim_owner(self, session_id, *, recovery=False):
+        """Called under a SQLite write transaction and store.lock.
+
+        No timestamp-only lease expiry: a slow but live process can still be
+        running a tool. Recovery is allowed only after verified process death
+        or explicit release by the owner.
+        """
+        db = self.store.db
+        row = db.execute(
+            "SELECT owner_token,owner_pid,owner_started "
+            "FROM cognitive_session_owners WHERE session_id=?",
+            (session_id,)).fetchone()
+        if row is not None:
+            if row["owner_token"] == self._owner_token and row["owner_pid"] == os.getpid():
+                return
+            if _is_live_owner(row["owner_pid"], row["owner_started"]):
+                raise RuntimeError("Session is owned by an active Alfred process")
+            if not recovery:
+                raise RuntimeError("Interrupted session requires explicit recovery")
+            db.execute("DELETE FROM cognitive_session_owners WHERE session_id=?", (session_id,))
+        elif not recovery:
+            # New sessions insert an ownership record as part of creation.
+            raise RuntimeError("Session is not owned by this Alfred process")
+        db.execute(
+            "INSERT INTO cognitive_session_owners("
+            "session_id,owner_token,owner_pid,owner_started) VALUES(?,?,?,?)",
+            (session_id,self._owner_token,os.getpid(),self._owner_started))
+
+    def release_ownership(self):
+        """Release only this instance's claims after all active work stops.
+
+        Intentionally does not complete indeterminate tasks or modify any
+        pending one-shot approval. The next explicit resume performs recovery.
+        """
+        with self.store.lock, self.store.db:
+            self.store.db.execute(
+                "DELETE FROM cognitive_session_owners WHERE owner_token=? AND owner_pid=?",
+                (self._owner_token,os.getpid()))
+
     def begin_task(self, source, input_chars, session_id=None):
         started = int(time.time())
         sid = valid_id(session_id) if session_id is not None else new_id()
@@ -66,6 +142,12 @@ class SessionLedger:
                 self.store.db.execute(
                     "INSERT INTO cognitive_sessions(id,started_at,last_active_at) VALUES(?,?,?)",
                     (sid, started, started))
+                self.store.db.execute(
+                    "INSERT INTO cognitive_session_owners("
+                    "session_id,owner_token,owner_pid,owner_started) VALUES(?,?,?,?)",
+                    (sid,self._owner_token,os.getpid(),self._owner_started))
+            else:
+                self._claim_owner(sid)
             self.store.db.execute(
                 "INSERT INTO cognitive_tasks(id,session_id,source,started_at,state) "
                 "VALUES(?,?,?,?,?)", (item.task_id, sid, source, started, "running"))
@@ -87,11 +169,15 @@ class SessionLedger:
         from the trusted local CLI; no new proposal is synthesized.
         """
         sid = valid_id(session_id)
-        with self.store.lock:
+        with self.store.lock, self.store.db:
+            # Serialize ownership takeover against other processes before
+            # touching a single running task. Never fail a live owner's trace.
+            self.store.db.execute("BEGIN IMMEDIATE")
             row = self.store.db.execute(
                 "SELECT id FROM cognitive_sessions WHERE id=?", (sid,)).fetchone()
             if row is None:
                 raise ValueError("Unknown cognitive session")
+            self._claim_owner(sid, recovery=True)
             running = [r["id"] for r in self.store.db.execute(
                 "SELECT id FROM cognitive_tasks WHERE session_id=? AND state='running'",
                 (sid,)).fetchall()]
@@ -198,6 +284,7 @@ class SessionLedger:
                 sid = row["id"]
                 self.store.db.execute("DELETE FROM cognitive_events WHERE session_id=?", (sid,))
                 self.store.db.execute("DELETE FROM cognitive_tasks WHERE session_id=?", (sid,))
+                self.store.db.execute("DELETE FROM cognitive_session_owners WHERE session_id=?", (sid,))
                 self.store.db.execute("DELETE FROM cognitive_sessions WHERE id=?", (sid,))
             return len(rows)
 
