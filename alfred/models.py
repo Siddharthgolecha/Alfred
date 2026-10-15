@@ -65,6 +65,20 @@ class QwenPlanResponseError(ValueError):
     """The inference backend did not return a complete, schema-shaped plan."""
 
 
+def _unique_json_pairs(pairs):
+    """Refuse ambiguous object keys at every depth, not just top-level."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise QwenPlanResponseError("Duplicate JSON key in Qwen plan")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_constant(value):
+    raise QwenPlanResponseError("Non-finite JSON number in Qwen plan")
+
+
 class Qwen:
     """Schema-constrained System 2 planner across compatible local services."""
     def __init__(self, cfg, supervisor):
@@ -164,21 +178,45 @@ class Qwen:
             content = choice["message"]["content"]
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise QwenPlanResponseError("Missing chat completion content") from exc
-        if finish_reason == "length":
-            raise QwenPlanResponseError("Qwen completion ran out of output tokens")
+        if finish_reason not in (None, "stop"):
+            raise QwenPlanResponseError("Qwen completion did not finish successfully")
         if not isinstance(content, str) or not content.strip():
             raise QwenPlanResponseError("Empty plan content (possibly thinking-only)")
         try:
-            plan = json.loads(content)
+            plan = json.loads(content, object_pairs_hook=_unique_json_pairs,
+                              parse_constant=_reject_nonfinite_constant)
         except (TypeError, ValueError) as exc:
-            raise QwenPlanResponseError("Plan content is not JSON") from exc
+            raise QwenPlanResponseError("Malformed or ambiguous Qwen JSON plan") from exc
         if (not isinstance(plan, dict)
                 or set(plan) != {"message", "steps", "save_as"}
                 or not isinstance(plan["message"], str)
                 or len(plan["message"]) > 800
                 or not isinstance(plan["steps"], list)
+                or len(plan["steps"]) > 5
                 or not (plan["save_as"] is None or isinstance(plan["save_as"], str))):
             raise QwenPlanResponseError("Qwen response missing required plan fields")
+        for step in plan["steps"]:
+            if (not isinstance(step, dict)
+                    or not {"tool", "args"} <= set(step)
+                    or not set(step) <= {"tool", "args", "when"}
+                    or not isinstance(step["tool"], str)
+                    or not 1 <= len(step["tool"]) <= 128
+                    or not isinstance(step["args"], dict)):
+                raise QwenPlanResponseError("Malformed Qwen plan step structure")
+            if "when" in step:
+                when = step["when"]
+                if (not isinstance(when, dict)
+                        or set(when) != {"step", "field", "op", "value"}
+                        or type(when["step"]) is not int
+                        or when["step"] < 0
+                        or not isinstance(when["field"], str)
+                        or not isinstance(when["op"], str)
+                        or when["op"] not in ("gt", "gte", "lt", "lte", "eq", "neq")
+                        or type(when["value"]) not in (str, int, float, bool)):
+                    raise QwenPlanResponseError("Malformed Qwen step condition")
+        # Tool authorization, argument semantics, references and service
+        # allowlists remain exclusively in System2.parse_plan/preflight.
+        # An unauthorized but structurally valid tool is NOT regenerated.
         return plan
 
     def explain(self, user_request, observed_results):
