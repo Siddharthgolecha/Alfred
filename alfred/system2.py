@@ -176,6 +176,17 @@ class System2:
         results=self.tools.run_plan(steps)
         return {"message":message or "Completed","results":results}
 
+    @staticmethod
+    def _incomplete_plan():
+        # Explicit failure metadata prevents a failed inference from being
+        # recorded as a successful "no action" completion in the task ledger.
+        return {"status": "incomplete", "error": "invalid_plan",
+                "message": (
+                    "I couldn't interpret that request as a valid plan, so no "
+                    "actions were taken or scheduled. Please try again with a "
+                    "specific action and time or interval."
+                ), "results": []}
+
     def reason(self, utterance, allow_actions=True):
         # Tool schemas, not just tool names, are provided to the planner.
         tool_catalog=[s for s in TOOL_SCHEMAS if s["name"] not in
@@ -185,16 +196,20 @@ class System2:
                                     allowed_services=self.tools.services,
                                     named_tasks=self.tools.tasks.keys())
         except QwenPlanResponseError as exc:
-            # Invalid model output is not a plan. Do not stage, execute, save,
-            # or call a second inference; return a clear recovery path instead.
+            # Invalid model output is not a plan. No tool authorization is
+            # retried or inferred from the failed completion.
             LOG.warning("System 2 plan unavailable: %s", exc)
-            return {"message": (
-                "I couldn't interpret that request as a valid plan, so no "
-                "actions were taken or scheduled. Please try again with a "
-                "specific action and time or interval."
-            ), "results": []}
-        message,steps,save_as=parse_plan(plan,utterance,self.tools,
-                                        self.cfg.get("max_plan_steps",5))
+            return self._incomplete_plan()
+        try:
+            message,steps,save_as=parse_plan(plan,utterance,self.tools,
+                                            self.cfg.get("max_plan_steps",5))
+        except (ValueError, PermissionError) as exc:
+            # Semantic failures (unknown tools, unapproved services, invalid
+            # typed arguments) MUST NOT be regenerated into new permissions.
+            # This is deliberately before execute_or_stage: never intercept a
+            # partially executed plan and treat it as retryable.
+            LOG.warning("System 2 plan rejected by preflight: %s", exc)
+            return self._incomplete_plan()
         outcome = self.execute_or_stage(steps,message,save_as,allow_actions)
         # Only a completed, read-only plan may generate a second explanation.
         # No output from this second inference is interpreted as a tool call.
