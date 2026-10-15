@@ -2,9 +2,11 @@
 
 **Status: offline implementation, NOT release-qualified.**
 Base: latest `main` as of 2026-10-15. Issue #18 depends on #13–#17:
-#15 PR #32, #16 PR #33 and #17 PR #36 are still unmerged. This PR is
-therefore **draft, BLOCKED for final approval/merge** until their merged
-interfaces are audited and benchmarks rerun against that exact commit.
+#16 PR #33 has now merged into `main` and is integrated in this
+branch at merge commit `bb54cb2e0d414ff09e4af3bbb2ba06b42b23b3c0`.
+#15 PR #32 and #17 PR #36 remain unmerged. This PR is therefore
+**draft, BLOCKED for final approval/merge** pending those dependencies,
+their combined security/inference audit and physical Orin validation.
 
 ## Architecture: resource admission and rollback
 
@@ -100,8 +102,10 @@ raw CSV records gate-enabled, granted, queued, rejection, pressure and
 resource-fixture fields for every one of the 432 cases. This validates
 offline cooperative policy wiring only, not native performance or
 real concurrent device behavior. The "unified" path is a
-Harness/admission policy proxy, **NOT issue #15 or #16's currently unmerged
-implementation** and NOT full native latency. `/proc/meminfo` and
+Harness/admission policy proxy, **NOT issue #15's unmerged implementation**
+and NOT full native latency. Issue #16's scoped ContextManager is now in the
+combined source, but the offline matrix keeps its optional context flags off
+and cannot establish full context/admission behavior on physical hardware. `/proc/meminfo` and
 normalized host CPU load are measured locally; **Jetson GPU load, power
 and Qwen cold/warm model times are NULL**, never interpolated.
 
@@ -131,7 +135,7 @@ actual System2 preflight denial of network/shell/non-allowlisted tools,
 and deterministic matrix output. Existing #13/#14 and pinned SDK/Cordis
 tests continue testing no unexpected native plugin permissions, local
 loopback-only Qwen URLs, one-time local approval/replay and bounded
-prompt injection. For the **unmerged** #15/#16/#17 features, rerun the
+prompt injection. For the **unmerged** #15/#17 features, rerun the
 full matrix and security cases only after their PRs are integrated;
 passing tests on this branch is not evidence their combined security
 boundaries are correct.
