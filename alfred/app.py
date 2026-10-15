@@ -139,9 +139,14 @@ class Alfred:
         if not self.cfg["qwen"]["enabled"]:
             raise HarnessUnavailable("Required Harness needs Qwen enabled")
         diagnosis = self.harness.audit_installation()
-        self.supervisor.ensure_running()
-        self.harness.configure_model(self.supervisor.model_id())
-        self.harness.require_ready()
+        # Cold Qwen loading and Cordis process startup are each expensive.
+        # Use two *separate* claims: the admission gate is non-reentrant.
+        # No server/SDK child may be launched under LOW resources or capture.
+        with self.admission.claim("qwen"):
+            self.supervisor.ensure_running()
+            served_model = self.supervisor.model_id()
+        self.harness.configure_model(served_model)
+        self.harness.require_ready()  # Handles its own separate Harness claim.
         LOG.info("Official Cordis SDK active (tool-free foundation, shared tools PENDING): sdk=%s runtime=%s profile=%s",
                  diagnosis["sdk_version"], diagnosis["runtime_version"],
                  diagnosis["profile"])
@@ -197,6 +202,7 @@ class Alfred:
                          if self.context.enabled else None)
         return self.system2.continue_handoff(
             envelope, harness=self.harness, supervisor=self.supervisor,
+            admission=self.admission,
             **({"session_context":bounded_context} if bounded_context else {}))
 
     def _observe_needle_prefix(self, task, original, outcome):

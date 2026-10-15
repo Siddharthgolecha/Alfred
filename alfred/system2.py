@@ -206,7 +206,8 @@ class System2:
                     "specific action and time or interval."
                 ), "results": []}
 
-    def continue_handoff(self, handoff, *, harness=None, supervisor=None, session_context=None):
+    def continue_handoff(self, handoff, *, harness=None, supervisor=None,
+                         session_context=None, admission=None):
         """Continue one trusted, already-authorized task, never replay its tools.
 
         Model inference can fail before execution; it may not fall back. Validation and
@@ -247,7 +248,12 @@ class System2:
             if harness is None:
                 raise RuntimeError("Required DeepSeek Harness is missing")
             if supervisor is not None:
-                supervisor.ensure_running()
+                # Do not cold-load the native Qwen server outside admission.
+                # The Harness's plan() -> run() acquires a *separate* slot.
+                from contextlib import nullcontext
+                with (admission.claim("qwen")
+                      if admission is not None else nullcontext()):
+                    supervisor.ensure_running()
             plan = harness.plan(
                 handoff.request,handoff.session_id,tools=catalog,
                 allowed_services=self.tools.services,

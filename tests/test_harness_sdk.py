@@ -101,7 +101,15 @@ class SafeSdkTests(unittest.TestCase):
             self.assertEqual(sdk.kwargs["base_url"], "http://127.0.0.1:8080/v1")
             self.assertEqual(sdk.kwargs["patches"], (str(client.patch),))
             self.assertEqual(sdk.kwargs["shutdown_timeout_seconds"], 1)
-            self.assertNotIn("shell", json.dumps(sdk.kwargs).lower())
+            prompt=sdk.kwargs["env"]["DSH_SYSTEM_PROMPT"]
+            self.assertIn("MAY PROPOSE",prompt)
+            self.assertIn("NOT execution or approval",prompt)
+            self.assertIn("NEVER invoke",prompt)
+            self.assertIn("no executable tools",prompt)
+            self.assertNotIn("No tools or actions.",prompt)
+            self.assertNotIn("shell", json.dumps({
+                k:v for k,v in sdk.kwargs.items() if k!="env"
+            }).lower())
             home = Path(sdk.kwargs["dsh_home"]).parent
             self.assertTrue(home.exists())
         finally:

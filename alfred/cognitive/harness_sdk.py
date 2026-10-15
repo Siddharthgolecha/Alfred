@@ -249,11 +249,15 @@ class LocalHarness:
             raise HarnessUnavailable(
                 "DeepSeek Harness SDK/runtime mismatch: reinstall "
                 f"both pinned distributions at {SDK_VERSION}")
-        with tempfile.TemporaryDirectory(prefix="alfred-cordis-audit-") as tmp:
-            root=Path(tmp)
-            workspace=root/"workspace"
-            workspace.mkdir(mode=0o700)
-            self._audit_installed_runtime(root,workspace)
+        # --dump-config spawns an executable too. Audit it under the
+        # admission gate, separately from Qwen and SDK startup; no nesting.
+        with (self.admission.claim("harness")
+              if self.admission is not None else nullcontext()):
+            with tempfile.TemporaryDirectory(prefix="alfred-cordis-audit-") as tmp:
+                root=Path(tmp)
+                workspace=root/"workspace"
+                workspace.mkdir(mode=0o700)
+                self._audit_installed_runtime(root,workspace)
         return {"sdk_version":sdk,"runtime_version":runtime,
                 "profile":"sdk-minimal","patch_sha256":self.patch_sha256,
                 "plugin_audit":"passed","cordis_tool_registry":"empty",
@@ -278,8 +282,10 @@ class LocalHarness:
         """Start official SDK, never a structural mock, and audit Cordis."""
         if self.factory is not None:
             raise HarnessUnavailable("Mock SDK cannot satisfy production startup")
-        with self._lock:
-            self._open()
+        with (self.admission.claim("harness")
+              if self.admission is not None else nullcontext()):
+            with self._lock:
+                self._open()
         return True
 
     def _open(self):
@@ -331,8 +337,15 @@ class LocalHarness:
                 shutdown_timeout_seconds=1.0,
                 env={"DSH_CONTEXT_WINDOW": "4096",
                      "DSH_SYSTEM_PROMPT":
-                       "You are Alfred. Read-only offline assistant. No tools or actions. "
-                       "Answer concisely; do not invent observations."},
+                       "You are Alfred, an offline local assistant. The Cordis "
+                       "runtime has no executable tools. You MAY PROPOSE "
+                       "untrusted typed tool steps in a JSON plan for Alfred's "
+                       "separate Python policy gateway to validate and stage. "
+                       "A proposal is NOT execution or approval. NEVER invoke "
+                       "shell, filesystem, network, plugins, tools or external "
+                       "models; never claim a proposed step executed or was "
+                       "approved. Answer read-only questions concisely and "
+                       "never invent observations."},
             )
             return self._sdk
         except BaseException:
