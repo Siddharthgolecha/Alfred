@@ -287,16 +287,46 @@ class OfflineMeetingAdapter:
             raise ValueError("Invalid owner")
         if not self.available("meeting_recording"):
             raise RuntimeError("Offline meeting recording unavailable")
-        meeting_id=self._provider.start_recording(
-            consent=True,retention=retention)
-        if type(meeting_id) is not str or not MEETING_ID.fullmatch(meeting_id):
-            raise ValueError("Device returned an invalid meeting ID")
+        if self._journal is None or not callable(getattr(
+                self._provider,"rollback_start",None)):
+            raise RuntimeError("Recording requires durable journal and token rollback")
+        # Host-chosen opaque operation ID MUST be honored by the provider:
+        # it may rollback_start(operation_id) even if recording startup
+        # succeeded and its returned meeting ID is missing/invalid.
         with self._lock:
-            if meeting_id in self._meetings:
-                raise ValueError("Duplicate meeting ID")
-            self._meetings[meeting_id]={
-                "session_id":session_id,"owner":owner,
-                "retention":retention,"active":True}
+            operation_id=secrets.token_hex(16)
+            self._journal.put(operation_id,session_id,task_id,owner,
+                              retained=retention,state="starting")
+            try:
+                meeting_id=self._provider.start_recording(
+                    consent=True,retention=retention,operation_id=operation_id)
+                if type(meeting_id) is not str or not MEETING_ID.fullmatch(meeting_id):
+                    raise ValueError("Device returned an invalid meeting ID")
+                if meeting_id in self._meetings:
+                    raise ValueError("Duplicate meeting ID")
+                self._journal.put(operation_id,session_id,task_id,owner,
+                                  meeting_id=meeting_id,retained=retention,
+                                  state="recording")
+                self._meetings[meeting_id]={
+                    "session_id":session_id,"owner":owner,
+                    "retention":retention,"active":True,
+                    "operation_id":operation_id}
+            except BaseException:
+                # Never assume a failing provider didn't start the mic.
+                # A verified token rollback is safe even for duplicate IDs;
+                # an unsuccessful rollback remains in SQLite for recovery.
+                self._journal.put(operation_id,session_id,task_id,owner,
+                                  retained=retention,state="rollback_pending")
+                try:
+                    rolled_back=self._provider.rollback_start(operation_id) is True
+                except Exception:
+                    rolled_back=False
+                if rolled_back:
+                    self._journal.remove(operation_id)
+                    raise
+                raise RuntimeError(
+                    "Recorder registration failed; rollback unverified; "
+                    "authorized durable cleanup required")
         return {"meeting_id":meeting_id,"status":"recording",
                 "identity":"mic_channel_not_person","retention":retention}
 
@@ -330,6 +360,7 @@ class OfflineMeetingAdapter:
             meeting=self._meetings.get(p.meeting_id)
             if (meeting is None or meeting["owner"]!=p.owner
                 or meeting["session_id"]!=p.session_id
+                or meeting.get("state") in ("stopping","purge_pending")
                 or (not meeting["active"] and not meeting["retention"])
                 or float(self._clock())>=p.expires_at):
                 raise PermissionError("Meeting permit expired or outside scope")
@@ -349,26 +380,122 @@ class OfflineMeetingAdapter:
 
     def stop(self, permit):
         self._verify(permit,active=True,skill="meeting_recording")
-        self._provider.stop_recording(permit.meeting_id)
+        if self._journal is None:
+            raise RuntimeError("Recording cleanup journal unavailable")
         with self._lock:
             meeting=self._meetings[permit.meeting_id]
-            meeting["active"]=False
+            operation_id=meeting["operation_id"]
             retained=meeting["retention"]
-            if not retained:
-                for key in tuple(self._permits):
-                    if key[1]==permit.meeting_id:
-                        del self._permits[key]
-                        self._validated_minutes.pop(key,None)
-                for key in tuple(self._artifacts):
-                    if key[0]==permit.meeting_id:
-                        del self._artifacts[key]
-        if not retained:
-            # Do not claim nonretention without an actual device discard.
-            purge=getattr(self._provider,"discard_meeting",None)
-            if not callable(purge) or purge(permit.meeting_id) is not True:
-                raise RuntimeError("Recorder stopped, but secure meeting discard unverified")
-        return {"meeting_id":permit.meeting_id,"state":"stopped",
-                "retained":retained}
+            # Journal before physical side effects. A process crash between
+            # stop and discard can be recovered by a trusted local operator.
+            self._journal.put(operation_id,permit.session_id,permit.task_id,
+                              permit.owner,meeting_id=permit.meeting_id,
+                              retained=retained,state="stopping")
+            meeting["active"]=False
+            meeting["state"]="stopping"
+            self._revoke_meeting_access(permit.meeting_id)
+            # Providers must implement idempotent stop; recording may already
+            # have ended before interruption, so never start it again.
+            self._provider.stop_recording(permit.meeting_id)
+            if retained:
+                self._journal.remove(operation_id)
+                meeting["state"]="stopped"
+                return {"meeting_id":permit.meeting_id,"state":"stopped",
+                        "retained":True}
+            self._journal.put(operation_id,permit.session_id,permit.task_id,
+                              permit.owner,meeting_id=permit.meeting_id,
+                              retained=False,state="purge_pending")
+            meeting["state"]="purge_pending"
+            self._discard_or_raise(permit.meeting_id)
+            self._journal.remove(operation_id)
+            meeting["state"]="purged"
+            return {"meeting_id":permit.meeting_id,"state":"stopped",
+                    "retained":False}
+
+    def _revoke_meeting_access(self, meeting_id):
+        for key in tuple(self._permits):
+            if key[1]==meeting_id:
+                del self._permits[key]
+                self._validated_minutes.pop(key,None)
+        for key in tuple(self._artifacts):
+            if key[0]==meeting_id:
+                del self._artifacts[key]
+
+    def _discard_or_raise(self, meeting_id):
+        discard=getattr(self._provider,"discard_meeting",None)
+        try:
+            verified=callable(discard) and discard(meeting_id) is True
+        except Exception:
+            verified=False
+        if not verified:
+            raise RuntimeError(
+                "Recorder stopped, but secure meeting discard unverified; "
+                "durable cleanup pending and authorized retry required")
+
+    def recover_cleanup(self, *, session_id, owner, local_authorized=False):
+        """Trusted local operator-only recovery, including AFTER process restart.
+
+        No historical transcript read is permitted. The journal contains
+        opaque operation identifiers only. Token rollback and stop/discard
+        MUST be idempotent in the injected device provider. Unverified
+        cleanup stays durable and raises, never claims a successful erase.
+        """
+        if not local_authorized:
+            raise PermissionError("Cleanup recovery requires local authorization")
+        valid_id(session_id)
+        if type(owner) is not str or not OWNER.fullmatch(owner):
+            raise ValueError("Invalid cleanup scope")
+        if self._journal is None:
+            raise RuntimeError("No durable cleanup journal")
+        completed=[]
+        with self._lock:
+            for row in self._journal.pending(session_id,owner):
+                op=row["operation_id"]
+                mid=row["meeting_id"]
+                state=row["state"]
+                if state in ("starting","rollback_pending"):
+                    rollback=getattr(self._provider,"rollback_start",None)
+                    try:
+                        ok=callable(rollback) and rollback(op) is True
+                    except Exception:
+                        ok=False
+                    if not ok:
+                        raise RuntimeError("Recorder startup rollback still unverified")
+                    self._journal.remove(op)
+                    completed.append({"operation_id":op,"state":"rolled_back"})
+                    continue
+                if not isinstance(mid,str) or not MEETING_ID.fullmatch(mid):
+                    raise RuntimeError("Cleanup journal lacks valid meeting ID")
+                # A crash may have happened after stop() but before journal
+                # update. Provider stop_recording must be idempotent.
+                if state in ("recording","stopping"):
+                    self._journal.put(op,row["session_id"],row["task_id"],
+                        owner,meeting_id=mid,retained=bool(row["retained"]),
+                        state="stopping")
+                    self._provider.stop_recording(mid)
+                    if row["retained"]:
+                        self._journal.remove(op)
+                        completed.append({"meeting_id":mid,"state":"stopped_retained"})
+                        if mid in self._meetings:
+                            self._meetings[mid]["active"]=False
+                            self._meetings[mid]["state"]="stopped"
+                            self._revoke_meeting_access(mid)
+                        continue
+                    self._journal.put(op,row["session_id"],row["task_id"],
+                        owner,meeting_id=mid,retained=False,
+                        state="purge_pending")
+                # Even if already stopped, repeat discard until device
+                # explicitly attests it is gone; never reopen transcript.
+                if mid in self._meetings:
+                    self._meetings[mid]["active"]=False
+                    self._meetings[mid]["state"]="purge_pending"
+                self._revoke_meeting_access(mid)
+                self._discard_or_raise(mid)
+                self._journal.remove(op)
+                if mid in self._meetings:
+                    self._meetings[mid]["state"]="purged"
+                completed.append({"meeting_id":mid,"state":"purged"})
+        return completed
 
     def evidence(self, permit):
         self._verify(permit,skill="transcript_retrieval")
