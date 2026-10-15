@@ -163,9 +163,16 @@ class ContextManager:
         metrics=_safe_metrics(tool,output)
         if metrics is None or not isinstance(explicit_text,str):
             return False
-        kind = ("gpu_temperature" if tool=="get_gpu_status" and GPU_TEMP.search(explicit_text)
-                else "system_status" if tool=="get_system_status"
-                   and EXPLICIT_SYSTEM.search(explicit_text) else None)
+        explicit = (bool(GPU_TEMP.search(explicit_text)) if tool=="get_gpu_status"
+                    else bool(EXPLICIT_SYSTEM.search(explicit_text))
+                         if tool=="get_system_status"
+                    else bool(re.search(r"\\bservices?\\b",explicit_text,re.I)))
+        # A model-chosen status tool is not enough: the user must have
+        # explicitly requested the corresponding metric/category.
+        if not explicit:
+            return False
+        kind = ("gpu_temperature" if tool=="get_gpu_status"
+                else "system_status" if tool=="get_system_status" else None)
         now=float(self.clock())
         if not math.isfinite(now):
             raise ValueError("Invalid clock")
