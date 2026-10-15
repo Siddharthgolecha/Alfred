@@ -106,6 +106,37 @@ class System2Tests(unittest.TestCase):
         self.assertEqual(self.store.list_schedules(),[])
         self.assertEqual(self.sys.approvals.pending(),[])
 
+    def test_duplicate_schedule_json_never_reaches_approval(self):
+        # Exercise the real Qwen parser through System2, not only as a unit.
+        supervisor=Mock()
+        supervisor.model_id.return_value=""
+        self.sys.qwen=Qwen(load_config()["qwen"],supervisor)
+        ambiguous=('{"message":"done","steps":[],"steps":'
+                   '[{"tool":"schedule_every","args":{"tool":"get_gpu_status",'
+                   '"interval_minutes":10}}],"save_as":null}')
+        fake={"choices":[{"message":{"content":ambiguous}}]}
+        with patch("alfred.models.request_json",return_value=fake) as send:
+            result=self.sys.reason("Create a schedule every ten minutes")
+        self.assertEqual(send.call_count,2)
+        self.assertEqual(result["status"],"incomplete")
+        self.assertEqual(result["error"],"invalid_plan")
+        self.assertEqual(self.sys.approvals.pending(),[])
+        self.assertEqual(self.store.list_schedules(),[])
+
+    def test_nested_invalid_json_never_reaches_approval(self):
+        supervisor=Mock()
+        supervisor.model_id.return_value=""
+        self.sys.qwen=Qwen(load_config()["qwen"],supervisor)
+        malformed={"choices":[{"message":{"content":json.dumps({
+            "message":"done","steps":[{"tool":"schedule_every"}],
+            "save_as":None})}}]}
+        with patch("alfred.models.request_json",return_value=malformed) as send:
+            result=self.sys.reason("Schedule GPU checks")
+        self.assertEqual(send.call_count,2)
+        self.assertEqual(result["status"],"incomplete")
+        self.assertEqual(self.sys.approvals.pending(),[])
+        self.assertEqual(self.store.list_schedules(),[])
+
     def test_unrecoverable_semantic_plan_does_not_retry_or_stage(self):
         # An unauthorized (but structurally valid) tool must never be
         # regenerated as an opportunity to acquire different permissions.
@@ -390,7 +421,8 @@ class QwenSchemaTests(unittest.TestCase):
         for content in (duplicate,nested_duplicate,
                         '{"message":"x","steps":[],"save_as":null,"x":NaN}',
                         '{"message":"x","steps":[],"save_as":null,"x":Infinity}',
-                        '{"message":"x","steps":[],"save_as":null,"x":-Infinity}'):
+                        '{"message":"x","steps":[],"save_as":null,"x":-Infinity}',
+                        '{"message":"x","steps":[],"save_as":null,"x":1e999}'):
             with self.subTest(content=content):
                 response={"choices":[{"message":{"content":content}}]}
                 with patch("alfred.models.request_json",return_value=response) as send:
