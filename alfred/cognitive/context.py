@@ -9,7 +9,6 @@ meeting content is stored in these tables. This is not a model authority.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import math
 import os
@@ -18,6 +17,9 @@ import re
 import stat
 import threading
 import time
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from .contracts import valid_id
 from .needle_loop import GPU_TEMP, ContextUnavailable, _bounded_metrics
@@ -65,21 +67,38 @@ def _safe_metrics(tool, output):
     return safe
 
 
-@dataclass(frozen=True)
-class Slot:
+class Slot(BaseModel):
+    """Immutable context slot holding a single verified observation."""
+
+    model_config = ConfigDict(frozen=True)
+
     kind: str
-    metrics: dict
+    metrics: dict[str, Any]
     provenance: str
     confidence: float
     observed_at: float
     expires_at: float
     task_id: str
 
-    def public(self, now):
-        return {"kind":self.kind,"metrics":dict(self.metrics),
-                "provenance":self.provenance,"confidence":self.confidence,
-                "age_seconds":max(0,int(now-self.observed_at)),
-                "ttl_remaining_seconds":max(0,int(self.expires_at-now))}
+    @model_validator(mode="after")
+    def _validate(self) -> "Slot":
+        if self.kind not in SLOT_TYPES:
+            raise ValueError(f"Unknown slot kind: {self.kind!r}")
+        if self.provenance != "observed":
+            raise ValueError("Slot provenance must be 'observed'")
+        if not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("Slot confidence out of range")
+        return self
+
+    def public(self, now: float) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "metrics": dict(self.metrics),
+            "provenance": self.provenance,
+            "confidence": self.confidence,
+            "age_seconds": max(0, int(now - self.observed_at)),
+            "ttl_remaining_seconds": max(0, int(self.expires_at - now)),
+        }
 
 
 class ContextManager:
@@ -211,8 +230,10 @@ class ContextManager:
                     "confidence":confidence,"observed_at":now})
             if kind:
                 slots=self._slots.setdefault(key,{})
-                slots[kind]=Slot(kind,metrics,"observed",float(confidence),
-                                 now,now+self.ttl,task_id)
+                slots[kind]=Slot(
+                    kind=kind, metrics=metrics, provenance="observed",
+                    confidence=float(confidence),
+                    observed_at=now, expires_at=now+self.ttl, task_id=task_id)
                 self._prune_slots(slots,now)
             return True
 
@@ -232,8 +253,9 @@ class ContextManager:
                     (key,task_id) not in self._tasks):
                 return False
             self._slots.setdefault(key,{})["active_workflow"]=Slot(
-                "active_workflow",{"registered":True},"observed",1.0,
-                now,now+self.ttl,task_id)
+                kind="active_workflow", metrics={"registered": True},
+                provenance="observed", confidence=1.0,
+                observed_at=now, expires_at=now+self.ttl, task_id=task_id)
             return True
 
     def _prune_slots(self, slots, now):
