@@ -102,7 +102,10 @@ The first eight trial IDs per family are nominal repetitions (not different
 semantic tasks). The matrix includes explicit capture contention (variant 08), low available
 RAM (09), excessive swap (10) and CPU load (11) per category, and its
 raw CSV records gate-enabled, granted, queued, rejection, pressure and
-resource-fixture fields for every one of the 432 cases. This validates
+resource-fixture fields for every one of the 432 cases. Some malformed
+or stale scoped pronoun requests are safely rejected before reaching inference,
+so such rows cannot be counted as an admission pressure-grant/refusal and are
+reported separately. This validates
 offline cooperative policy wiring only, not native performance or
 real concurrent device behavior. The "unified" path is a
 Harness/admission policy proxy, NOT full native latency. Phase 5 #16's

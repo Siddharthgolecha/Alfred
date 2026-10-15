@@ -109,7 +109,17 @@ class ReleasePolicyTests(unittest.TestCase):
             for case in ("ram","swap","cpu"):
                 overloaded=[r for r in unified if r["gate_resource_case"]==case]
                 self.assertEqual(len(overloaded),12)
-                self.assertTrue(all(int(r["gate_pressure"])>=1 for r in overloaded))
+                # Unknown/stale scoped pronouns are rejected BEFORE inference,
+                # so the admission sampler need not be called in that case.
+                # The other 11 families still exercise the actual pressure gate.
+                exercised=[r for r in overloaded
+                           if r["scenario"]!="context_pronoun"]
+                self.assertEqual(len(exercised),11)
+                self.assertTrue(all(int(r["gate_pressure"])>=1 for r in exercised))
+                early=[r for r in overloaded if r["scenario"]=="context_pronoun"]
+                self.assertEqual(len(early),1)
+                self.assertEqual(early[0]["task_state"],"rejected")
+                self.assertEqual(early[0]["accepted_tools"],"0")
             contested=[r for r in unified if r["gate_capture_contended"]=="1"]
             self.assertEqual(len(contested),12)
             self.assertTrue(all(int(r["gate_rejected"])>=1 for r in contested))
