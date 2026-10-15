@@ -27,8 +27,8 @@ from .cognitive import (SessionLedger, Decision, Observation, Escalation,
                         ApprovalReference, Completion, Diagnostic)
 from .cognitive.harness_sdk import LocalHarness, HarnessUnavailable
 from .cognitive.escalation import build_handoff, MAX_HANDOFF_TOOLS
-from .cognitive.needle_loop import (NeedleAgentLoop, SessionSlots,
-                                   ContextUnavailable, MULTISTEP)
+from .cognitive.needle_loop import (NeedleAgentLoop, LoopOutcome, READONLY,
+                                   SessionSlots, ContextUnavailable, MULTISTEP)
 from .cognitive.context import ContextManager
 
 LOG = logging.getLogger(__name__)
@@ -180,6 +180,33 @@ class Alfred:
             "qwen", "delegate" if allow_actions else "readonly", 0))
         return self.system2.continue_handoff(
             envelope, harness=self.harness, supervisor=self.supervisor)
+
+    def _observe_needle_prefix(self, task, original, outcome):
+        """Preserve verified Needle-loop reads before an early handoff/stop.
+
+        NeedleAgentLoop records 'observed' names only AFTER System2.direct
+        returns a complete, aligned read-only batch. Neither model proposals
+        nor an unmatched/failed/protected batch can become context evidence.
+        Only ContextManager's explicit-category and bounded metric whitelist
+        decides whether a returned value deserves a session slot.
+        """
+        if not self.context.enabled or type(outcome) is not LoopOutcome:
+            return
+        calls = outcome.accepted_calls
+        names = outcome.observed
+        values = outcome.result.get("results")
+        if (type(calls) is not tuple or type(names) is not tuple
+                or type(values) is not list
+                or not (len(calls) == len(names) == len(values))):
+            # Never infer a successful read from an unmatched result list.
+            return
+        for call, name, value in zip(calls, names, values):
+            if (type(call) is not dict or type(name) is not str
+                    or call.get("name") != name or name not in READONLY
+                    or (type(value) is dict and value.get("skipped") is True)):
+                continue
+            self.context.observe(task.session_id, task.task_id,
+                                 original, name, value, confidence=1.0)
 
     def _finish_handoff(self, task, result, original):
         """Consume typed handoff reads on the SAME task and finish safely.
@@ -417,6 +444,11 @@ class Alfred:
                 if (self.cfg["runtime"]["escalation_enabled"]
                         and loop_outcome.stop in ("uncertain", "repeated", "partial", "budget")
                         and "approval" not in loop_outcome.result):
+                    # This branch returns early, bypassing the ordinary
+                    # post-tool context ingestion. Commit ONLY the already
+                    # executed, exactly aligned Needle read prefix once,
+                    # regardless of later Qwen success or failure.
+                    self._observe_needle_prefix(task, text, loop_outcome)
                     completed = loop_outcome.result.get("results") or []
                     used_decisions=sum(1 for event in self.sessions.events(task.task_id)
                                        if isinstance(event, Decision)
