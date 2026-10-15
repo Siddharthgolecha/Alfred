@@ -898,6 +898,8 @@ class EscalationContextIntegrationTests(unittest.TestCase):
         # prefix ingestion is allowed, for either escalation setting.
         for escalation in (True, False):
             with self.subTest(escalation=escalation):
+                # Each subtest covers a new task, not aggregate Mock calls.
+                self.app.cactus.route_feedback.reset_mock()
                 self.app.cfg["runtime"]["escalation_enabled"]=escalation
                 self.app.cfg["runtime"]["needle_loop_enabled"]=True
                 self.app.cfg["runtime"]["needle_max_decisions"]=3
