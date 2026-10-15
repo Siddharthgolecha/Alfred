@@ -247,9 +247,14 @@ class System2:
                     handoff.request, catalog,
                     allowed_services=self.tools.services,
                     named_tasks=self.tools.tasks.keys(), handoff=handoff)
-        except HarnessInvalidPlan:
-            # Never give malformed Harness output another model attempt.
-            raise
+        except HarnessInvalidPlan as exc:
+            # A malformed SDK proposal is a hard stop, not a transport error.
+            # Returning the already executed, sanitized Needle prefix keeps
+            # partial successes visible without triggering fallback planning,
+            # a repeated read, execution, or an approval proposal.
+            LOG.warning("Harness handoff plan invalid: %s", exc)
+            return {**self._incomplete_plan(), "results":completed,
+                    "partial":bool(completed)}
         except QwenPlanResponseError as exc:
             LOG.warning("Qwen handoff plan invalid: %s", exc)
             return {**self._incomplete_plan(), "results":completed,
