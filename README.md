@@ -15,6 +15,8 @@ Default `wake_word.mode="transcript"` uses Whistle to recognize the wake phrase 
 
 Alfred includes schema-grounded Qwen planning and local approvals for sensitive commands. The integrated security design and CLI examples are documented in [Phase 2](docs/PHASE2.md). These commands are available without microphone input: `--reason`, `--pending`, `--approve ID`, and `--reject ID`. Voice-only speech cannot approve a privileged action.
 
+**Qwen planner troubleshooting (issue #24):** On llama.cpp, Alfred requests non-thinking JSON output because some Qwen3.5 chat templates produce incomplete or schema-breaking plans when thinking consumes the output budget. A malformed plan gets one generation-only retry. If neither response matches the schema, Alfred reports that no action was taken; it will **not** claim a schedule was saved or run a partially parsed step. Test the local endpoint with `python -m alfred --config config.json --reason "Schedule a GPU status check every 10 minutes"`. If it repeatedly fails, verify the model/chat-template compatibility, inspect local backend logs, and check `qwen.max_tokens`. Sensitive schedules still require `--approve ID`; a vague request such as "create a schedule" needs an action and interval.
+
 ## Phase 3 — automations and typing-style speech
 
 Phase 3 adds [persistent absolute/daily reminders and GPU-temperature watches](docs/PHASE3.md), with SQLite notification delivery and a headless `--scheduler-only` service that works without a microphone. Sensitive recurring changes still need local approval. Run `python -m alfred --automations` to inspect jobs.
