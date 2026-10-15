@@ -137,7 +137,14 @@ class Alfred:
         # that fallback handler: a partially completed action is not retryable.
         if self.harness is not None and self.session_id is not None:
             try:
-                self.supervisor.ensure_running()  # existing model service only
+                # Start/adopt the same existing Qwen service only when
+                # admission says there is headroom. Otherwise an optional
+                # Harness cold start could contend with live Whistle capture.
+                if self.admission.enabled:
+                    with self.admission.claim("harness"):
+                        self.supervisor.ensure_running()
+                else:
+                    self.supervisor.ensure_running()
                 if not allow_actions:
                     return self.harness.run(text, self.session_id)
                 proposed = self.harness.plan(
