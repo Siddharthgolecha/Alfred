@@ -15,6 +15,7 @@ import time
 from .contracts import Decision, Observation
 from ..system2 import preflight
 from ..runtime import validate
+from ..constants import Limits, Patterns, TTL
 
 # Never feed commands, transcripts, user/tool strings or arbitrary JSON to
 # Needle as observations. A number cannot carry a prompt injection.
@@ -24,10 +25,9 @@ METRICS = frozenset({
 READONLY = frozenset({
     "get_gpu_status", "get_system_status", "list_services",
 })
-PRONOUN = re.compile(r"^\s*(?:check|show|read|get)\s+(?:it|that)(?:\s+again)?\s*[.!?]*\s*$", re.I)
-MULTISTEP = re.compile(r"\b(?:then|afterwards|after that|next|depending on|based on)\b", re.I)
-GPU_TEMP = re.compile(r"\b(?:gpu|graphics\s+(?:card|processor))\b.*\btemp(?:erature)?\b|"
-                      r"\btemp(?:erature)?\b.*\b(?:gpu|graphics\s+(?:card|processor))\b", re.I)
+PRONOUN = Patterns.PRONOUN_REF
+MULTISTEP = Patterns.MULTISTEP
+GPU_TEMP = Patterns.GPU_TEMP
 
 
 class ContextUnavailable(ValueError):
@@ -74,7 +74,7 @@ def _feedback_metrics(tool, value):
     if tool == "list_services":
         # The local registry returns a mapping of service name -> status. The
         # model only learns an integer count, never text from service responses.
-        if type(value) is not dict or len(value) > 32:
+        if type(value) is not dict or len(value) > Limits.MAX_SERVICES:
             raise ValueError("Unsafe service list result")
         return {"service_count": len(value)}
     if tool not in ("get_gpu_status", "get_system_status"):
@@ -84,8 +84,8 @@ def _feedback_metrics(tool, value):
 
 class SessionSlots:
     """Short-lived, unambiguous and purely local *verified* GPU-temp referents."""
-    def __init__(self, ttl_seconds=120, clock=time.monotonic):
-        if type(ttl_seconds) is not int or not 1 <= ttl_seconds <= 300:
+    def __init__(self, ttl_seconds: int = TTL.NEEDLE_SLOT_DEFAULT, clock=time.monotonic):
+        if type(ttl_seconds) is not int or not TTL.NEEDLE_SLOT_MIN <= ttl_seconds <= TTL.NEEDLE_SLOT_MAX:
             raise ValueError("Invalid session slot TTL")
         self.ttl = ttl_seconds
         self.clock = clock
@@ -117,7 +117,7 @@ class SessionSlots:
                 and type(result.get("available")) is bool and result["available"]
                 and type(result.get("gpu_temp_c")) in (int, float)
                 and math.isfinite(result["gpu_temp_c"])
-                and -50 <= result["gpu_temp_c"] <= 150):
+                and Limits.GPU_TEMP_MIN_C <= result["gpu_temp_c"] <= Limits.GPU_TEMP_MAX_C):
             self._slots[session_id] = ("gpu_temperature", self.clock())
 
 
@@ -125,12 +125,12 @@ class NeedleAgentLoop:
     """One bounded task. Consequential calls stop and remain System2-owned."""
 
     def __init__(self, system2, feedback, ledger=None, task_id=None,
-                 *, confidence_floor=0.7, max_decisions=3, max_tools=3,
-                 cancelled=None):
-        if type(max_decisions) is not int or not 1 <= max_decisions <= 3:
-            raise ValueError("needle decisions must be 1..3")
-        if type(max_tools) is not int or not 1 <= max_tools <= 3:
-            raise ValueError("needle tool calls must be 1..3")
+                 *, confidence_floor=0.7, max_decisions: int = Limits.NEEDLE_MAX_DECISIONS,
+                 max_tools: int = Limits.NEEDLE_MAX_TOOLS, cancelled=None):
+        if type(max_decisions) is not int or not 1 <= max_decisions <= Limits.NEEDLE_MAX_DECISIONS:
+            raise ValueError(f"needle decisions must be 1..{Limits.NEEDLE_MAX_DECISIONS}")
+        if type(max_tools) is not int or not 1 <= max_tools <= Limits.NEEDLE_MAX_TOOLS:
+            raise ValueError(f"needle tool calls must be 1..{Limits.NEEDLE_MAX_TOOLS}")
         if (type(confidence_floor) not in (float, int)
                 or not math.isfinite(confidence_floor) or not 0 < confidence_floor <= 1):
             raise ValueError("invalid confidence floor")

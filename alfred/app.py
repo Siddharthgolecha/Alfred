@@ -14,6 +14,8 @@ import subprocess
 import threading
 import time
 
+from .constants import Limits, Truncation
+
 from .audio import AudioManager, AudioUnavailableError, UtteranceStream, pactl_json
 from .console import TranscriptDisplay
 from .routing import adjust_status_calls
@@ -47,7 +49,7 @@ class Feedback:
             self.speaking.set()
             try:
                 runner = self.processes.run if self.processes else subprocess.run
-                runner(["spd-say","-w",str(message)[:300]],timeout=25,check=False)
+                runner(["spd-say","-w",str(message)[:Truncation.MESSAGE]],timeout=25,check=False)
             except (OSError,subprocess.TimeoutExpired) as exc:
                 LOG.warning("Speech output failed: %s",exc)
             finally:
@@ -268,14 +270,14 @@ class Alfred:
                       else "disabled" if not self.cfg["qwen"]["enabled"]
                       else "exception")
             self.sessions.append(task.task_id, Completion("failed", reason))
-            self.feedback.tell(json.dumps(result,default=str)[:1800])
+            self.feedback.tell(json.dumps(result,default=str)[:Truncation.RESULT * 3 // 2])
         else:
             for item in result.get("tool_outcomes", ()):
                 self.sessions.append(task.task_id, Observation(
                     item["tool"], item["outcome"]))
             self.sessions.append(task.task_id, Completion(
                 "completed", "executed" if result.get("results") else "no_action"))
-            self.feedback.tell(json.dumps(result,default=str)[:1800])
+            self.feedback.tell(json.dumps(result,default=str)[:Truncation.RESULT * 3 // 2])
 
     def resume_session(self, session_id):
         """Explicit local restart recovery; never restart an uncertain action."""
@@ -364,7 +366,7 @@ class Alfred:
             response=self.cactus.route(needle_text)
             if (self.cfg["runtime"].get("cognitive_diagnostics",False)
                     and self.admission.allow_optional_diagnostics()):
-                duration = max(0, min(300000, int((time.monotonic() - routed_at)*1000)))
+                duration = max(0, min(Limits.DIAG_MAX_LATENCY_MS, int((time.monotonic() - routed_at)*1000)))
                 self.sessions.append(task.task_id, Diagnostic("needle_route", {
                     "latency_ms":duration, "input_chars":len(text)}))
             calls=response.get("function_calls") or []
@@ -491,7 +493,7 @@ class Alfred:
                             "message":"Previously completed read-only checks are preserved. "
                                       "No Qwen continuation or repeated tool call was allowed.",
                             "results":completed,
-                        },default=str)[:1800])
+                        },default=str)[:Truncation.RESULT * 3 // 2])
                         return
                     outcome=self._handoff(
                         task,text,"incomplete",calls=calls,results=completed,
@@ -510,7 +512,7 @@ class Alfred:
                     self.sessions.append(task.task_id, Completion(
                         "rejected" if loop_outcome.stop == "unsafe" else "failed",
                         "unsafe_route" if loop_outcome.stop == "unsafe" else "shutdown"))
-                    self.feedback.tell(json.dumps(halted, default=str)[:1800])
+                    self.feedback.tell(json.dumps(halted, default=str)[:Truncation.RESULT * 3 // 2])
                     return
                 if (loop_outcome.stop not in ("completed", "protected", "partial")
                         and not loop_outcome.result.get("partial", False)):
@@ -614,7 +616,7 @@ class Alfred:
                                                 else "completed",
                                                 ("invalid_plan" if result.get("error")=="invalid_plan"
                                                  else "exception") if incomplete else outcome))
-                self.feedback.tell(json.dumps(result,default=str)[:1800])
+                self.feedback.tell(json.dumps(result,default=str)[:Truncation.RESULT * 3 // 2])
         except Exception as exc:
             LOG.exception("Command failed")
             try:

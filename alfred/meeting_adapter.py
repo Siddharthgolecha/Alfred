@@ -21,18 +21,18 @@ import threading
 import time
 
 from .cognitive.contracts import valid_id
+from .constants import Limits, Patterns
 
-MEETING_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$")
-SOURCE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
-ARTIFACT = re.compile(r"^[A-Za-z0-9_-]{8,72}$")
-OWNER = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
-MAX_SEGMENTS = 64
-MAX_EVIDENCE_BYTES = 16000
-SECRET = re.compile(r"(?i)(?:sk-[A-Za-z0-9]{8,}|bearer\s+[^\s]+|"
-                    r"(?<![\w.-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})")
-CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
-SENSITIVE_COMMAND = re.compile(r"(?i)\b(?:run|install|execute|approve|ignore)\b")
-_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+MEETING_ID = Patterns.MEETING_ID
+SOURCE = Patterns.MEETING_SOURCE
+ARTIFACT = Patterns.MEETING_ARTIFACT
+OWNER = Patterns.MEETING_OWNER
+MAX_SEGMENTS = Limits.MAX_MEETING_SEGMENTS
+MAX_EVIDENCE_BYTES = Limits.MAX_EVIDENCE_BYTES
+SECRET = Patterns.MEETING_SECRET
+CONTROLS = Patterns.MEETING_CONTROLS
+SENSITIVE_COMMAND = Patterns.MEETING_SENSITIVE_CMD
+_ID_PATTERN = Patterns.MEETING_ENTITY_ID
 UNKNOWN_OWNER = "Unassigned"
 UNKNOWN_DATE = "Not specified"
 
@@ -46,7 +46,7 @@ def _text(value,limit):
 
 
 def _clock_time(value):
-    if type(value) is not str or len(value)>40:
+    if type(value) is not str or len(value) > Limits.MAX_TIMESTAMP_LEN:
         raise ValueError("Invalid timestamp")
     try:
         parsed=datetime.fromisoformat(value.replace("Z","+00:00"))

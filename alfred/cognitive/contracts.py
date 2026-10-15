@@ -11,10 +11,12 @@ import math
 import re
 import uuid
 
+from ..constants import Limits, Patterns, Truncation
+
 VERSION = 1
-MAX_EVENT_BYTES = 2048
-ID_RE = re.compile(r"^[0-9a-f]{32}$")
-TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+MAX_EVENT_BYTES = Truncation.CONTRACT_BYTES
+ID_RE = Patterns.CORRELATION_ID
+TOOL_RE = Patterns.TOOL_NAME
 
 
 def new_id() -> str:
@@ -89,7 +91,7 @@ class TaskEnvelope(Contract):
         valid_id(self.task_id)
         if self.source not in ("text", "voice", "reason"):
             raise ValueError("Unknown task source")
-        if type(self.input_chars) is not int or not 0 <= self.input_chars <= 100000:
+        if type(self.input_chars) is not int or not 0 <= self.input_chars <= Limits.TASK_MAX_INPUT_CHARS:
             raise ValueError("Invalid input length")
         if type(self.started_at) is not int or self.started_at < 0:
             raise ValueError("Invalid task timestamp")
@@ -109,7 +111,7 @@ class Decision(Contract):
         if self.route not in ("direct", "delegate", "readonly", "uncertain",
                               "rejected", "shutdown"):
             raise ValueError("Unknown decision route")
-        if type(self.call_count) is not int or not 0 <= self.call_count <= 50:
+        if type(self.call_count) is not int or not 0 <= self.call_count <= Limits.DECISION_MAX_CALL_COUNT:
             raise ValueError("Invalid call count")
         if self.confidence is not None:
             if type(self.confidence) not in (int, float) or not math.isfinite(self.confidence) or not 0 <= self.confidence <= 1:
@@ -150,7 +152,7 @@ class ApprovalReference(Contract):
     approval_id: int
 
     def validate(self):
-        if type(self.approval_id) is not int or not 1 <= self.approval_id <= 2147483647:
+        if type(self.approval_id) is not int or not 1 <= self.approval_id <= Limits.MAX_APPROVAL_ID:
             raise ValueError("Invalid approval reference")
 
 
@@ -180,11 +182,15 @@ class Diagnostic(Contract):
     def validate(self):
         if self.name not in ("needle_route", "qwen_plan", "capture"):
             raise ValueError("Unknown diagnostic name")
-        if not isinstance(self.metrics, dict) or len(self.metrics) > 5:
+        if not isinstance(self.metrics, dict) or len(self.metrics) > Limits.MAX_DIAGNOSTIC_METRICS:
             raise ValueError("Invalid diagnostic metrics")
-        limits = {"latency_ms": 300000, "input_chars": 100000,
-                  "output_chars": 100000, "retry_count": 100,
-                  "channels": 32}
+        limits = {
+            "latency_ms": Limits.DIAG_MAX_LATENCY_MS,
+            "input_chars": Limits.DIAG_MAX_CHARS,
+            "output_chars": Limits.DIAG_MAX_CHARS,
+            "retry_count": Limits.DIAG_MAX_RETRY,
+            "channels": Limits.DIAG_MAX_CHANNELS,
+        }
         for key, value in self.metrics.items():
             if key not in limits or type(value) is not int or not 0 <= value <= limits[key]:
                 raise ValueError("Diagnostic contains unsupported or sensitive data")

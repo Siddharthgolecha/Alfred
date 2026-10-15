@@ -13,6 +13,8 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
+from .constants import Truncation, TTL
+
 from .models import QwenPlanResponseError
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, validate_plan
 
@@ -56,7 +58,7 @@ def concise_plan(steps):
 
 class Approvals:
     """Durable queue, atomic one-time claiming, never replay after interrupted action."""
-    def __init__(self, store, ttl_seconds=180):
+    def __init__(self, store, ttl_seconds: int = TTL.APPROVAL_DEFAULT):
         self.store = store
         self.ttl = int(ttl_seconds)
         with self.store.lock, self.store.db:
@@ -112,11 +114,11 @@ class Approvals:
 
     def finish(self, approval_id, result=None, error=None):
         status="failed" if error else "complete"
-        outcome={"error":str(error)[:300]} if error else {"result":result}
+        outcome={"error":str(error)[:Truncation.APPROVAL_ERROR]} if error else {"result":result}
         with self.store.lock, self.store.db:
             self.store.db.execute(
                 "UPDATE approvals SET status=?,result_json=? WHERE id=? AND status='running'",
-                (status,json.dumps(outcome,default=str)[:10000],approval_id))
+                (status,json.dumps(outcome,default=str)[:Truncation.APPROVAL_RESULT_JSON],approval_id))
 
     def reject(self, approval_id):
         with self.store.lock, self.store.db:
@@ -160,7 +162,7 @@ class System2:
         self.tools=tools
         self.store=store
         self.cfg=cfg
-        self.approvals=Approvals(store,cfg.get("approval_ttl_seconds",180))
+        self.approvals=Approvals(store,cfg.get("approval_ttl_seconds", TTL.APPROVAL_DEFAULT))
 
     def execute_or_stage(self, steps, message="", save_as=None, allow_actions=True, force_approval=False):
         steps=preflight(steps,self.tools,self.cfg.get("max_plan_steps",5))
@@ -177,7 +179,7 @@ class System2:
             proposal=self.approvals.propose(steps,save_as)
             self.store.event("approval_requested",{"id":proposal["approval_id"],
                          "actions":proposal["actions"]})
-            return {"message":"Awaiting local approval. "+message[:300], "approval":proposal}
+            return {"message":"Awaiting local approval. "+message[:Truncation.MESSAGE], "approval":proposal}
         if not steps:
             return {"message":message or "No tool action required","results":[]}
         results=self.tools.run_plan(steps)

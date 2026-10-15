@@ -22,23 +22,20 @@ import time
 from .contracts import valid_id
 from .needle_loop import GPU_TEMP, ContextUnavailable, _bounded_metrics
 
-SCOPE_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,31}$")
-FACT_KEY = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
-FORBIDDEN = re.compile(r"secret|password|token|api_key|command|script|system|"
-                       r"prompt|instruction|shell|tool|policy|approval|credential", re.I)
-SENSITIVE_VALUE = re.compile(
-    r"(?i)(?:sk-[A-Za-z0-9]{8,}|bearer\s+\S+|"
-    r"ignore\s+(?:previous|all)\s+instructions|"
-    r"(?:^|\s)(?:sudo|curl|wget)\s|rm\s+-rf|https?://)")
-REF = re.compile(r"^\s*(?:check|read|show|get)\s+(?:it|that)(?:\s+again)?[.!?]*\s*$",re.I)
-DANGEROUS_REF = re.compile(r"^\s*(?:restart|stop|start|cancel|delete|run|"
-                            r"approve|change|disable|enable)\s+(?:it|that)(?:\s+again)?[.!?]*\s*$",re.I)
-EXPLICIT_SYSTEM = re.compile(r"\b(?:system|machine|computer)\s+(?:status|health)\b",re.I)
-EXPLICIT_WORKFLOW = re.compile(r"\bworkflow\b",re.I)
+from ..constants import Limits, Patterns, TTL
+
+SCOPE_RE = Patterns.SCOPE_OWNER
+FACT_KEY = Patterns.FACT_KEY
+FORBIDDEN = Patterns.FACT_KEY_FORBIDDEN
+SENSITIVE_VALUE = Patterns.SENSITIVE_VALUE
+REF = Patterns.PRONOUN_REF
+DANGEROUS_REF = Patterns.DANGEROUS_REF
+EXPLICIT_SYSTEM = Patterns.EXPLICIT_SYSTEM
+EXPLICIT_WORKFLOW = Patterns.EXPLICIT_WORKFLOW
 READS = frozenset(("get_gpu_status","get_system_status","list_services"))
 SLOT_TYPES = frozenset(("gpu_temperature","system_status","active_workflow"))
-MAX_TASK_OBSERVATIONS = 3
-MAX_FACTS = 8
+MAX_TASK_OBSERVATIONS = Limits.MAX_TASK_OBSERVATIONS
+MAX_FACTS = Limits.MAX_FACTS
 
 
 def _scope(owner, mode, session_id):
@@ -53,7 +50,7 @@ def _safe_metrics(tool, output):
     if tool not in READS or type(output) is not dict:
         return None
     if tool == "list_services":
-        if len(output) > 32:
+        if len(output) > Limits.MAX_SERVICES:
             return None
         return {"service_count": len(output)}
     safe = _bounded_metrics(output)
@@ -61,7 +58,7 @@ def _safe_metrics(tool, output):
         # A failed or fabricated reading is not a trusted fresh referent.
         if (safe.get("available") is not True
                 or type(safe.get("gpu_temp_c")) not in (float,int)
-                or not -50 <= safe["gpu_temp_c"] <= 150):
+                or not Limits.GPU_TEMP_MIN_C <= safe["gpu_temp_c"] <= Limits.GPU_TEMP_MAX_C):
             return None
     if not safe:
         return None
@@ -89,12 +86,12 @@ class ContextManager:
     """Shared packet API. No tool authority; SQLite only for approved facts."""
 
     def __init__(self, store, *, enabled=False, persist_facts=False,
-                 owner="local", mode="assistant", ttl=120,
-                 budget_chars=1200, clock=time.time):
+                 owner="local", mode="assistant", ttl=TTL.CONTEXT_DEFAULT,
+                 budget_chars=Limits.CONTEXT_BUDGET_CHARS_MIN * 5, clock=time.time):
         if (type(enabled) is not bool or type(persist_facts) is not bool
                 or persist_facts and not enabled
-                or type(ttl) is not int or not 1 <= ttl <= 300
-                or type(budget_chars) is not int or not 256 <= budget_chars <= 3200):
+                or type(ttl) is not int or not TTL.CONTEXT_MIN <= ttl <= TTL.CONTEXT_MAX
+                or type(budget_chars) is not int or not Limits.CONTEXT_BUDGET_CHARS_MIN <= budget_chars <= Limits.CONTEXT_BUDGET_CHARS_MAX):
             raise ValueError("Invalid context configuration")
         _scope(owner,mode,"a"*32)
         self.store=store

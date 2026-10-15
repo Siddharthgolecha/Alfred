@@ -24,6 +24,8 @@ from urllib.parse import urlsplit
 
 LOG = logging.getLogger(__name__)
 
+from ..constants import Limits, Patterns, Timeouts, Truncation
+
 
 class HarnessInvalidPlan(ValueError):
     """An SDK response was received but is not a trustworthy plan.
@@ -93,14 +95,14 @@ def audit_effective_cordis_config(dump):
     *literal* top-level id/name/disabled metadata; never evaluate JS tags,
     YAML constructors, or external plugin commands.
     """
-    if type(dump) is not str or not 0 < len(dump) < 200000:
+    if type(dump) is not str or not 0 < len(dump) < Truncation.CORDIS_DUMP_BYTES:
         raise HarnessUnavailable("Invalid Cordis config dump length")
     rows = {}
     current = None
     for line in dump.splitlines():
         if line.startswith("- id: "):
             name = line[6:]
-            if (not re.fullmatch(r"[a-z][a-z0-9-]*", name)
+            if (not Patterns.CORDIS_ROW_ID.fullmatch(name)
                     or name in rows):
                 raise HarnessUnavailable("Duplicate or invalid Cordis row")
             rows[name] = {"name": None, "disabled": False}
@@ -157,7 +159,7 @@ def check_safe_patch(path=PATCH):
     rather than a full yaml parser (to avoid implicit custom-tag execution).
     """
     raw = Path(path).read_bytes()
-    if len(raw) > 4096:
+    if len(raw) > Truncation.PATCH_BYTES:
         raise HarnessUnavailable("Unsafe Cordis overlay size")
     lines = []
     for rawline in raw.decode("utf-8").splitlines():
@@ -169,7 +171,7 @@ def check_safe_patch(path=PATCH):
     seen = set()
     for i in range(0, len(lines), 2):
         a, b = lines[i:i+2]
-        if not re.fullmatch(r"- id: [a-z][a-z0-9-]*", a) or b != "disabled: true":
+        if not Patterns.CORDIS_PATCH_LINE.fullmatch(a) or b != "disabled: true":
             raise HarnessUnavailable("Cordis overlay contains unauthorized syntax")
         row = a[6:]
         if row not in DENIED_ROWS or row in seen:
@@ -187,11 +189,11 @@ class LocalHarness:
                  factory=None, patch=PATCH, admission=None):
         self.admission = admission
         self.url = _loopback(model_url)
-        if not isinstance(model, str) or not re.fullmatch(r"[a-zA-Z0-9_.:/-]{1,120}", model):
+        if not isinstance(model, str) or not Patterns.MODEL_ID.fullmatch(model):
             raise HarnessUnavailable("Invalid local model identifier")
-        if type(timeout) not in (int, float) or not 5 <= timeout <= 120:
+        if type(timeout) not in (int, float) or not Timeouts.HARNESS_TIMEOUT_MIN <= timeout <= Timeouts.HARNESS_TIMEOUT_MAX:
             raise HarnessUnavailable("Invalid timeout")
-        if type(max_tokens) is not int or not 1 <= max_tokens <= 512:
+        if type(max_tokens) is not int or not 1 <= max_tokens <= Limits.HARNESS_MAX_TOKENS:
             raise HarnessUnavailable("Invalid token limit")
         self.model = model
         self.timeout = timeout
@@ -271,7 +273,7 @@ class LocalHarness:
         substitute the provider model mid-session.
         """
         if (not isinstance(served_model,str)
-                or not re.fullmatch(r"[a-zA-Z0-9_.:/-]{1,120}",served_model)):
+                or not Patterns.MODEL_ID.fullmatch(served_model)):
             raise HarnessUnavailable("Invalid advertised local model ID")
         with self._lock:
             if self._sdk is not None or self._closed:
@@ -332,9 +334,9 @@ class LocalHarness:
                 base_url=self.url + "/v1",
                 api_key="alfred-local-only",  # never written into repo/logs
                 max_tokens=self.max_tokens,
-                initialize_timeout_seconds=min(self.timeout, 30),
+                initialize_timeout_seconds=min(self.timeout, Timeouts.HARNESS_INIT_CAP),
                 request_timeout_seconds=self.timeout,
-                shutdown_timeout_seconds=1.0,
+                shutdown_timeout_seconds=Timeouts.HARNESS_SHUTDOWN,
                 env={"DSH_CONTEXT_WINDOW": "4096",
                      "DSH_SYSTEM_PROMPT":
                        "You are Alfred, an offline local assistant. The Cordis "
@@ -365,9 +367,9 @@ class LocalHarness:
         notifications without a configurable timeout. Timeout closes/kills the
         SDK-owned child. Never resubmit a tool proposal or auto-approve actions.
         """
-        if not isinstance(prompt, str) or not 0 < len(prompt) <= MAX_PROMPT:
+        if not isinstance(prompt, str) or not 0 < len(prompt) <= Limits.HARNESS_MAX_PROMPT:
             raise HarnessUnavailable("Invalid prompt size")
-        if not isinstance(session_id, str) or not re.fullmatch(r"[0-9a-f]{32}", session_id):
+        if not isinstance(session_id, str) or not Patterns.CORRELATION_ID.fullmatch(session_id):
             raise HarnessUnavailable("Invalid correlated session")
         with self._lock:
             sdk = self._open()
@@ -385,7 +387,7 @@ class LocalHarness:
                 result = done.result(timeout=self.timeout)
                 response = getattr(result, "final_response", None)
                 finish = getattr(result, "finish_reason", None)
-                if (type(response) is not str or len(response) > MAX_RESPONSE
+                if (type(response) is not str or len(response) > Limits.HARNESS_MAX_RESPONSE
                         or finish != "completed"):
                     raise HarnessUnavailable("Invalid or incomplete SDK response")
                 return {"message": response, "results": []}
@@ -401,9 +403,9 @@ class LocalHarness:
         System2.execute_or_stage before any side effect. No Cordis tool
         invocation or approval is possible in this profile.
         """
-        if not isinstance(utterance, str) or not 0 < len(utterance) <= 1600:
+        if not isinstance(utterance, str) or not 0 < len(utterance) <= Limits.HARNESS_MAX_UTTERANCE:
             raise HarnessUnavailable("Invalid bounded planning request")
-        if type(max_steps) is not int or not 1 <= max_steps <= 10:
+        if type(max_steps) is not int or not 1 <= max_steps <= Limits.MAX_PLAN_STEPS * 2:
             raise HarnessUnavailable("Invalid plan limit")
         names = []
         for item in tools:

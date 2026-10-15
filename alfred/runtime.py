@@ -13,6 +13,8 @@ import subprocess
 import threading
 import time
 
+from .constants import Limits, Timeouts, Truncation
+
 LOG = logging.getLogger(__name__)
 
 def schema(name, description, properties=None, required=None):
@@ -20,7 +22,11 @@ def schema(name, description, properties=None, required=None):
             "parameters":{"type":"object", "properties":properties or {},
                           "required":required or [], "additionalProperties":False}}
 
-STR = lambda description: {"type":"string", "description":description, "maxLength":240}
+def _str_schema(description: str) -> dict:
+    """Return a JSON Schema string property with the standard max length."""
+    return {"type": "string", "description": description, "maxLength": Limits.TOOL_STR_MAX_LENGTH}
+
+STR = _str_schema
 NUM = lambda description,lo,hi: {"type":"integer","description":description,"minimum":lo,"maximum":hi}
 TOOL_SCHEMAS = [
     schema("get_system_status", "Report memory, CPU load, disk and uptime on Jetson"),
@@ -82,7 +88,7 @@ def validate(name, args, allow_delegate=True):
         d = p["properties"][k]
         if d["type"] == "integer" and (type(v) is not int or not d["minimum"] <= v <= d["maximum"]):
             raise ValueError(f"Invalid integer {k}")
-        if d["type"] == "string" and (not isinstance(v,str) or len(v)>d.get("maxLength",240)
+        if d["type"] == "string" and (not isinstance(v,str) or len(v)>d.get("maxLength", Limits.TOOL_STR_MAX_LENGTH)
                                      or (d.get("enum") and v not in d["enum"])):
             raise ValueError(f"Invalid string {k}")
     return args
@@ -205,19 +211,19 @@ def gpu_status():
                          stderr=subprocess.DEVNULL, text=True)
     try:
         import select
-        ready,_,_ = select.select([p.stdout], [], [], 4)
+        ready,_,_ = select.select([p.stdout], [], [], Timeouts.TEGRASTATS_READ)
         line = p.stdout.readline().strip() if ready else ""
     finally:
         p.terminate()
         try:
-            p.wait(timeout=2)
+            p.wait(timeout=Timeouts.TEGRASTATS_TERMINATE)
         except subprocess.TimeoutExpired:
             p.kill()
-            p.wait(timeout=2)
+            p.wait(timeout=Timeouts.TEGRASTATS_TERMINATE)
         p.stdout.close()
     temps = {k:float(v) for k,v in re.findall(r"([A-Za-z_]+)@([0-9.]+)C",line)}
     return {"available":bool(line), "temperatures_c":temps,
-            "gpu_temp_c":temps.get("GPU"),"raw":line[:700]}
+            "gpu_temp_c":temps.get("GPU"),"raw":line[:Truncation.GPU_RAW]}
 
 def status():
     disk = shutil.disk_usage("/")
@@ -226,8 +232,10 @@ def status():
             "root_free_gib":round(disk.free/1024**3,2),
             "uptime_seconds":round(float(Path("/proc/uptime").read_text().split()[0]))}
 
-def _valid_name(s):
-    return isinstance(s,str) and bool(re.fullmatch(r"[a-zA-Z0-9_.@-]{1,80}",s))
+def _valid_name(s: str) -> bool:
+    """Return True if *s* is a safe service or task name."""
+    from .constants import Patterns
+    return isinstance(s, str) and bool(Patterns.VALID_NAME.fullmatch(s))
 
 def validate_plan(steps, max_steps=5, allow_cancellations=False):
     if not isinstance(steps,list) or len(steps)>max_steps:
@@ -304,7 +312,7 @@ class Tools:
                 raise PermissionError("Task not in runtime.named_tasks")
             runner = self.processes.run if self.processes else subprocess.run
             done = runner(spec,capture_output=True,text=True,timeout=60,check=False)
-            out = {"returncode":done.returncode,"stdout":done.stdout[-1200:],"stderr":done.stderr[-600:]}
+            out = {"returncode":done.returncode,"stdout":done.stdout[-Truncation.RESULT:],"stderr":done.stderr[-Truncation.STDERR:]}
         elif name == "create_reminder":
             if not args["message"].strip():
                 raise ValueError("Reminder cannot be blank")
@@ -349,7 +357,7 @@ class Tools:
         runner = self.processes.run if self.processes else subprocess.run
         done = runner(["systemctl","--user",verb,n], capture_output=True,text=True,
                       timeout=10,check=False)
-        return {"exit_code":done.returncode,"message":(done.stdout or done.stderr).strip()[:300]}
+        return {"exit_code":done.returncode,"message":(done.stdout or done.stderr).strip()[:Truncation.MESSAGE]}
 
     def run_plan(self,steps, allow_cancellations=False):
         steps = validate_plan(steps, self.cfg.get("max_plan_steps",5),
@@ -379,11 +387,11 @@ class Scheduler:
     def stop(self):
         self.stop_flag.set()
         if self.thread.is_alive():
-            self.thread.join(timeout=4)
+            self.thread.join(timeout=Timeouts.SCHEDULER_STOP)
         if self.workflow_thread.is_alive():
             # Active approved process calls have their own subprocess bounds.
             # Do not unsafely terminate an action or assume rollback.
-            self.workflow_thread.join(timeout=4)
+            self.workflow_thread.join(timeout=Timeouts.SCHEDULER_STOP)
 
     def _loop(self):
         while not self.stop_flag.wait(2):

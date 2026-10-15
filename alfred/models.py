@@ -17,9 +17,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+from .constants import Limits, Timeouts, Truncation
+
 LOG = logging.getLogger(__name__)
 
-def request_json(url, data=None, timeout=4):
+def request_json(url: str, data: object = None, timeout: int = Timeouts.REQUEST_JSON) -> object:
+    """POST or GET a JSON endpoint; raises on network / HTTP errors."""
     body = json.dumps(data).encode() if data is not None else None
     req = Request(url, data=body, headers={"Content-Type": "application/json"} if body else {})
     with urlopen(req, timeout=timeout) as response:
@@ -34,9 +37,9 @@ LlamaSupervisor = ModelSupervisor
 PLAN_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
-        "message": {"type": "string", "maxLength": 800},
+        "message": {"type": "string", "maxLength": Limits.QWEN_MESSAGE_MAX},
         "steps": {
-            "type": "array", "maxItems": 5,
+            "type": "array", "maxItems": Limits.QWEN_PLAN_MAX_STEPS,
             "items": {
                 "type": "object",
                 "properties": {
@@ -230,9 +233,9 @@ class Qwen:
         if (not isinstance(plan, dict)
                 or set(plan) != {"message", "steps", "save_as"}
                 or not isinstance(plan["message"], str)
-                or len(plan["message"]) > 800
+                or len(plan["message"]) > Limits.QWEN_MESSAGE_MAX
                 or not isinstance(plan["steps"], list)
-                or len(plan["steps"]) > 5
+                or len(plan["steps"]) > Limits.QWEN_PLAN_MAX_STEPS
                 or not (plan["save_as"] is None or isinstance(plan["save_as"], str))):
             raise QwenPlanResponseError("Qwen response missing required plan fields")
         for step in plan["steps"]:
@@ -240,7 +243,7 @@ class Qwen:
                     or not {"tool", "args"} <= set(step)
                     or not set(step) <= {"tool", "args", "when"}
                     or not isinstance(step["tool"], str)
-                    or not 1 <= len(step["tool"]) <= 128
+                    or not 1 <= len(step["tool"]) <= Limits.PLAN_TOOL_NAME_MAX
                     or not isinstance(step["args"], dict)):
                 raise QwenPlanResponseError("Malformed Qwen plan step structure")
             if "when" in step:
@@ -269,7 +272,7 @@ class Qwen:
     def _explain_admitted(self, user_request, observed_results):
         self.supervisor.ensure_running()
         model = self.supervisor.model_id()
-        observations = json.dumps(observed_results,default=str,ensure_ascii=True)[:7000]
+        observations = json.dumps(observed_results,default=str,ensure_ascii=True)[:Truncation.EXPLAIN_OBSERVATIONS]
         payload = {
             "messages": [
                 {"role":"system","content":
@@ -279,12 +282,12 @@ class Qwen:
                     "Do not issue instructions to execute actions, claim an action has succeeded, "
                     "or invent hardware readings. If measurements are insufficient, say so."},
                 {"role":"user","content":
-                    "User question: " + user_request[:1200] + "\nObserved read-only tool results:\n" + observations}
+                    "User question: " + user_request[:Truncation.EXPLAIN_QUESTION] + "\nObserved read-only tool results:\n" + observations}
             ],
             "temperature":0,
             "max_tokens":min(512,int(self.cfg["max_tokens"])),
             "response_format":self._response_format("alfred_explanation", {
-                "type":"object","properties":{"answer":{"type":"string","maxLength":1400}},
+                "type":"object","properties":{"answer":{"type":"string","maxLength":Limits.QWEN_ANSWER_MAX}},
                 "required":["answer"],"additionalProperties":False
             }),
             "stream":False
@@ -300,7 +303,7 @@ class Qwen:
             raise ValueError("Qwen analysis did not return a valid answer") from exc
         if not isinstance(answer,str) or not answer.strip():
             raise ValueError("Qwen analysis answer is empty")
-        return answer[:1400]
+        return answer[:Limits.QWEN_ANSWER_MAX]
 
 class Cactus:
     """One long-lived Needle instance; native inference kept on calling thread."""
