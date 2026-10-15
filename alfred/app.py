@@ -22,6 +22,7 @@ from .models import Cactus, LlamaSupervisor, Qwen
 from .lifecycle import ChildProcesses, ShutdownSocket, request_close
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools
 from .system2 import System2, parse_plan
+from .skills import SkillRegistry
 from .wakeword import WakeWordGate, AcousticWakeDetector
 from .cognitive import (SessionLedger, Decision, Observation, Escalation,
                         ApprovalReference, Completion, Diagnostic)
@@ -50,7 +51,7 @@ class Feedback:
                 self.speaking.clear()
 
 class Alfred:
-    def __init__(self,cfg,load_models=True):
+    def __init__(self,cfg,load_models=True,*,meeting_adapter=None):
         self.cfg = cfg
         runtime = cfg["runtime"]
         self.store = Store(runtime["database"])
@@ -62,6 +63,8 @@ class Alfred:
         self._needle_cancel = threading.Event()
         self.processes = ChildProcesses()
         self.tools = Tools(runtime,self.store,processes=self.processes)
+        # Discovery ONLY: cannot grant tools, start a recorder or import Jetson.
+        self.skills = SkillRegistry(tools=self.tools,meeting=meeting_adapter)
         self.feedback = Feedback(runtime["tts"],processes=self.processes)
         self.audio = AudioManager(cfg["audio"])
         self.wake_word = WakeWordGate(cfg["wake_word"])
@@ -483,6 +486,8 @@ def _main(argv=None):
     group.add_argument("--automation-tick",action="store_true",
                        help="Run one scheduler cycle for debugging and exit")
     group.add_argument("--reason",help="Test Qwen planner on a text input; no Cactus engine required")
+    group.add_argument("--skills",action="store_true",
+                       help="List detected skills and unavailable Jetson features, without models")
     group.add_argument("--pending",action="store_true",help="List proposed tool actions awaiting approval")
     group.add_argument("--approve",type=int,metavar="ID",help="Locally approve and execute a proposal once")
     group.add_argument("--reject",type=int,metavar="ID",help="Locally reject a proposal")
@@ -521,7 +526,7 @@ def _main(argv=None):
                         handlers=[logging.StreamHandler()])
     if args.command == "close":
         if any((args.doctor, args.text, args.ensure_backend, args.scheduler_only,
-                args.automations, args.automation_tick, args.reason,
+                args.automations, args.automation_tick, args.reason, args.skills,
                 args.pending, args.approve is not None, args.reject is not None)):
             parser.error("'close' cannot be combined with another operation")
         stopped = []
@@ -529,6 +534,13 @@ def _main(argv=None):
             if request_close(logs, role):
                 stopped.append(role)
         print("Alfred stopped: " + ", ".join(stopped) if stopped else "Alfred is not running")
+        return 0
+    if args.skills:
+        app=Alfred(cfg,load_models=False)
+        try:
+            print(json.dumps(app.skills.metadata(),indent=2))
+        finally:
+            app.close()
         return 0
     if args.doctor:
         return 0 if doctor(cfg) else 2
