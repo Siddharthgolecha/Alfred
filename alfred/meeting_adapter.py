@@ -91,6 +91,22 @@ def sanitize_segments(raw):
         for flag in ("likely_crosstalk","ambiguous_crosstalk"):
             if type(entry.get(flag,False)) is not bool:
                 raise ValueError("Invalid crosstalk flag")
+        raw_words=entry.get("words",[])
+        if type(raw_words) is not list or len(raw_words)>48:
+            raise ValueError("Unbounded word-timing evidence")
+        words=[]
+        for word in raw_words:
+            if type(word) is not dict:
+                raise ValueError("Invalid timestamped word")
+            a,b=word.get("start_seconds"),word.get("end_seconds")
+            if (type(a) not in (float,int) or type(b) not in (float,int)
+                or not math.isfinite(a) or not math.isfinite(b)
+                or not 0<=a<=b):
+                raise ValueError("Invalid word timestamp")
+            value=_text(word.get("word"),60)
+            if not value:
+                raise ValueError("Empty word")
+            words.append({"word":value,"start_seconds":a,"end_seconds":b})
         row={
             "id":sid, "start_utc":start, "end_utc":end,
             "source":source,"speaker":source, "identity_type":"microphone_channel",
@@ -102,6 +118,7 @@ def sanitize_segments(raw):
             "ambiguous_crosstalk":entry.get("ambiguous_crosstalk",False),
             "synchronization_uncertainty_ms":uncertainty,
             "timing_basis":"decoder_estimated",
+            "words":words,
         }
         result.append(row)
     for row in result:
