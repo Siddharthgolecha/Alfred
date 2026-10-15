@@ -8,8 +8,6 @@ import logging
 import shutil
 import subprocess
 import threading
-from typing import Optional
-
 from .constants import Truncation
 
 LOG = logging.getLogger(__name__)

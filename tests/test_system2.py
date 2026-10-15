@@ -561,6 +561,40 @@ class RoutingTests(unittest.TestCase):
         self.app.reason.assert_called_once_with(
             "What is quantum computing?",allow_actions=False)
 
+class System2ConstantsAndRejectionTests(unittest.TestCase):
+    def test_voice_executable_and_approval_required_constants(self):
+        from alfred.system2 import APPROVAL_REQUIRED_TOOLS, VOICE_EXECUTABLE_TOOLS
+        self.assertIn("get_system_status", VOICE_EXECUTABLE_TOOLS)
+        self.assertIn("get_gpu_status", VOICE_EXECUTABLE_TOOLS)
+        self.assertIn("create_reminder", VOICE_EXECUTABLE_TOOLS)
+        self.assertIn("control_service", APPROVAL_REQUIRED_TOOLS)
+        self.assertIn("run_named_task", APPROVAL_REQUIRED_TOOLS)
+        self.assertIn("watch_gpu_temperature", APPROVAL_REQUIRED_TOOLS)
+        # Sets must be disjoint
+        self.assertTrue(VOICE_EXECUTABLE_TOOLS.isdisjoint(APPROVAL_REQUIRED_TOOLS))
+
+    def test_parse_plan_raises_value_error_on_invalid_structure(self):
+        tools = Mock()
+        with self.assertRaises(ValueError):
+            parse_plan("not a dict", "text", tools, 5)
+        with self.assertRaises(ValueError):
+            parse_plan({"steps": "not a list"}, "text", tools, 5)
+
+    def test_parse_plan_raises_value_error_on_unrecognized_fields(self):
+        tools = Mock()
+        with self.assertRaises(ValueError):
+            parse_plan({"steps": [], "message": "hi", "extra_field": 123}, "text", tools, 5)
+
+    def test_parse_plan_raises_value_error_on_invalid_save_as(self):
+        tools = Mock()
+        with self.assertRaises(ValueError):
+            parse_plan({"steps": [{"tool": "get_gpu_status", "args": {}}], "save_as": "123invalid"}, "save workflow", tools, 5)
+        with self.assertRaises(ValueError):
+            parse_plan({"steps": [{"tool": "get_gpu_status", "args": {}}], "save_as": "my_flow"}, "just run it", tools, 5)
+        with self.assertRaises(ValueError):
+            parse_plan({"steps": [], "save_as": "my_flow"}, "save workflow", tools, 5)
+
+
 class PlannerCliTests(unittest.TestCase):
     def test_reason_cli_records_failure_and_returns_nonzero(self):
         from alfred.cli import _main

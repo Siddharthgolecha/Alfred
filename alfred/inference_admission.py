@@ -7,11 +7,38 @@ failed call is retried by the gate, including model proposals with side effects.
 """
 from __future__ import annotations
 from contextlib import contextmanager
+from dataclasses import dataclass
 import math
 import os
 from pathlib import Path
 import threading
 import time
+
+
+@dataclass(frozen=True)
+class AdmissionConfig:
+    """Resource admission thresholds and limits for inference scheduling."""
+
+    enabled: bool = False
+    min_available_mib: int = 512
+    max_swap_used_mib: int = 1024
+    max_cpu_load_per_core: float = 3.0
+    max_wait_ms: int = 200
+
+    def __post_init__(self):
+        if (
+            type(self.enabled) is not bool
+            or type(self.min_available_mib) is not int
+            or not 128 <= self.min_available_mib <= 4096
+            or type(self.max_swap_used_mib) is not int
+            or not 0 <= self.max_swap_used_mib <= 8192
+            or type(self.max_wait_ms) is not int
+            or not 0 <= self.max_wait_ms <= 10000
+            or type(self.max_cpu_load_per_core) not in (int, float)
+            or not math.isfinite(self.max_cpu_load_per_core)
+            or not 0.1 <= self.max_cpu_load_per_core <= 20
+        ):
+            raise ValueError("Invalid admission thresholds")
 
 
 class AdmissionRejected(RuntimeError):
@@ -51,29 +78,35 @@ class InferenceAdmission:
 
     KINDS=frozenset(("needle","needle_feedback","whistle","qwen",
                      "qwen_explain","harness"))
-    MAX_VOICE_WAITERS=2
-    MAX_OTHER_WAITERS=1
 
-    def __init__(self, *, enabled=False, min_available_mib=512,
-                 max_swap_used_mib=1024, max_cpu_load_per_core=3.,
+    # Two voice waiters allow immediate buffering of consecutive wake phrases
+    # while STT processes; one other waiter prevents background/batch inference
+    # from piling up and exhausting Jetson unified memory.
+    MAX_VOICE_WAITERS = 2
+    MAX_OTHER_WAITERS = 1
+
+    def __init__(self, config: AdmissionConfig | None = None, *,
+                 enabled=False, min_available_mib=512,
+                 max_swap_used_mib=1024, max_cpu_load_per_core=3.0,
                  max_wait_ms=200, sampler=linux_resources,
                  clock=time.monotonic):
-        if (type(enabled) is not bool
-                or type(min_available_mib) is not int
-                or not 128<=min_available_mib<=4096
-                or type(max_swap_used_mib) is not int
-                or not 0<=max_swap_used_mib<=8192
-                or type(max_wait_ms) is not int
-                or not 0<=max_wait_ms<=10000
-                or type(max_cpu_load_per_core) not in (int,float)
-                or not math.isfinite(max_cpu_load_per_core)
-                or not .1<=max_cpu_load_per_core<=20):
-            raise ValueError("Invalid admission thresholds")
-        self.enabled=enabled
-        self.min_available_mib=min_available_mib
-        self.max_swap_used_mib=max_swap_used_mib
-        self.max_cpu_load_per_core=max_cpu_load_per_core
-        self.max_wait_ms=max_wait_ms
+        if config is not None:
+            if not isinstance(config, AdmissionConfig):
+                raise ValueError("Expected AdmissionConfig instance")
+            self.config = config
+        else:
+            self.config = AdmissionConfig(
+                enabled=enabled,
+                min_available_mib=min_available_mib,
+                max_swap_used_mib=max_swap_used_mib,
+                max_cpu_load_per_core=max_cpu_load_per_core,
+                max_wait_ms=max_wait_ms,
+            )
+        self.enabled = self.config.enabled
+        self.min_available_mib = self.config.min_available_mib
+        self.max_swap_used_mib = self.config.max_swap_used_mib
+        self.max_cpu_load_per_core = self.config.max_cpu_load_per_core
+        self.max_wait_ms = self.config.max_wait_ms
         self.sampler=sampler
         self.clock=clock
         self._cond=threading.Condition(threading.RLock())
@@ -176,11 +209,11 @@ class InferenceAdmission:
                             self._latencies.pop(0)
                         acquired=True
                         break
-                    rem=deadline-self.clock()
-                    if rem<=0:
-                        self._counts["rejected"]+=1
+                    remaining_seconds = deadline - self.clock()
+                    if remaining_seconds <= 0:
+                        self._counts["rejected"] += 1
                         raise AdmissionRejected("Inference queue busy; explicit retry required")
-                    self._cond.wait(timeout=rem)
+                    self._cond.wait(timeout=remaining_seconds)
             finally:
                 # A rejected ticket must NEVER block subsequent work.
                 self._queue=[q for q in self._queue if q[0] is not ticket]

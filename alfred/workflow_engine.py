@@ -15,7 +15,7 @@ import time
 from .runtime import validate,check_condition
 
 LOG=logging.getLogger(__name__)
-_ID=re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,39}$")
+_STEP_ID_PATTERN=re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,39}$")
 # Read-only retries can be repeated safely. No side-effect action is retried.
 READ_ONLY=frozenset({
     "get_system_status","get_gpu_status","list_services","list_reminders",
@@ -32,7 +32,9 @@ FORBIDDEN=frozenset({
 # Side effects are allowed only when present in existing explicit allowlists
 # and the workflow version has been locally approved.
 PERMITTED=READ_ONLY|frozenset({"control_service","run_named_task"})
+# 12 steps keeps DAG validation O(n²) negligible and prevents unbounded tool chains.
 MAX_STEPS=12
+# 3 per tick balances responsiveness with CPU fairness under the 1-second scheduler loop.
 MAX_RUNS_PER_TICK=3
 RESULT_LIMIT=5000
 
@@ -46,7 +48,6 @@ def _digest(spec):
 
 
 def _result(value):
-    """Limit storage and prevent an unbounded command result from bloating DB."""
     if isinstance(value,dict):
         result=value
     else:
@@ -57,17 +58,24 @@ def _result(value):
     return result
 
 
-def validate_graph(spec,tools,max_steps=MAX_STEPS):
-    """Validate a versioned DAG with stable IDs and explicit ancestor predicates."""
+def _validate_graph_structure(spec, max_steps):
+    """Validate top-level schema, version, name, and step count."""
     if not isinstance(spec,dict) or set(spec)!={"version","name","steps"}:
         raise ValueError("Workflow must have exactly version, name, steps")
     if spec["version"]!=1 or type(spec["version"]) is not int:
         raise ValueError("Unsupported workflow schema version")
-    if not isinstance(spec["name"],str) or not _ID.fullmatch(spec["name"]):
+    if not isinstance(spec["name"],str) or not _STEP_ID_PATTERN.fullmatch(spec["name"]):
         raise ValueError("Invalid workflow name")
     nodes=spec["steps"]
     if not isinstance(nodes,list) or not 1<=len(nodes)<=min(MAX_STEPS,max_steps):
         raise ValueError("Workflow must contain 1..12 bounded steps")
+
+
+def _validate_step_names(nodes):
+    """Validate step IDs, tool names, args, deps, retry, timeout, and conditions.
+
+    Returns a normalised list of step dicts with all defaults resolved.
+    """
     ids=set()
     normalized=[]
     for node in nodes:
@@ -76,7 +84,7 @@ def validate_graph(spec,tools,max_steps=MAX_STEPS):
         }:
             raise ValueError("Unknown workflow step fields")
         ident=node.get("id")
-        if not isinstance(ident,str) or not _ID.fullmatch(ident) or ident in ids:
+        if not isinstance(ident,str) or not _STEP_ID_PATTERN.fullmatch(ident) or ident in ids:
             raise ValueError("Invalid or duplicate step id")
         ids.add(ident)
         name=node.get("tool")
@@ -84,13 +92,6 @@ def validate_graph(spec,tools,max_steps=MAX_STEPS):
             raise ValueError("Workflow tool is not approved for graph execution")
         args=node.get("args",{})
         validate(name,args,allow_delegate=False)
-        if name=="control_service":
-            if args["name"] not in tools.services:
-                raise PermissionError("Workflow service is not preapproved")
-        if name=="run_named_task":
-            task=tools.tasks.get(args["name"])
-            if not isinstance(task,list) or not task or any(not isinstance(x,str) for x in task):
-                raise PermissionError("Workflow named task is not preapproved")
         deps=node.get("depends_on",[])
         if not isinstance(deps,list) or len(deps)>MAX_STEPS or any(
             not isinstance(x,str) for x in deps) or len(set(deps))!=len(deps):
@@ -132,7 +133,28 @@ def validate_graph(spec,tools,max_steps=MAX_STEPS):
             "retry":{"max_attempts":attempts,"backoff_seconds":backoff},
             "timeout_seconds":timeout
         })
-    byid={node["id"]:node for node in normalized}
+    return normalized
+
+
+def _validate_service_allowlist(normalized, tools):
+    """Verify that every service/task name referenced by the graph is pre-approved."""
+    for node in normalized:
+        name=node["tool"]
+        args=node["args"]
+        if name=="control_service":
+            if args["name"] not in tools.services:
+                raise PermissionError("Workflow service is not preapproved")
+        if name=="run_named_task":
+            task=tools.tasks.get(args["name"])
+            if not isinstance(task,list) or not task or any(not isinstance(x,str) for x in task):
+                raise PermissionError("Workflow named task is not preapproved")
+
+
+def validate_graph(spec, tools, max_steps=MAX_STEPS):
+    """Validate a versioned DAG with stable IDs and explicit ancestor predicates."""
+    _validate_graph_structure(spec, max_steps)
+    normalized=_validate_step_names(spec["steps"])
+    _validate_service_allowlist(normalized, tools)
     # Strong forward-reference prohibition eliminates cycles and ambiguity,
     # while still allowing arbitrary fan-out, joins, and nested branches.
     seen=set()
@@ -225,7 +247,7 @@ class WorkflowEngine:
 
     def approve(self, name: str) -> dict:
         """Re-validate and locally approve a previously drafted workflow."""
-        if not isinstance(name,str) or not _ID.fullmatch(name):
+        if not isinstance(name,str) or not _STEP_ID_PATTERN.fullmatch(name):
             raise ValueError("Invalid workflow name")
         with self.store.lock,self.store.db:
             row=self.store.db.execute(

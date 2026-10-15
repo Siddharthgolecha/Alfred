@@ -124,7 +124,7 @@ class OfflineMeetingAdapter:
                                   retained=retention, state="rollback_pending")
                 try:
                     rolled_back = self._provider.rollback_start(operation_id) is True
-                except Exception:
+                except (OSError, RuntimeError, ValueError):
                     rolled_back = False
                 if rolled_back:
                     self._journal.remove(operation_id)
@@ -160,21 +160,29 @@ class OfflineMeetingAdapter:
             self._permits[(task_id, meeting_id)] = p
             return p
 
-    def _verify(self, p: Any, *, active: bool = False, skill: str | None = None) -> None:
-        """Assert that *p* is a live, non-expired permit for the current meeting."""
-        if type(p) is not MeetingPermit:
+    @staticmethod
+    def _require_meeting_structure(meeting: Any, permit: "MeetingPermit") -> None:
+        """Validate that *meeting* has the expected structure and matches *permit*."""
+        if (
+            not isinstance(meeting, dict)
+            or meeting.get("owner") != permit.owner
+            or meeting.get("session_id") != permit.session_id
+        ):
+            raise PermissionError("Meeting record is missing or does not match permit")
+
+    def _verify(self, permit: Any, *, active: bool = False, skill: str | None = None) -> None:
+        """Assert that *permit* is a live, non-expired permit for the current meeting."""
+        if type(permit) is not MeetingPermit:
             raise PermissionError("Trusted permit required")
         with self._lock:
-            if self._permits.get((p.task_id, p.meeting_id)) is not p:
+            if self._permits.get((permit.task_id, permit.meeting_id)) is not permit:
                 raise PermissionError("Meeting permit revoked or fabricated")
-            meeting = self._meetings.get(p.meeting_id)
+            meeting = self._meetings.get(permit.meeting_id)
+            self._require_meeting_structure(meeting, permit)
             if (
-                meeting is None
-                or meeting["owner"] != p.owner
-                or meeting["session_id"] != p.session_id
-                or meeting.get("state") in ("stopping", "purge_pending")
+                meeting.get("state") in ("stopping", "purge_pending")
                 or (not meeting["active"] and not meeting["retention"])
-                or float(self._clock()) >= p.expires_at
+                or float(self._clock()) >= permit.expires_at
             ):
                 raise PermissionError("Meeting permit expired or outside scope")
             if active and not meeting["active"]:
@@ -227,22 +235,36 @@ class OfflineMeetingAdapter:
             meeting["state"] = "purged"
             return {"meeting_id": permit.meeting_id, "state": "stopped", "retained": False}
 
-    def _revoke_meeting_access(self, meeting_id: str) -> None:
-        """Remove all permits and validated minutes for *meeting_id*."""
+    def _revoke_permits(self, meeting_id: str) -> None:
+        """Remove all task permits and their validated minutes for *meeting_id*."""
         for key in tuple(self._permits):
             if key[1] == meeting_id:
                 del self._permits[key]
                 self._validated_minutes.pop(key, None)
+
+    def _delete_minutes(self, meeting_id: str) -> None:
+        """Remove all cached validated minutes entries for *meeting_id*."""
+        for key in tuple(self._validated_minutes):
+            if key[1] == meeting_id:
+                self._validated_minutes.pop(key, None)
+
+    def _delete_artifacts(self, meeting_id: str) -> None:
+        """Remove all artifact references for *meeting_id*."""
         for key in tuple(self._artifacts):
             if key[0] == meeting_id:
                 del self._artifacts[key]
+
+    def _revoke_meeting_access(self, meeting_id: str) -> None:
+        """Remove all permits, validated minutes, and artifacts for *meeting_id*."""
+        self._revoke_permits(meeting_id)
+        self._delete_artifacts(meeting_id)
 
     def _discard_or_raise(self, meeting_id: str) -> None:
         """Call provider discard and raise if it cannot be verified."""
         discard = getattr(self._provider, "discard_meeting", None)
         try:
             verified = callable(discard) and discard(meeting_id) is True
-        except Exception:
+        except (OSError, RuntimeError, ValueError):
             verified = False
         if not verified:
             raise RuntimeError(
@@ -275,7 +297,7 @@ class OfflineMeetingAdapter:
                     rollback = getattr(self._provider, "rollback_start", None)
                     try:
                         ok = callable(rollback) and rollback(op) is True
-                    except Exception:
+                    except (OSError, RuntimeError, ValueError):
                         ok = False
                     if not ok:
                         raise RuntimeError("Recorder startup rollback still unverified")

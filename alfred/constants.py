@@ -118,6 +118,20 @@ class Limits:
     MODEL_ID_MAX_LENGTH: int = 120
     # Maximum LocalHarness max_tokens.
     HARNESS_MAX_TOKENS: int = 512
+    # Qwen context-window size range.
+    QWEN_CTX_SIZE_MIN: int = 1
+    QWEN_CTX_SIZE_MAX: int = 131072
+    # Qwen supervisor poll interval range (seconds).
+    QWEN_POLL_MIN: int = 10
+    QWEN_POLL_MAX: int = 3600
+    # Audio stream timeout range (seconds).
+    AUDIO_TIMEOUT_MIN: int = 1
+    AUDIO_TIMEOUT_MAX: int = 30
+    # Audio speech RMS energy range.
+    AUDIO_SPEECH_RMS_MIN: float = 0.001
+    AUDIO_SPEECH_RMS_MAX: float = 0.2
+    # Wake-word followup window upper bound (seconds).
+    WAKE_FOLLOWUP_MAX: int = 30
 
 
 # ---------------------------------------------------------------------------

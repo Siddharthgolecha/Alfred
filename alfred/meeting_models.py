@@ -56,14 +56,18 @@ def _clock_time(value: Any) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _canonical_utc(value: Any) -> str:
-    """Return *value* as a canonical UTC ISO-8601 string."""
+def _to_canonical_utc_string(dt: datetime) -> str:
+    """Format parsed UTC datetime as canonical UTC ISO-8601 string."""
     return (
-        _clock_time(value)
-        .isoformat(timespec="microseconds")
+        dt.isoformat(timespec="microseconds")
         .replace("+00:00", "Z")
         .replace(".000000Z", "Z")
     )
+
+
+def _canonical_utc(value: Any) -> str:
+    """Return *value* as a canonical UTC ISO-8601 string."""
+    return _to_canonical_utc_string(_clock_time(value))
 
 
 # ---------------------------------------------------------------------------
@@ -83,14 +87,15 @@ def sanitize_segments(raw: Any) -> tuple[dict[str, Any], ...]:
     for entry in raw:
         if type(entry) is not dict:
             raise ValueError("Malformed meeting segment")
-        source = entry.get("source")
-        if type(source) is not str or not SOURCE.fullmatch(source):
+        channel_source = entry.get("source")
+        if type(channel_source) is not str or not SOURCE.fullmatch(channel_source):
             raise ValueError("Invalid microphone channel identifier")
-        start, end = entry.get("start_utc"), entry.get("end_utc")
-        canonical_start = _canonical_utc(start)
-        canonical_end = _canonical_utc(end)
-        if _clock_time(end) < _clock_time(start):
+        start_dt = _clock_time(entry.get("start_utc"))
+        end_dt = _clock_time(entry.get("end_utc"))
+        if end_dt < start_dt:
             raise ValueError("Meeting segment timestamps reversed")
+        canonical_start = _to_canonical_utc_string(start_dt)
+        canonical_end = _to_canonical_utc_string(end_dt)
         sid = entry.get("id")
         if type(sid) is not str or not _ID_PATTERN.fullmatch(sid) or sid in ids:
             raise ValueError("Invalid/duplicate meeting segment ID")
@@ -140,8 +145,8 @@ def sanitize_segments(raw: Any) -> tuple[dict[str, Any], ...]:
             "id": sid,
             "start_utc": canonical_start,
             "end_utc": canonical_end,
-            "source": source,
-            "speaker": source,
+            "source": channel_source,
+            "speaker": channel_source,
             "identity_type": "microphone_channel",
             "verified_identity": False,
             "text": _text(entry.get("text"), 260),
@@ -174,11 +179,11 @@ def _quote(raw: Any, by_id: dict[str, Any]) -> tuple[str, str]:
         or raw["segment_id"] not in by_id
     ):
         raise ValueError("Uncited minutes claim")
-    q = _text(raw["quote"], 300)
-    source = by_id[raw["segment_id"]]["text"]
-    if not 2 <= len(q) <= 300 or q.casefold() not in source.casefold():
+    quote_text = _text(raw["quote"], 300)
+    source_text = by_id[raw["segment_id"]]["text"]
+    if not 2 <= len(quote_text) <= 300 or quote_text.casefold() not in source_text.casefold():
         raise ValueError("Unsubstantiated minutes claim")
-    return q, source
+    return quote_text, source_text
 
 
 def validate_minutes_proposal(
@@ -201,12 +206,14 @@ def validate_minutes_proposal(
         raise ValueError("Meeting title required")
     by_id = {item["id"]: item for item in segments}
     out: dict[str, Any] = {"title": title}
-    for field in ("summary", "agenda", "key_points", "decisions", "risks", "open_questions"):
+    list_fields = ("agenda", "key_points", "decisions", "risks", "open_questions")
+    for field in ("summary",) + list_fields:
         values = proposal[field]
         if type(values) is not list or len(values) > 24:
             raise ValueError("Unbounded minutes section")
         verified = [_quote(value, by_id)[0] for value in values]
-        out[field] = "\n".join(verified) if field == "summary" else verified
+        out[field] = verified
+    out["summary"] = "\n".join(out["summary"])
     if not out["summary"]:
         out["summary"] = "No evidence-backed summary available"
     actions = proposal["action_items"]

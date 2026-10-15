@@ -12,7 +12,7 @@ from pathlib import Path
 from .audio import AudioManager, AudioUnavailableError, pactl_json
 from .config import load_config
 from .models import LlamaSupervisor
-from .inference_admission import InferenceAdmission, AdmissionRejected
+from .inference_admission import AdmissionConfig, AdmissionRejected, InferenceAdmission
 from .lifecycle import ShutdownSocket, request_close
 from .cognitive.harness_sdk import LocalHarness, HarnessUnavailable
 from .cognitive import Decision, Escalation, ApprovalReference, Completion
@@ -21,8 +21,7 @@ from .app import Alfred
 LOG = logging.getLogger(__name__)
 
 
-def doctor(cfg) -> bool:
-    """Make advertised devices and *verified live microphone* visibly distinct."""
+def _diagnose_audio(cfg) -> bool:
     print("Audio input mode:", cfg["audio"]["mode"])
     manager = AudioManager(cfg["audio"])
     healthy = False
@@ -51,11 +50,19 @@ def doctor(cfg) -> bool:
                       "profile:", card.get("active_profile"))
     except (OSError, ValueError, RuntimeError) as exc:
         print("Bluetooth profile detection unavailable:", exc)
-    s = LlamaSupervisor(cfg["qwen"], cfg["runtime"]["logs"])
-    backend = s.status()
+    return healthy
+
+
+def _diagnose_qwen(cfg) -> tuple[LlamaSupervisor, dict]:
+    supervisor = LlamaSupervisor(cfg["qwen"], cfg["runtime"]["logs"])
+    backend = supervisor.status()
     print("Inference backend:", json.dumps(backend))
     print("Model:", cfg["qwen"]["model"] or cfg["qwen"]["model_path"] or "(auto-select)")
-    print("Backend executable:", s.executable_name())
+    print("Backend executable:", supervisor.executable_name())
+    return supervisor, backend
+
+
+def _diagnose_harness(cfg, supervisor: LlamaSupervisor, backend: dict) -> bool:
     harness_ready = False
     harness = None
     runtime = cfg["runtime"]
@@ -63,14 +70,17 @@ def doctor(cfg) -> bool:
     # Apply the very same memory/swap/CPU/capture admission as interactive
     # startup; diagnostics must never bypass the deployment pressure gate.
     admission = InferenceAdmission(
-        enabled=runtime["resource_admission_enabled"],
-        min_available_mib=runtime["resource_min_available_mib"],
-        max_swap_used_mib=runtime["resource_max_swap_used_mib"],
-        max_cpu_load_per_core=runtime["resource_max_cpu_load_per_core"],
-        max_wait_ms=runtime["resource_max_wait_ms"])
+        AdmissionConfig(
+            enabled=runtime["resource_admission_enabled"],
+            min_available_mib=runtime["resource_min_available_mib"],
+            max_swap_used_mib=runtime["resource_max_swap_used_mib"],
+            max_cpu_load_per_core=runtime["resource_max_cpu_load_per_core"],
+            max_wait_ms=runtime["resource_max_wait_ms"],
+        )
+    )
     try:
         harness = LocalHarness(
-            s.url, cfg["qwen"]["model"] or cfg["qwen"]["expected_model"],
+            supervisor.url, cfg["qwen"]["model"] or cfg["qwen"]["expected_model"],
             timeout=runtime["harness_timeout_seconds"],
             admission=admission)
         status = harness.audit_installation()
@@ -90,7 +100,15 @@ def doctor(cfg) -> bool:
         if harness is not None:
             harness.close()
         admission.close()
-    return healthy and harness_ready
+    return harness_ready
+
+
+def doctor(cfg) -> bool:
+    """Make advertised devices and *verified live microphone* visibly distinct."""
+    audio_healthy = _diagnose_audio(cfg)
+    supervisor, backend = _diagnose_qwen(cfg)
+    harness_ready = _diagnose_harness(cfg, supervisor, backend)
+    return audio_healthy and harness_ready
 
 
 def _main(argv=None) -> int:
@@ -226,9 +244,9 @@ def _main(argv=None) -> int:
     if args.doctor:
         return 0 if doctor(cfg) else 2
     if args.ensure_backend:
-        s = LlamaSupervisor(cfg["qwen"], logs)
-        s.ensure_running()
-        print(json.dumps(s.status()))
+        supervisor = LlamaSupervisor(cfg["qwen"], logs)
+        supervisor.ensure_running()
+        print(json.dumps(supervisor.status()))
         return 0
     if (args.workflow_draft or args.workflow_approve or args.workflow_list
             or args.workflow_start or args.workflow_runs

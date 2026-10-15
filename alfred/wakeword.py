@@ -14,6 +14,8 @@ from pathlib import Path
 import re
 import time
 
+MIN_UTTERANCE_MS = 2000
+
 
 class WakeWordGate:
     """Only explicit wake-prefixed speech or one timely follow-up is actionable."""
@@ -147,7 +149,7 @@ class AcousticWakeDetector:
         A short pre-roll lets Whistle hear the phrase and immediate command
         even when the acoustic detector activates halfway through speech.
         """
-        history = deque(maxlen=max(2, math.ceil(2000 / float(frame_ms))))
+        history = deque(maxlen=max(2, math.ceil(MIN_UTTERANCE_MS / float(frame_ms))))
         for chunk in chunks:
             history.append(chunk)
             if self.feed(chunk):

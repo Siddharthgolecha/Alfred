@@ -7,9 +7,7 @@ read-only results can be fed into the same agent via Cactus.route_feedback().
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 import math
-import re
 import time
 
 from .contracts import Decision, Observation

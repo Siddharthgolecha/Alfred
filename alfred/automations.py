@@ -5,7 +5,7 @@ are deterministic, bounded, and are *not* arbitrary program execution.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import json
 import logging
@@ -13,6 +13,10 @@ import re
 import time
 
 LOG = logging.getLogger(__name__)
+
+# GPU temperature watch threshold bounds (degrees Celsius).
+MIN_CELSIUS = 20
+MAX_CELSIUS = 110
 
 def _zone(name):
     if not isinstance(name, str) or len(name)>90 or not re.fullmatch(r"[A-Za-z0-9_+\-/]+",name):
@@ -25,8 +29,8 @@ def _zone(name):
 def _time(hhmm):
     if not isinstance(hhmm,str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d",hhmm):
         raise ValueError("local_time must be HH:MM in 24-hour time")
-    hh,mm=(int(x) for x in hhmm.split(":"))
-    return hh,mm
+    hour, minute = (int(x) for x in hhmm.split(":"))
+    return hour, minute
 
 def parse_aware_time(value,now=None):
     """Require explicit offset or Z, reject local timestamps missing zone."""
@@ -52,13 +56,13 @@ def next_daily_time(local_time, timezone_name,now=None):
     Ambiguous fall-back times use fold=0 (first occurrence). Missing spring-
     forward times are skipped, not silently moved to another clock time.
     """
-    hh,mm=_time(local_time)
+    hour, minute = _time(local_time)
     zone=_zone(timezone_name)
     now=int(time.time()) if now is None else int(now)
     today=datetime.fromtimestamp(now,zone).date()
     for offset in range(370):
         day=today+timedelta(days=offset)
-        naive=datetime(day.year,day.month,day.day,hh,mm)
+        naive=datetime(day.year,day.month,day.day,hour,minute)
         candidate=naive.replace(tzinfo=zone,fold=0)
         timestamp=int(candidate.timestamp())
         # Roundtrip catches imaginary spring-forward local times.
@@ -122,8 +126,8 @@ class Automations:
                             tz=timezone_name,local_time=local_time)
 
     def watch_gpu(self,threshold_c,interval_minutes,cooldown_minutes):
-        if type(threshold_c) is not int or not 20<=threshold_c<=110:
-            raise ValueError("GPU threshold must be 20..110 C")
+        if type(threshold_c) is not int or not MIN_CELSIUS<=threshold_c<=MAX_CELSIUS:
+            raise ValueError(f"GPU threshold must be {MIN_CELSIUS}..{MAX_CELSIUS} C")
         if type(interval_minutes) is not int or not 1<=interval_minutes<=1440:
             raise ValueError("Watch interval must be 1..1440 minutes")
         if type(cooldown_minutes) is not int or not 1<=cooldown_minutes<=10080:
@@ -184,8 +188,8 @@ class Automations:
             "INSERT OR IGNORE INTO automation_outbox(job_id,due_at,message,status,retry_at)"
             " VALUES(?,?,?,'pending',?)",(job_id,due_at,message,now))
 
-    def _claim_jobs(self,now):
-        """Atomic due-date advancement before expensive read-only measurements."""
+    def _check_reminder_jobs(self,now):
+        """Atomic due-date advancement and reminder enqueueing before expensive measurements."""
         jobs=[]
         with self.store.lock,self.store.db:
             rows=self.store.db.execute(
@@ -205,7 +209,6 @@ class Automations:
                         "UPDATE automation_jobs SET next_at=? WHERE id=? AND status='active'"
                         " AND next_at=?",(next_at,r["id"],r["next_at"]))
                     if cur.rowcount:
-                        # Coalesce missed recurrences to a single reminder per restart.
                         self._enqueue(r["id"],r["next_at"],payload["message"],now)
                 elif r["kind"]=="gpu_temperature_watch":
                     new_due=now+r["interval_minutes"]*60
@@ -274,14 +277,7 @@ class Automations:
                     "UPDATE automation_outbox SET status='delivered',lease_until=0"
                     " WHERE id=? AND status='sending'",(row["id"],))
 
-    def tick(self,tools,on_reminder,now=None):
-        """One scheduler iteration; safe to call after restart.
-
-        Watch checks do not invoke Qwen or mutating system tools.
-        Notifications retry on errors, with at-least-once semantics.
-        """
-        now=int(time.time()) if now is None else int(now)
-        watches=self._claim_jobs(now)
+    def _check_watch_conditions(self,tools,watches,now):
         for job,payload in watches:
             try:
                 metrics=tools.execute("get_gpu_status",{},from_plan=True)
@@ -289,6 +285,8 @@ class Automations:
             except Exception as exc:
                 LOG.warning("Watch %s failed: %s",job["id"],exc)
                 self.store.event("watch_error",{"job_id":job["id"],"error":str(exc)})
+
+    def _deliver_notifications(self,on_reminder,now):
         # Bounded batch; never starve other system-agent work.
         for _ in range(20):
             item=self._claim_notification(now)
@@ -303,3 +301,14 @@ class Automations:
             else:
                 self._finish_notification(item,now)
                 self.store.event("delivery_sent",{"id":item["id"],"job_id":item["job_id"]})
+
+    def tick(self,tools,on_reminder,now=None):
+        """One scheduler iteration; safe to call after restart.
+
+        Watch checks do not invoke Qwen or mutating system tools.
+        Notifications retry on errors, with at-least-once semantics.
+        """
+        now=int(time.time()) if now is None else int(now)
+        watches=self._check_reminder_jobs(now)
+        self._check_watch_conditions(tools,watches,now)
+        self._deliver_notifications(on_reminder,now)

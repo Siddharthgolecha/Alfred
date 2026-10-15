@@ -5,29 +5,27 @@ The same policy applies to Needle direct calls and Qwen-generated plans.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
-import sqlite3
 import time
 from dataclasses import dataclass
 
 from .constants import Truncation, TTL
 
 from .models import QwenPlanResponseError
-from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, validate_plan
+from .runtime import TOOL_SCHEMAS, validate_plan
 
 LOG = logging.getLogger(__name__)
 
 # Only read-only requests and simple reminder creation are eligible for voice execution.
 # These operations may still be rejected by the tool registry at execution time.
-VOICE_ALLOWED = frozenset({
+VOICE_EXECUTABLE_TOOLS = frozenset({
     "get_system_status", "get_gpu_status", "list_services",
     "list_reminders", "list_schedules", "list_workflows", "list_automations",
     "create_reminder", "create_reminder_at"
 })
-SENSITIVE = frozenset({
+APPROVAL_REQUIRED_TOOLS = frozenset({
     "control_service", "run_named_task", "run_workflow",
     "cancel_reminder", "schedule_every", "cancel_schedule",
     "create_daily_reminder", "watch_gpu_temperature", "pause_automation",
@@ -36,7 +34,7 @@ SENSITIVE = frozenset({
 
 
 def needs_approval(steps, save_as=None):
-    return bool(save_as) or any(step["tool"] not in VOICE_ALLOWED for step in steps)
+    return bool(save_as) or any(step["tool"] not in VOICE_EXECUTABLE_TOOLS for step in steps)
 
 
 def preflight(steps, tools, max_steps=5):
@@ -152,6 +150,15 @@ def parse_plan(plan, text, tools, max_steps):
 
 
 @dataclass(frozen=True)
+class HandoffConfig:
+    """Keyword arguments for :meth:`System2.continue_handoff` beyond the envelope."""
+    harness: object = None
+    supervisor: object = None
+    session_context: object = None
+    admission: object = None
+
+
+@dataclass(frozen=True)
 class VerifiedRead:
     """Python-authenticated returned read, never a model-authored claim."""
     tool: str
@@ -167,13 +174,23 @@ class System2:
         self.cfg=cfg
         self.approvals=Approvals(store,cfg.get("approval_ttl_seconds", TTL.APPROVAL_DEFAULT))
 
+    @staticmethod
+    def _voice_permission_error() -> dict:
+        return {
+            "message": (
+                "That request needs an explicit actionable command. "
+                "Issue an explicit actionable command to proceed."
+            ),
+            "results": [],
+        }
+
     def execute_or_stage(self, steps, message="", save_as=None, allow_actions=True, force_approval=False):
         steps=preflight(steps,self.tools,self.cfg.get("max_plan_steps",5))
         if not allow_actions:
-            if any(s["tool"] not in VOICE_ALLOWED or s["tool"] in
+            if any(s["tool"] not in VOICE_EXECUTABLE_TOOLS or s["tool"] in
                    ("create_reminder","create_reminder_at") for s in steps) or save_as:
                 # Never silently filter out dangerous steps and claim the command succeeded.
-                return {"message":"That request needs an explicit actionable command.", "steps":[]}
+                return self._voice_permission_error()
         if save_as and any(s["tool"] in ("cancel_reminder","cancel_schedule",
                                       "cancel_automation","pause_automation",
                                       "resume_automation") for s in steps):
@@ -211,8 +228,7 @@ class System2:
                     "specific action and time or interval."
                 ), "results": []}
 
-    def continue_handoff(self, handoff, *, harness=None, supervisor=None,
-                         session_context=None, admission=None):
+    def continue_handoff(self, handoff, config: "HandoffConfig | None" = None, **kwargs):
         """Continue one trusted, already-authorized task, never replay its tools.
 
         Model inference can fail before execution; it may not fall back. Validation and
@@ -221,8 +237,10 @@ class System2:
         only bounded telemetry; no raw stdout, names, or tool result strings.
         """
         from .cognitive.escalation import EscalationEnvelope
-        from .cognitive.harness_sdk import HarnessInvalidPlan, HarnessUnavailable
+        from .cognitive.harness_sdk import HarnessInvalidPlan
 
+        if config is None:
+            config = HandoffConfig(**kwargs) if kwargs else HandoffConfig()
         if not isinstance(handoff, EscalationEnvelope):
             raise ValueError("Expected a validated escalation envelope")
         context = handoff.to_model_context()
@@ -250,22 +268,22 @@ class System2:
                 and (handoff.allow_actions or s["name"] in READS))
         ]
         try:
-            if harness is None:
+            if config.harness is None:
                 raise RuntimeError("Required DeepSeek Harness is missing")
-            if supervisor is not None:
+            if config.supervisor is not None:
                 # A live Qwen supervisor cannot bypass the required gate even
                 # if a caller forgets to provide it. No work starts in that
                 # case; callers must explicitly supply their shared admission.
-                if admission is None:
+                if config.admission is None:
                     raise RuntimeError("Missing inference admission for Qwen cold start")
-                with admission.claim("qwen"):
-                    supervisor.ensure_running()
-            plan = harness.plan(
+                with config.admission.claim("qwen"):
+                    config.supervisor.ensure_running()
+            plan = config.harness.plan(
                 handoff.request,handoff.session_id,tools=catalog,
                 allowed_services=self.tools.services,
                 named_tasks=self.tools.tasks.keys(),
                 max_steps=self.cfg.get("max_plan_steps",5),handoff=handoff,
-                **({"context":session_context} if session_context else {}))
+                **({"context":config.session_context} if config.session_context else {}))
         except HarnessInvalidPlan as exc:
             # A malformed SDK proposal is a hard stop, not a transport error.
             # Returning the already executed, sanitized Needle prefix keeps
@@ -345,7 +363,7 @@ class System2:
             r"\b(why|explain|how|compare|interpret|mean|meaning)\b",
             utterance,flags=re.IGNORECASE))
         if (wants_explanation and outcome.get("results") and
-                all(step["tool"] in VOICE_ALLOWED and
+                all(step["tool"] in VOICE_EXECUTABLE_TOOLS and
                     step["tool"]!="create_reminder" for step in steps)):
             try:
                 outcome["message"]=self.qwen.explain(utterance,outcome["results"])

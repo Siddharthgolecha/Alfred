@@ -6,20 +6,13 @@ from contextlib import nullcontext
 import json
 import logging
 import math
-import os
-from pathlib import Path
-import shutil
-import socket
-import subprocess
-import threading
-import time
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from .constants import Limits, Timeouts, Truncation
 
 LOG = logging.getLogger(__name__)
+
+MAX_NEW_TOKENS = 384
 
 def request_json(url: str, data: object = None, timeout: int = Timeouts.REQUEST_JSON) -> object:
     """POST or GET a JSON endpoint; raises on network / HTTP errors."""
@@ -82,6 +75,7 @@ def _unique_json_pairs(pairs):
 
 
 def _reject_nonfinite_constant(value):
+    """Reject non-finite JSON constants ('NaN', 'Infinity', '-Infinity')."""
     raise QwenPlanResponseError("Non-finite JSON number in Qwen plan")
 
 
@@ -215,9 +209,17 @@ class Qwen:
     def _parse_plan_response(response):
         """Validate the envelope and top-level fields before any action path."""
         try:
-            choice = response["choices"][0]
+            choices = response.get("choices") if isinstance(response, dict) else None
+            if not isinstance(choices, list) or not choices:
+                raise QwenPlanResponseError("Missing chat completion content")
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                raise QwenPlanResponseError("Missing chat completion content")
+            message = choice.get("message")
+            if not isinstance(message, dict) or "content" not in message:
+                raise QwenPlanResponseError("Missing chat completion content")
             finish_reason = choice.get("finish_reason")
-            content = choice["message"]["content"]
+            content = message["content"]
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise QwenPlanResponseError("Missing chat completion content") from exc
         if finish_reason not in (None, "stop"):
@@ -318,7 +320,7 @@ class Cactus:
         guard=self.admission.claim("needle") if self.admission else nullcontext()
         with guard:
             self.agent.reset()
-            return self.agent.complete(transcript, max_new_tokens=384)
+            return self.agent.complete(transcript, max_new_tokens=MAX_NEW_TOKENS)
 
     def route_feedback(self, observation_json):
         """Continue the current isolated task without reset; input is trusted scalar JSON.
@@ -328,7 +330,7 @@ class Cactus:
         """
         guard=self.admission.claim("needle_feedback") if self.admission else nullcontext()
         with guard:
-            return self.agent.complete(observation_json, max_new_tokens=384)
+            return self.agent.complete(observation_json, max_new_tokens=MAX_NEW_TOKENS)
 
     def transcribe_stream(self, frames, on_partial=None):
         guard=self.admission.claim("whistle") if self.admission else nullcontext()
@@ -337,21 +339,21 @@ class Cactus:
 
     def _transcribe_admitted(self, frames, on_partial=None):
         # Whistle commits segments as it receives streaming samples.
-        pieces = []
+        confirmed_text = []
         pending = ""
         for event in self.whistle.stream(frames, language="en", keywords=["Alfred", "Jetson", "Sony"]):
             committed = str(event.get("text") or "").strip()
             pending = str(event.get("pending") or "")
             if committed:
-                pieces.append(committed)
+                confirmed_text.append(committed)
             if on_partial:
-                confirmed=" ".join(pieces).strip()
-                provisional=pending.strip()
+                confirmed = " ".join(confirmed_text).strip()
+                provisional = pending.strip()
                 # Some streaming providers return a pending transcript that
                 # already includes the confirmed prefix; do not echo it twice.
                 if provisional and confirmed and provisional.lower().startswith(confirmed.lower()):
-                    shown=provisional
+                    shown = provisional
                 else:
-                    shown=" ".join(part for part in (confirmed,provisional) if part)
+                    shown = " ".join(part for part in (confirmed, provisional) if part)
                 on_partial(shown)
-        return " ".join(pieces).strip()
+        return " ".join(confirmed_text).strip()

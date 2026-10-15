@@ -6,7 +6,6 @@ notifications are never promoted to authoritative tool observations.
 """
 from __future__ import annotations
 
-from dataclasses import asdict
 import json
 import math
 from dataclasses import dataclass

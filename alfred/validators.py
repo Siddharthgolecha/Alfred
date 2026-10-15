@@ -22,7 +22,9 @@ T = TypeVar("T")
 def validate_type(value: Any, expected: type[T], label: str = "value") -> T:
     """Raise :exc:`TypeError` if *value* is not an instance of *expected*.
 
-    Uses ``isinstance`` so subclasses pass. For strict identity checks
+    Uses ``isinstance`` at runtime so instances of subclasses pass.
+    The ``TypeVar("T")`` parameter is for static type annotations,
+    preserving the expected type on return. For strict identity checks
     (e.g. ``type(x) is int``) use the explicit ``type()`` form at the
     call site — this helper is for the common class-hierarchy case.
     """

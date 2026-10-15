@@ -18,6 +18,14 @@ import time
 LOG = logging.getLogger(__name__)
 RATE = 16000
 
+# PulseAudio/PipeWire uses this sentinel to indicate "no sink" (2^32 - 1 = 0xFFFFFFFF).
+PULSEAUDIO_NO_SINK_SENTINEL = 4294967295
+# String representations of unavailable/false port availability.
+_UNAVAILABLE_STATES = ("no", "false", "0")
+# String representations of available/true port availability.
+_AVAILABLE_STATES = ("yes", "true", "1")
+
+
 class AudioUnavailableError(RuntimeError):
     """No acceptable live microphone is accessible through the audio server."""
 
@@ -31,11 +39,21 @@ def command(*args, timeout=6):
 def pactl_json(what):
     return json.loads(command("pactl", "-f", "json", "list", what))
 
-def _descrip(item):
+def _format_device_description(item):
     p = item.get("properties") or {}
     return " ".join(str(p.get(k, "")) for k in (
         "device.description", "device.alias", "bluez5.address", "api.bluez5.address", "device.string"
     )) + " " + str(item.get("name", ""))
+
+def _normalise_bt_address(addr: str) -> str:
+    """Convert a Bluetooth MAC address to the PulseAudio card-name suffix format."""
+    return addr.lower().replace(":", "_")
+
+def _to_port_list(ports_raw) -> list:
+    """Normalise PulseAudio port data to a uniform list of dicts."""
+    if isinstance(ports_raw, dict):
+        return [dict(v, name=k) for k, v in ports_raw.items()]
+    return list(ports_raw) if ports_raw else []
 
 def _is_available(profile):
     a = str(profile.get("available", "")).lower()
@@ -47,11 +65,11 @@ def _profiles(card):
         return [dict(v, name=k) for k,v in raw.items()]
     return raw
 
-def source_status(source, explicitly_selected=False):
-    """Classify advertised sources; a listed Pulse source is not necessarily a mic.
+def source_status(source):
+    """Classify an advertised source for auto-selection.
 
     SoC "Built-in Audio" without a positively available input port is not
-    auto-selected. Explicit direct_source still requires live capture.
+    auto-selected.
     """
     name=str(source.get("name") or "")
     lower=name.lower()
@@ -59,26 +77,22 @@ def source_status(source, explicitly_selected=False):
     description=str(props.get("device.description") or props.get("device.alias") or name)
     monitor=source.get("monitor_of_sink")
     if (not name or ".monitor" in lower
-            or monitor not in (None, "n/a", 4294967295, "4294967295")
+            or monitor not in (None, "n/a", PULSEAUDIO_NO_SINK_SENTINEL, "4294967295")
             or str(props.get("device.class") or "").lower()=="monitor"):
         return False,"playback monitor or non-input source"
     if lower.startswith(("auto_null","null","remap","virtual")):
         return False,"virtual source, not a verified microphone"
     if source.get("mute") is True:
         return False,"recording source is muted"
-    ports=source.get("ports") or []
-    if isinstance(ports,dict):
-        ports=[dict(v,name=k) for k,v in ports.items()]
+    ports=_to_port_list(source.get("ports") or [])
     available=[str(p.get("available","unknown")).lower() for p in ports]
-    if ports and all(x in ("no","false","0") for x in available):
+    if ports and all(x in _UNAVAILABLE_STATES for x in available):
         return False,"all input ports are unavailable/disconnected"
     active=source.get("active_port") or {}
-    if isinstance(active,dict) and str(active.get("available","unknown")).lower() in ("no","false","0"):
+    if isinstance(active,dict) and str(active.get("available","unknown")).lower() in _UNAVAILABLE_STATES:
         return False,"active microphone port is unavailable/disconnected"
     if lower.startswith("bluez_input"):
         return True,"Bluetooth microphone source; must pass capture probe"
-    if explicitly_selected:
-        return True,"explicit direct source; must pass capture probe"
     bus=str(props.get("device.bus") or "").lower()
     if "usb" in bus or lower.startswith("alsa_input.usb_"):
         return True,"USB input; must pass capture probe"
@@ -89,9 +103,24 @@ def source_status(source, explicitly_selected=False):
             "built-in/SoC audio is not auto-trusted as a connected microphone; "
             "set audio.direct_source explicitly for a known wired/I2S capture device"
         )
-    if ports and any(x in ("yes","true","1") for x in available):
+    if ports and any(x in _AVAILABLE_STATES for x in available):
         return True,"input port reports available; must pass capture probe"
     return False,"physical input not confirmed; configure direct_source explicitly"
+
+def source_status_explicit(source):
+    """Classify a source that was explicitly nominated via ``audio.direct_source``.
+
+    Applies all the same rejection rules as :func:`source_status` but treats a
+    surviving source as trusted rather than requiring a confirmed available port.
+    """
+    ok, reason = source_status(source)
+    if not ok:
+        return ok, reason
+    name = str(source.get("name") or "").lower()
+    if name.startswith("bluez_input"):
+        # Already accepted by source_status with the right reason text.
+        return True, reason
+    return True, "explicit direct source; must pass capture probe"
 
 class AudioManager:
     """Auto mode prefers WI-C100 HFP mic, then an approved direct microphone."""
@@ -123,12 +152,12 @@ class AudioManager:
         except (OSError, ValueError, RuntimeError) as exc:
             LOG.warning("Cannot query audio cards: %s", exc)
             return None
-        address = self.cfg.get("bluetooth_address", "").lower().replace(":", "_")
+        address = _normalise_bt_address(self.cfg.get("bluetooth_address", ""))
         for card in cards:
             name = str(card.get("name", "")).lower()
             if not name.startswith("bluez_card"):
                 continue
-            desc = _descrip(card).lower()
+            desc = _format_device_description(card).lower()
             if address:
                 if address not in name and address.replace("_", ":") not in desc:
                     continue
@@ -163,16 +192,22 @@ class AudioManager:
         return False
 
     def _sources(self):
-        data=pactl_json("sources")
-        return [s for s in data if source_status(
-            s,explicitly_selected=s.get("name")==self.cfg.get("direct_source"))[0]]
+        direct = self.cfg.get("direct_source")
+        data = pactl_json("sources")
+        result = []
+        for s in data:
+            classify = source_status_explicit if s.get("name") == direct else source_status
+            if classify(s)[0]:
+                result.append(s)
+        return result
 
     def diagnostics(self):
         """All advertised inputs with rejection reasons; no false 'mic connected' claim."""
-        entries=[]
+        direct = self.cfg.get("direct_source")
+        entries = []
         for src in pactl_json("sources"):
-            ok,reason=source_status(
-                src,explicitly_selected=src.get("name")==self.cfg.get("direct_source"))
+            classify = source_status_explicit if src.get("name") == direct else source_status
+            ok, reason = classify(src)
             entries.append({"name":src.get("name",""),
                             "description":(src.get("properties") or {}).get("device.description",""),
                             "eligible":ok,"reason":reason})
@@ -197,14 +232,14 @@ class AudioManager:
             suffix=target_card["name"].lower().replace("bluez_card.","")
             bt=[s for s in sources if s.get("name","").lower().startswith("bluez_input")
                 and (suffix in s.get("name","").lower()
-                     or suffix.replace("_",":") in _descrip(s).lower())]
+                     or suffix.replace("_",":") in _format_device_description(s).lower())]
         direct=[s for s in sources if not s.get("name","").lower().startswith("bluez_")]
         wanted=self.cfg.get("direct_source","")
         if wanted:
             direct=[s for s in direct if s["name"]==wanted]
         else:
             direct.sort(key=lambda s: (
-                not ("usb" in _descrip(s).lower() or s["name"].startswith("alsa_input.usb_")),
+                not ("usb" in _format_device_description(s).lower() or s["name"].startswith("alsa_input.usb_")),
                 s["name"]))
         if mode=="direct":
             return [s["name"] for s in direct]
