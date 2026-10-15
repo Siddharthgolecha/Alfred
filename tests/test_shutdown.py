@@ -120,6 +120,33 @@ class ShutdownTests(unittest.TestCase):
             self.assertTrue(orphan.exists())
         self.assertFalse(orphan.exists())
 
+    def test_bind_interruption_does_not_delete_replacement_listener(self):
+        import socket
+        path=control_dir(self.logdir)/"scheduler.sock"
+        replacement=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+        original_bind=socket.socket.bind
+        def bind_then_replace(sock,address):
+            original_bind(sock,address)
+            os.unlink(address)
+            original_bind(replacement,address)
+            replacement.listen(1)
+            raise KeyboardInterrupt("replacement bound after interrupted bind")
+        try:
+            with patch.object(socket.socket,"bind",bind_then_replace):
+                with self.assertRaises(KeyboardInterrupt):
+                    with ShutdownSocket(self.logdir,"scheduler"):
+                        self.fail("entry should not yield")
+            self.assertTrue(path.exists())
+            inode=path.stat().st_ino
+            self.assertEqual(inode,path.stat().st_ino)
+            with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
+                client.settimeout(1)
+                client.connect(str(path))
+        finally:
+            replacement.close()
+            if path.exists():
+                path.unlink()
+
     def test_single_instance_and_private_socket(self):
         with ShutdownSocket(self.logdir, "voice") as active:
             self.assertEqual(stat.S_IMODE(active.path.parent.stat().st_mode), 0o700)
