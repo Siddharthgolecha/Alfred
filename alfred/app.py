@@ -23,6 +23,7 @@ from .lifecycle import ChildProcesses, ShutdownSocket, request_close
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools
 from .system2 import System2, VerifiedRead, parse_plan
 from .wakeword import WakeWordGate, AcousticWakeDetector
+from .skills import SkillRegistry
 from .cognitive import (SessionLedger, Decision, Observation, Escalation,
                         ApprovalReference, Completion, Diagnostic)
 from .cognitive.harness_sdk import LocalHarness, HarnessUnavailable
@@ -52,7 +53,7 @@ class Feedback:
                 self.speaking.clear()
 
 class Alfred:
-    def __init__(self,cfg,load_models=True):
+    def __init__(self,cfg,load_models=True,*,meeting_adapter=None):
         self.cfg = cfg
         runtime = cfg["runtime"]
         self.store = Store(runtime["database"])
@@ -71,6 +72,8 @@ class Alfred:
         self._needle_cancel = threading.Event()
         self.processes = ChildProcesses()
         self.tools = Tools(runtime,self.store,processes=self.processes)
+        # Discovery only: not a model tool, executor or device authority.
+        self.skills = SkillRegistry(tools=self.tools,meeting=meeting_adapter)
         self.feedback = Feedback(runtime["tts"],processes=self.processes)
         self.audio = AudioManager(cfg["audio"])
         self.wake_word = WakeWordGate(cfg["wake_word"])
@@ -764,6 +767,8 @@ def _main(argv=None):
     group.add_argument("--automation-tick",action="store_true",
                        help="Run one scheduler cycle for debugging and exit")
     group.add_argument("--reason",help="Test Qwen planner on a text input; no Cactus engine required")
+    group.add_argument("--skills",action="store_true",
+                       help="List available and unavailable capabilities without models")
     group.add_argument("--memory-set",metavar="KEY=VALUE",
                        help="Explicitly retain a short preference from the local CLI")
     group.add_argument("--memory-list",action="store_true",
@@ -810,7 +815,7 @@ def _main(argv=None):
         if args.resume_session:
             parser.error("'close' cannot resume a session")
         if any((args.doctor, args.text, args.ensure_backend, args.scheduler_only,
-                args.automations, args.automation_tick, args.reason,
+                args.automations, args.automation_tick, args.reason, args.skills,
                 args.pending, args.approve is not None, args.reject is not None,
                 args.memory_set is not None, args.memory_list, args.memory_clear is not None)):
             parser.error("'close' cannot be combined with another operation")
@@ -821,7 +826,7 @@ def _main(argv=None):
         print("Alfred stopped: " + ", ".join(stopped) if stopped else "Alfred is not running")
         return 0
     if args.resume_session and (
-            args.doctor or args.ensure_backend or args.scheduler_only
+            args.skills or args.doctor or args.ensure_backend or args.scheduler_only
             or args.automations or args.automation_tick or args.pending
             or args.approve is not None or args.reject is not None
             or args.workflow_draft or args.workflow_approve or args.workflow_list
@@ -833,6 +838,13 @@ def _main(argv=None):
             or args.workflow_trigger_resume is not None
             or args.workflow_trigger_cancel is not None):
         parser.error("--resume-session requires text, reason, or voice mode")
+    if args.skills:
+        app=Alfred(cfg,load_models=False)
+        try:
+            print(json.dumps(app.skills.metadata(),indent=2))
+        finally:
+            app.close()
+        return 0
     if args.memory_set is not None or args.memory_list or args.memory_clear is not None:
         if not (cfg["runtime"]["context_enabled"]
                 and cfg["runtime"]["context_persistence_enabled"]):
