@@ -206,6 +206,116 @@ class System2:
                     "specific action and time or interval."
                 ), "results": []}
 
+    def continue_handoff(self, handoff, *, harness=None, supervisor=None):
+        """Continue one trusted, already-authorized task, never replay its tools.
+
+        Model inference can fail or fall back before execution. Validation and
+        execution are *outside* the exception handler, preventing a partially
+        executed plan from being retried. Observations sent to Qwen contain
+        only bounded telemetry; no raw stdout, names, or tool result strings.
+        """
+        from .cognitive.escalation import EscalationEnvelope
+        from .cognitive.harness_sdk import HarnessInvalidPlan, HarnessUnavailable
+
+        if not isinstance(handoff, EscalationEnvelope):
+            raise ValueError("Expected a validated escalation envelope")
+        context = handoff.to_model_context()
+        self.store.event("cognitive_handoff", {
+            "version":handoff.version, "session_id":handoff.session_id,
+            "task_id":handoff.task_id, "reason":handoff.reason,
+            "completed":len(handoff.completed),
+            "budget":handoff.remaining_tools,
+            "actionable":handoff.allow_actions,
+        })
+        completed = [{"tool":call["name"],"metrics":value}
+                     for call,value in zip(handoff.completed,handoff.observations)]
+        if (handoff.remaining_tools == 0 and
+                not self.cfg.get("explain_on_handoff_without_tools", True)):
+            return {"status":"incomplete", "message":"No remaining tool budget.",
+                    "results":completed, "partial":bool(completed)}
+        if not self.qwen.cfg.get("enabled", True):
+            return {"status":"incomplete", "message":"Qwen is disabled; request remains incomplete.",
+                    "results":completed, "partial":bool(completed)}
+        from .cognitive.escalation import READS
+        catalog = [
+            s for s in TOOL_SCHEMAS
+            if (s["name"] not in ("delegate_to_reasoner", "run_workflow")
+                and handoff.remaining_tools > 0
+                and (handoff.allow_actions or s["name"] in READS))
+        ]
+        try:
+            if harness is not None:
+                if supervisor is not None:
+                    supervisor.ensure_running()
+                try:
+                    plan = harness.plan(
+                        handoff.request, handoff.session_id, tools=catalog,
+                        allowed_services=self.tools.services,
+                        named_tasks=self.tools.tasks.keys(),
+                        max_steps=self.cfg.get("max_plan_steps",5),
+                        handoff=handoff)
+                except (HarnessUnavailable, OSError, TimeoutError, RuntimeError):
+                    # Fresh Qwen inference is safe here: zero tools executed by
+                    # either planner. Do not catch anything from System2 below.
+                    plan = self.qwen.complete(
+                        handoff.request, catalog,
+                        allowed_services=self.tools.services,
+                        named_tasks=self.tools.tasks.keys(), handoff=handoff)
+            else:
+                plan = self.qwen.complete(
+                    handoff.request, catalog,
+                    allowed_services=self.tools.services,
+                    named_tasks=self.tools.tasks.keys(), handoff=handoff)
+        except HarnessInvalidPlan as exc:
+            # A malformed SDK proposal is a hard stop, not a transport error.
+            # Returning the already executed, sanitized Needle prefix keeps
+            # partial successes visible without triggering fallback planning,
+            # a repeated read, execution, or an approval proposal.
+            LOG.warning("Harness handoff plan invalid: %s", exc)
+            return {**self._incomplete_plan(), "results":completed,
+                    "partial":bool(completed)}
+        except QwenPlanResponseError as exc:
+            LOG.warning("Qwen handoff plan invalid: %s", exc)
+            return {**self._incomplete_plan(), "results":completed,
+                    "partial":bool(completed)}
+        except (OSError, ValueError, RuntimeError, TimeoutError, ConnectionError):
+            return {"status":"incomplete",
+                    "message":"Local reasoner unavailable; no follow-up action executed.",
+                    "results":completed, "partial":bool(completed)}
+        # Never catch validation/execution failures as a signal to re-plan:
+        # once delegated tool execution begins it cannot safely be replayed.
+        try:
+            message, steps, save_as = parse_plan(
+                plan, handoff.request, self.tools, self.cfg.get("max_plan_steps",5))
+            handoff.reconcile(steps)
+            if not handoff.allow_actions and save_as:
+                raise PermissionError("Read-only handoff cannot save a workflow")
+        except (ValueError, PermissionError) as exc:
+            # Reject unknown tools, duplicates, replay and privilege escalation;
+            # never replan or lose previously completed read-only telemetry.
+            LOG.warning("Qwen handoff rejected before execution: %s", exc)
+            return {**self._incomplete_plan(), "results":completed,
+                    "partial":bool(completed)}
+        result = self.execute_or_stage(
+            steps, message, save_as, allow_actions=handoff.allow_actions)
+        result["handoff"] = {"version":handoff.version, "session_id":handoff.session_id,
+                             "task_id":handoff.task_id, "reason":handoff.reason}
+        if "approval" not in result:
+            new_results = result.get("results", [])
+            # Conditional branches may skip a proposed tool. The trace must
+            # never call an unexecuted/guarded step an observed success.
+            result["tool_outcomes"] = [
+                {"tool":step["tool"],
+                 "outcome":"blocked" if isinstance(value, dict)
+                                      and value.get("skipped") is True
+                             else "returned"}
+                for step,value in zip(steps,new_results)
+            ]
+            result["results"] = completed + new_results
+        else:
+            result["proposed_tools"] = [step["tool"] for step in steps]
+        return result
+
     def reason(self, utterance, allow_actions=True, *, context=None):
         # Tool schemas, not just tool names, are provided to the planner.
         tool_catalog=[s for s in TOOL_SCHEMAS if s["name"] not in
