@@ -1,0 +1,38 @@
+schema: 1
+mode: chat-first
+repository: Siddharthgolecha/Alfred
+default_branch: main
+epic: 11
+tasks:
+  label: maestaris:task
+  priority_labels: [priority:P0, priority:P1, priority:P2]
+  require_merged_dependencies: true
+claims:
+  active_hours: 4
+  workers: [A]
+branches:
+  prefix: maestaris/
+roles:
+  implementation: worker-A
+  review_and_merge: orchestrator
+review:
+  required:
+    - actual_pr_diff
+    - current_head_sha_and_ci
+    - dependency_merges
+    - issue_acceptance_criteria
+    - no_permission_escalation
+    - no_unsafe_replay
+    - offline_operation
+    - test_and_hardware_evidence
+execution:
+  interactive_chats_are_primary: true
+  scheduled_runs_required: false
+  external_executor_required: false
+principles:
+  - do_project_work_before_orchestration_work
+  - prefer_github_native_state
+  - keep_claims_lightweight
+  - never_commit_secrets
+  - reviewer_alone_merges
+  - never_force_push_jetson

@@ -21,5 +21,8 @@ alfred-jetson = "alfred.jetson.cli:main"
 [tool.setuptools.packages.find]
 include = ["alfred*"]
 
+[tool.setuptools.package-data]
+"alfred.cognitive" = ["*.yml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

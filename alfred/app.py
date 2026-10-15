@@ -5,6 +5,7 @@ import argparse
 from contextlib import nullcontext
 import json
 import logging
+import math
 from pathlib import Path
 import re
 import shutil
@@ -20,8 +21,13 @@ from .config import data_path, load_config
 from .models import Cactus, LlamaSupervisor, Qwen
 from .lifecycle import ChildProcesses, ShutdownSocket, request_close
 from .runtime import SCHEMA_BY_NAME, TOOL_SCHEMAS, Scheduler, Store, Tools
-from .system2 import System2
+from .system2 import System2, parse_plan
 from .wakeword import WakeWordGate, AcousticWakeDetector
+from .cognitive import (SessionLedger, Decision, Observation, Escalation,
+                        ApprovalReference, Completion, Diagnostic)
+from .cognitive.harness_sdk import LocalHarness, HarnessUnavailable
+from .cognitive.needle_loop import (NeedleAgentLoop, SessionSlots,
+                                   ContextUnavailable, MULTISTEP)
 
 LOG = logging.getLogger(__name__)
 
@@ -48,6 +54,12 @@ class Alfred:
         self.cfg = cfg
         runtime = cfg["runtime"]
         self.store = Store(runtime["database"])
+        self.sessions = SessionLedger(self.store)
+        self.session_id = None
+        self._command_source = "text"
+        self._needle_task_lock = threading.RLock()
+        self.needle_slots = SessionSlots(runtime["needle_context_ttl_seconds"])
+        self._needle_cancel = threading.Event()
         self.processes = ChildProcesses()
         self.tools = Tools(runtime,self.store,processes=self.processes)
         self.feedback = Feedback(runtime["tts"],processes=self.processes)
@@ -56,6 +68,16 @@ class Alfred:
         self.supervisor = LlamaSupervisor(cfg["qwen"],runtime["logs"])
         self.qwen = Qwen(cfg["qwen"],self.supervisor)
         self.system2 = System2(self.qwen,self.tools,self.store,runtime)
+        # Optional read-only Harness route, never a new tool authority/server.
+        self.harness = None
+        if runtime.get("harness_enabled", False):
+            model = cfg["qwen"]["model"] or cfg["qwen"]["expected_model"]
+            try:
+                self.harness = LocalHarness(
+                    self.supervisor.url if hasattr(self.supervisor, "url") else cfg["qwen"]["url"],
+                    model, timeout=runtime["harness_timeout_seconds"])
+            except HarnessUnavailable:
+                LOG.warning("Safe harness unavailable; using legacy Qwen path")
         if not runtime.get("telemetry",False):
             import os
             os.environ.setdefault("NEEDLE_TELEMETRY","0")
@@ -88,33 +110,121 @@ class Alfred:
     def reason(self, text, allow_actions=True):
         if not self.cfg["qwen"]["enabled"]:
             return {"message":"Qwen System 2 is disabled","results":[]}
+        # The Harness only proposes; Python System2 remains the sole execution
+        # and local approval authority. A failed SDK inference may safely fall
+        # back BEFORE any tool is handed to System2. Never wrap execution in
+        # that fallback handler: a partially completed action is not retryable.
+        if self.harness is not None and self.session_id is not None:
+            try:
+                self.supervisor.ensure_running()  # existing model service only
+                if not allow_actions:
+                    return self.harness.run(text, self.session_id)
+                proposed = self.harness.plan(
+                    text, self.session_id, tools=TOOL_SCHEMAS,
+                    allowed_services=self.tools.services,
+                    named_tasks=self.tools.tasks.keys(),
+                    max_steps=self.cfg["runtime"]["max_plan_steps"])
+            except (HarnessUnavailable, OSError, TimeoutError, RuntimeError):
+                LOG.warning("Harness inference unavailable before execution; falling back to System2")
+                return self.system2.reason(text, allow_actions=allow_actions)
+            # Invalid, spoofed or malformed SDK plans are a hard rejection,
+            # not a second chance to reinterpret their action-bearing text.
+            message, steps, save_as = parse_plan(
+                proposed, text, self.tools,
+                self.cfg["runtime"]["max_plan_steps"])
+            # Deliberately OUTSIDE the retry block. If a tool runs and then
+            # raises, the caller reports failure without a second execution.
+            return self.system2.execute_or_stage(
+                steps, message, save_as, allow_actions=True)
         return self.system2.reason(text,allow_actions=allow_actions)
 
+    def _start_task(self, source, input_chars):
+        """One durable ID per authorized request, reused for every decision."""
+        envelope = self.sessions.begin_task(source, input_chars, self.session_id)
+        self.session_id = envelope.session_id
+        return envelope
+
     def handle_text(self,text):
+        # Hold ownership from native reset() until final feedback and result.
+        # Other authorized requests cannot reset the shared Needle agent
+        # while this task's synchronous complete()/System2 calls are live.
+        with self._needle_task_lock:
+            return self._handle_text_locked(text)
+
+    def _handle_text_locked(self,text):
         text=text.strip()
         if not text:
             return
+        task = self._start_task(self._command_source, len(text))
         self.store.event("utterance",{"length":len(text)})  # No raw transcript stored.
+        # A later unrelated command invalidates the only supported pronoun
+        # referent. Context must never leak across topics or sessions.
+        from .cognitive.needle_loop import PRONOUN, GPU_TEMP
+        routed_text = text
+        if self.cfg["runtime"]["needle_loop_enabled"]:
+            if not PRONOUN.fullmatch(text) and not GPU_TEMP.search(text):
+                self.needle_slots.clear(self.session_id)
+            try:
+                routed_text = self.needle_slots.resolve(self.session_id, text)
+            except ContextUnavailable as exc:
+                self.sessions.append(task.task_id, Completion("rejected", "unsafe_route"))
+                self.feedback.tell(str(exc))
+                return
         if self.cactus is None:
+            self.sessions.append(task.task_id, Completion("failed", "exception"))
             raise RuntimeError("Cactus models were not initialized")
         try:
-            response=self.cactus.route(text)
+            routed_at = time.monotonic()
+            response=self.cactus.route(routed_text)
+            if self.cfg["runtime"].get("cognitive_diagnostics",False):
+                duration = max(0, min(300000, int((time.monotonic() - routed_at)*1000)))
+                self.sessions.append(task.task_id, Diagnostic("needle_route", {
+                    "latency_ms":duration, "input_chars":len(text)}))
             calls=response.get("function_calls") or []
             confidence=response.get("confidence")
             validation = response.get("validation") or {}
+            # A malformed explicit argument is never silently coerced to {}.
+            # Apply this to one-shot Needle calls too, not only loop feedback.
+            if (type(calls) is not list or any(
+                    type(call) is not dict
+                    or type(call.get("name")) is not str
+                    or ("arguments" in call and type(call["arguments"]) is not dict)
+                    for call in calls)):
+                self.sessions.append(task.task_id, Decision("needle3", "rejected", 0))
+                self.sessions.append(task.task_id, Completion("rejected", "unsafe_route"))
+                self.feedback.tell("Needle returned an invalid tool request. Please clarify.")
+                return
+            if self.cfg["runtime"]["needle_loop_enabled"] and len(calls) > 1:
+                # A one-shot request can be multi-call without entering the
+                # contextual loop. Reject duplicate side effects there too.
+                signatures = [json.dumps({"name":c["name"],
+                                          "arguments":c.get("arguments", {})},
+                                         sort_keys=True, separators=(",", ":"),
+                                         allow_nan=False) for c in calls]
+                if len(signatures) != len(set(signatures)):
+                    self.sessions.append(task.task_id, Decision("needle3", "rejected", 0))
+                    self.sessions.append(task.task_id, Completion("rejected", "unsafe_route"))
+                    self.feedback.tell("Repeated tool request rejected before execution.")
+                    return
             if response.get("suppressed_calls") or (
                 isinstance(validation, dict) and validation.get("ungrounded")
             ):
+                self.sessions.append(task.task_id, Decision("needle3", "rejected",
+                                     min(len(calls), 50)))
+                self.sessions.append(task.task_id, Completion("rejected", "unsafe_route"))
                 self.feedback.tell("I couldn't safely determine that command. Please clarify.")
                 return
             floor=float(self.cfg["runtime"]["needle_confidence_floor"])
-            if calls and (confidence is None or not isinstance(confidence,(float,int))
-                          or confidence < floor):
+            if calls and (type(confidence) not in (float, int)
+                          or not math.isfinite(confidence) or not floor <= confidence <= 1):
                 self.store.event("route_uncertain",{
                     "confidence": confidence, "call_count": len(calls)})
+                self.sessions.append(task.task_id, Decision("needle3", "uncertain",
+                                     min(len(calls), 50)))
+                self.sessions.append(task.task_id, Completion("rejected", "low_confidence"))
                 self.feedback.tell("Command uncertain. Please repeat or be more specific.")
                 return
-            corrected=adjust_status_calls(text,calls)
+            corrected=adjust_status_calls(routed_text,calls)
             if corrected is not calls:
                 self.store.event("routing_adjustment",{
                     "reason":"explicit_gpu_status",
@@ -128,24 +238,103 @@ class Alfred:
                 "delegated":bool(not calls or (len(calls)==1 and
                     calls[0].get("name")=="delegate_to_reasoner"))
             })
-            if not calls:
+            if (self.cfg["runtime"]["needle_loop_enabled"]
+                    and len(calls) > self.cfg["runtime"]["needle_max_tools"]):
+                self.sessions.append(task.task_id, Completion("rejected", "unsafe_route"))
+                self.feedback.tell("Needle exceeded the per-task tool budget. Please clarify.")
+                return
+            route = ("readonly" if not calls else
+                     "delegate" if len(calls)==1 and
+                     calls[0].get("name")=="delegate_to_reasoner" else "direct")
+            safe_confidence = (float(confidence) if type(confidence) in (float,int)
+                               and 0 <= confidence <= 1 else None)
+            self.sessions.append(task.task_id, Decision("needle3", route,
+                                 min(len(calls), 50), safe_confidence))
+            loop_outcome = None
+            if (self.cfg["runtime"]["needle_loop_enabled"] and
+                    calls and route == "direct" and MULTISTEP.search(text)):
+                loop = NeedleAgentLoop(
+                    self.system2, self.cactus.route_feedback, self.sessions,
+                    task.task_id,
+                    confidence_floor=float(self.cfg["runtime"]["needle_confidence_floor"]),
+                    max_decisions=self.cfg["runtime"]["needle_max_decisions"],
+                    max_tools=self.cfg["runtime"]["needle_max_tools"],
+                    cancelled=self._needle_cancel.is_set)
+                loop_outcome = loop.run(
+                    {**response, "function_calls":calls}, permit_feedback=True)
+                calls = list(loop_outcome.accepted_calls)
+                if (loop_outcome.stop not in ("completed", "protected", "partial")
+                        and not loop_outcome.result.get("partial", False)):
+                    # No successful observations: reject without pretending
+                    # that a requested tool ran. A completed read-only prefix
+                    # is reported below, even when a later call was denied.
+                    self.sessions.append(task.task_id, Completion(
+                        "rejected", "low_confidence" if loop_outcome.stop == "uncertain"
+                        else "unsafe_route"))
+                    self.feedback.tell(loop_outcome.result["message"])
+                    return
+                result = loop_outcome.result
+            if loop_outcome is not None:
+                pass  # Already guarded by System2 and recorded within the loop.
+            elif not calls:
+                self.sessions.append(task.task_id,
+                                     Escalation("needle3", "qwen", "unsupported"))
                 # An unsupported Needle command may still be an ordinary Q&A question.
                 # Qwen here is strictly read-only, regardless of what it proposes.
                 result=self.reason(text,allow_actions=False)
             elif len(calls)==1 and calls[0].get("name")=="delegate_to_reasoner":
                 # Use the actual transcript, never a possibly altered model argument.
+                self.sessions.append(task.task_id,
+                                     Escalation("needle3", "qwen", "delegated"))
                 result=self.reason(text,allow_actions=True)
             else:
                 result=self.system2.direct(calls)
+            if result.get("status") == "incomplete":
+                # Inference/preflight failure is not an ordinary no-op. No
+                # model-provided content is recorded in the durable ledger.
+                self.sessions.append(task.task_id, Completion("failed", "invalid_plan"))
+                self.feedback.tell(result["message"])
+                return
             if "approval" in result:
                 approval=result["approval"]
+                self.sessions.append(task.task_id,
+                                     ApprovalReference(approval["approval_id"]))
+                for call in calls:
+                    if call.get("name") in SCHEMA_BY_NAME and call["name"] != "delegate_to_reasoner":
+                        self.sessions.append(task.task_id, Observation(call["name"], "staged"))
+                self.sessions.append(task.task_id,
+                                     Completion("pending_approval", "needs_approval"))
                 message=(f"Local approval required for {approval['actions']}. "
                          f"On the Jetson, run: alfred --approve {approval['approval_id']}")
                 self.feedback.tell(message)
             else:
+                # Persist only tool names/outcomes, never arguments or results.
+                observed = result.get("results") or []
+                if isinstance(observed, list):
+                    if loop_outcome is None:
+                        for call in calls[:len(observed)]:
+                            if call.get("name") in SCHEMA_BY_NAME and call["name"] != "delegate_to_reasoner":
+                                self.sessions.append(task.task_id, Observation(call["name"], "returned"))
+                    # Never use model text to construct a context slot. Only
+                    # a genuine, explicit successful GPU temperature read
+                    # from the controlled System2 path refreshes that referent.
+                    for call, item in zip(calls, observed):
+                        if (self.cfg["runtime"]["needle_loop_enabled"]
+                                and call.get("name") == "get_gpu_status"):
+                            self.needle_slots.remember(
+                                self.session_id, routed_text, "get_gpu_status", item)
+                outcome = ("disabled" if not self.cfg["qwen"]["enabled"] and route != "direct"
+                           else "no_action" if not observed else "executed")
+                self.sessions.append(task.task_id,
+                                     Completion("failed" if outcome == "disabled" else "completed",
+                                                outcome))
                 self.feedback.tell(json.dumps(result,default=str)[:1800])
         except Exception as exc:
             LOG.exception("Command failed")
+            try:
+                self.sessions.append(task.task_id, Completion("failed", "exception"))
+            except Exception:
+                LOG.exception("Could not record failed command")
             self.feedback.tell(f"Could not complete command: {exc}")
 
     def listen(self):
@@ -188,12 +377,20 @@ class Alfred:
                     # authorization; never send shutdown requests to Needle/Qwen.
                     if re.fullmatch(r"(?:close|exit|quit|stop listening|shut down|shutdown)[.!?]*",
                                     command.strip(), flags=re.IGNORECASE):
+                        task = self._start_task("voice", len(command))
+                        self.sessions.append(task.task_id, Decision("local", "shutdown", 0))
+                        self.sessions.append(task.task_id, Completion("completed", "shutdown"))
                         LOG.info("Wake-authorized spoken shutdown")
                         print("Stopping Alfred", flush=True)
                         break
                     LOG.info("Wake-authorized command received (%d characters)",len(command))
                     # Never forward a wake phrase to Needle or Qwen.
-                    self.handle_text(command)
+                    previous_source = self._command_source
+                    self._command_source = "voice"
+                    try:
+                        self.handle_text(command)
+                    finally:
+                        self._command_source = previous_source
                 else:
                     LOG.info("Wake word detected; awaiting follow-up command")
                 # Discard speech buffered during synchronous TTS to prevent
@@ -217,9 +414,12 @@ class Alfred:
             return
         self._closed = True
         self._watchdog_stop.set()
+        self._needle_cancel.set()
+        self.needle_slots.clear()
         # Stop startup/restart attempts before waiting for the watchdog.
         for component, action in (
             ("audio capture", self.audio.close),
+            ("harness subprocess", self.harness.close if self.harness else lambda: None),
             ("inference backend", self.supervisor.close),
             ("task and speech subprocesses", self.processes.close),
             ("scheduler", self.scheduler.stop),
@@ -432,10 +632,32 @@ def _main(argv=None):
     if args.reason:
         app=Alfred(cfg,load_models=False)
         try:
-            print(json.dumps(app.reason(args.reason),default=str,indent=2))
+            task = app._start_task("reason", len(args.reason))
+            app.sessions.append(task.task_id, Decision("local", "delegate", 0))
+            app.sessions.append(task.task_id,
+                                Escalation("local", "qwen", "explicit_reason"))
+            try:
+                result = app.reason(args.reason)
+                if result.get("status") == "incomplete":
+                    app.sessions.append(task.task_id,
+                                        Completion("failed", "invalid_plan"))
+                elif "approval" in result:
+                    app.sessions.append(task.task_id,
+                                        ApprovalReference(result["approval"]["approval_id"]))
+                    app.sessions.append(task.task_id,
+                                        Completion("pending_approval", "needs_approval"))
+                else:
+                    app.sessions.append(task.task_id,
+                                        Completion("completed" if cfg["qwen"]["enabled"] else "failed",
+                                                   "no_action" if cfg["qwen"]["enabled"] else "disabled"))
+                print(json.dumps(result,default=str,indent=2))
+            except Exception:
+                app.sessions.append(task.task_id, Completion("failed", "exception"))
+                raise
         finally:
             app.close()
-        return 0
+        # The --reason one-shot CLI must signal an unsuccessful planner run.
+        return 1 if result.get("status") == "incomplete" else 0
     if not args.text:
         # Fail before loading native Whistle/Needle models or starting services.
         # Merely seeing a Pulse "Built-in Audio" entry is not enough.
