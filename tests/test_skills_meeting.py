@@ -75,6 +75,9 @@ class FakeMeetingDevice:
     def get_segments(self,meeting_id):
         self.calls.append(("get",meeting_id))
         return copy.deepcopy(self.segments)
+    def discard_meeting(self,meeting_id):
+        self.calls.append(("discard",meeting_id))
+        return True
     def suggest_minutes(self,evidence):
         self.calls.append(("summarize",evidence))
         return copy.deepcopy(self.minutes_proposal)
@@ -293,6 +296,7 @@ class MeetingPolicyTests(unittest.TestCase):
         self.start(retention=False)
         p=self.grant()
         self.assertEqual(self.adapter.stop(p)["retained"],False)
+        self.assertIn(("discard",MEETING),self.device.calls)
         with self.assertRaises(PermissionError):
             self.adapter.evidence(p)
         with self.assertRaises(PermissionError):
@@ -315,6 +319,24 @@ class MeetingPolicyTests(unittest.TestCase):
         self.device.minutes_proposal["action_items"][0]["owner"]="Imaginary"
         with self.assertRaises(ValueError):
             self.adapter.minutes(p,title="Meeting")
+        self.assertFalse(any(call[0]=="save_pdf" for call in self.device.calls))
+
+    def test_nonretained_meeting_without_discard_confirmation_fails_closed(self):
+        self.start(retention=False)
+        p=self.grant()
+        self.device.discard_meeting=Mock(return_value=False)
+        with self.assertRaisesRegex(RuntimeError,"discard unverified"):
+            self.adapter.stop(p)
+        with self.assertRaises(PermissionError):
+            self.adapter.evidence(p)
+
+    def test_pdf_rejects_transcript_change_after_minutes_validation(self):
+        self.start(retention=True)
+        p=self.grant()
+        verified=self.adapter.minutes(p,title="Project sync")
+        self.device.segments[0]["text"]="Meeting record was edited after approval."
+        with self.assertRaisesRegex(PermissionError,"evidence not validated"):
+            self.adapter.export_pdf(p,verified)
         self.assertFalse(any(call[0]=="save_pdf" for call in self.device.calls))
 
     def test_unavailable_qwen_or_obex_reports_missing(self):
