@@ -131,9 +131,9 @@ class GitBranchSyncTests(unittest.TestCase):
         """Execute the real inline workflow guard for main and non-main refs."""
         workflow=(Path(__file__).resolve().parents[1]/
                   ".github/workflows/sync-main-to-intrinsic-jetson.yml").read_text()
-        guard=workflow.split("      - name: Enforce main-only synchronization\\n",1)[1].split(
-            "      - name: Check out trusted sync helper from main\\n",1)[0]
-        script=textwrap.dedent(guard.split("        run: |\\n",1)[1])
+        guard=workflow.split("      - name: Enforce main-only synchronization\n",1)[1].split(
+            "      - name: Check out trusted sync helper from main\n",1)[0]
+        script=textwrap.dedent(guard.split("        run: |\n",1)[1])
         self.assertIn('WORKFLOW_REF: ${{ github.ref }}',guard)
         self.assertIn("exit 1",script)
         for ref,expected in (("refs/heads/main",0),
