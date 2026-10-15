@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -190,6 +193,33 @@ class ContinuationTests(unittest.TestCase):
         self.assertEqual(out["results"][1]["uptime_seconds"],3)
         self.qwen.complete.assert_called_once()
 
+    def test_malformed_sdk_plans_are_not_replanned_or_executed(self):
+        from alfred.cognitive.harness_sdk import LocalHarness, HarnessInvalidPlan
+        actionable=build_handoff(SID,TID,"Run safe task","delegated",
+                                 allow_actions=True,max_tools=5)
+        malformed=(
+            "{not valid JSON",
+            '{"message":"stage","steps":[],"steps":[{"tool":"run_named_task","args":{"name":"safe"}}],"save_as":null}',
+            '{"message":"stage","steps":[],"save_as":NaN}',
+            '{"message":"stage","save_as":null}',
+        )
+        for raw in malformed:
+            with self.subTest(raw=raw):
+                self.qwen.complete.reset_mock()
+                sdk=LocalHarness("http://127.0.0.1:8080","qwen",factory=Mock())
+                sdk.run=Mock(return_value={"message":raw})
+                try:
+                    with patch.object(self.tools,"run_plan") as run, \\
+                         patch.object(self.sys.approvals,"propose") as propose:
+                        with self.assertRaises(HarnessInvalidPlan):
+                            self.sys.continue_handoff(actionable,harness=sdk)
+                        self.qwen.complete.assert_not_called()
+                        run.assert_not_called()
+                        propose.assert_not_called()
+                        sdk.run.assert_called_once()
+                finally:
+                    sdk.close()
+
     def test_no_fallback_after_execution_exception(self):
         h=build_handoff(SID,TID,"Run safe task","delegated",
                         allow_actions=True,max_tools=5)
@@ -290,6 +320,74 @@ class AppTraceTests(unittest.TestCase):
         self.assertEqual(self.app.sessions.list_tasks(self.app.session_id)[0]["state"],
                          "failed")
         self.assertIn("incomplete",self.app.feedback.tell.call_args.args[0])
+
+    def test_native_feedback_crash_keeps_completed_read_and_reports_incomplete(self):
+        self.app.cfg["runtime"]["needle_loop_enabled"]=True
+        self.app.cactus.route.return_value={
+            "confidence":.99,"function_calls":[READ]}
+        self.app.cactus.route_feedback.side_effect=OSError("native feedback unavailable")
+        observed={"available":True,"gpu_temp_c":67.0}
+        self.app.system2.direct=Mock(return_value={"message":"Completed","results":[observed]})
+        self.app.handle_text("Check GPU temperature then explain it")
+        self.app.system2.direct.assert_called_once()
+        self.app.cactus.route_feedback.assert_called_once()
+        self.app.system2.qwen.complete.assert_not_called()
+        self.assertEqual(self.app.system2.approvals.pending(),[])
+        shown=json.loads(self.app.feedback.tell.call_args.args[0])
+        self.assertEqual(shown["status"],"incomplete")
+        self.assertEqual(shown["halt_reason"],"feedback_unavailable")
+        self.assertEqual(shown["results"],[observed])
+        self.assertTrue(shown["partial"])
+        task=self.app.sessions.list_tasks(self.app.session_id)[0]
+        self.assertEqual(task["state"],"failed")
+        history=self.app.sessions.events(task["id"])
+        self.assertEqual([e.outcome for e in history if e.kind=="observation"],["returned"])
+        self.assertEqual(history[-1].reason,"exception")
+
+    def test_live_process_cannot_be_resumed_then_dead_owner_recovers(self):
+        dbpath=self.app.cfg["runtime"]["database"]
+        script=(
+            "import sys,time\\n"
+            "from alfred.runtime import Store\\n"
+            "from alfred.cognitive.sessions import SessionLedger\\n"
+            "db=Store(sys.argv[1])\\n"
+            "task=SessionLedger(db).begin_task('text',5)\\n"
+            "print(task.session_id,task.task_id,flush=True)\\n"
+            "time.sleep(60)\\n"
+        )
+        env=dict(os.environ)
+        env["PYTHONPATH"]=str(Path(__file__).resolve().parents[1])
+        proc=subprocess.Popen([sys.executable,"-c",script,dbpath],
+                              stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                              text=True,env=env)
+        try:
+            ids=proc.stdout.readline().strip().split()
+            self.assertEqual(len(ids),2,
+                             "Owner subprocess exited: "+proc.stderr.read() if proc.poll() is not None else "Missing owner IDs")
+            sid,tid=ids
+            with self.assertRaisesRegex(RuntimeError,"active Alfred process"):
+                self.app.resume_session(sid)
+            self.assertIsNone(self.app.session_id)
+            self.assertEqual(self.app.sessions.list_tasks(sid)[0]["state"],"running")
+            self.assertEqual([e.kind for e in self.app.sessions.events(tid)],["task"])
+            proc.kill()
+            proc.wait(timeout=5)
+            with patch.object(self.app.system2,"direct") as direct:
+                self.assertEqual(self.app.resume_session(sid),sid)
+                direct.assert_not_called()
+            history=self.app.sessions.events(tid)
+            self.assertEqual(history[-1].outcome,"failed")
+            self.assertEqual(history[-1].reason,"shutdown")
+            self.assertEqual(self.app.sessions.list_tasks(sid)[0]["state"],"failed")
+            fresh=self.app._start_task("text",5)
+            self.assertEqual(fresh.session_id,sid)
+            self.assertNotEqual(fresh.task_id,tid)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+            proc.stdout.close()
+            proc.stderr.close()
 
     def test_resume_session_after_restart_no_replay(self):
         app=self.app
