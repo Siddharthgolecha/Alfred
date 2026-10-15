@@ -1,10 +1,10 @@
 # Issue #17 — Skills inventory and offline meeting contract (main only)
 
 **Status:** interface-only, opt-in by trusted host injection, no Jetson code
-copied to `main`. Built from `main` commit
-`9db79805558e1fd4b2d81df13de539662ef99258`, not stacked on
-unmerged #15 (PR #32) or #16 (PR #33). **Final acceptance/merge is blocked**
-until those dependencies merge and both integration boundaries are reviewed.
+copied to `main`. Synced with `main` commit
+`88876d00836787a7a1e75806c1cda10809e8bb41` including **merged
+#16 / PR #33**. **Final acceptance/merge remains blocked** on unmerged
+#15 / PR #32, the Jetson-only provider, and independent hardware review.
 
 ## Public capabilities and discovery
 
@@ -30,7 +30,8 @@ branch names as device evidence.
 
 `Alfred(..., meeting_adapter=None)` defaults to no meeting capabilities.
 Device integrations may pass an explicitly constructed
-`OfflineMeetingAdapter(provider)` from trusted code; unknown plugin
+`OfflineMeetingAdapter(provider, journal=MeetingCleanupJournal(store))`
+from trusted code; unknown plugin
 packages are never dynamically imported on main. No automatic meeting
 recording or transcript search is wired into audio, Qwen or Needle.
 
@@ -53,6 +54,12 @@ The host-owned provider must expose:
   the trusted host `MeetingCleanupJournal(Store)`. Registration writes
   the opaque transaction token to durable SQLite BEFORE invoking the device.
   Failed rollback stays `rollback_pending`, never silently leaks a recorder.
+  The journal enforces a **SQLite UNIQUE index on any nonnull meeting ID**,
+  atomically rejecting a second claim even from a different Store/adapter
+  instance or after restart. Rollback is operation-token-specific and cannot
+  touch the original owner's recorder. Successful retained stop leaves
+  a `stopped_retained` tombstone reserving the meeting ID while artifacts
+  remain. The tombstone is not a cleanup request.
   `recording_status(meeting_id)` and `stop_recording(meeting_id)` must
   be idempotent (stop may have succeeded just before process interruption).
   When retention is **false**, `discard_meeting(meeting_id) -> True`
@@ -79,7 +86,10 @@ No real Jetson provider is installed or executed by this main PR.
 ## Scope, privacy and output rules
 
 Start requires an authorized task plus **explicit recording consent**,
-and separate `retention` flag. Every operation on a recording requires a
+and separate `retention` flag. **Stopping additionally requires
+`local_authorized=True`** (a separate trusted stop action): a generic
+read-only permit is deliberately insufficient. Every operation on a recording
+requires a
 new **task-bound**, time-limited `MeetingPermit` with the exact canonical
 session ID, owner and *opted-in meeting ID*. Never enumerate historical
 transcripts or try to derive an ID from general session context.
@@ -88,7 +98,20 @@ cognitive facts, and `clear_session` revokes permits/handles. The
 **only** new persisted meeting data is an opaque transaction-cleanup
 journal (operation ID, meeting ID, owner/session/task IDs, retention bit,
 state; NO audio/transcripts). Cleanup survives process restart.
-With retention disabled, initiating stop immediately revokes transcript
+For every adapter instance, `status`, `evidence`, `minutes`,
+`export_pdf` and `deliver` keep the exact trusted permit check and all
+provider calls within one **adapter-wide reentrant operation lock**. This is
+more conservative than a per-meeting lease: it serializes unrelated meetings
+too. `stop`, `revoke` and `clear_session` use the same lock, so an
+in-flight read/PDF transfer finishes **before** revocation/physical purge
+can start; once revoked, no later device operation can begin using that
+permit. This cannot preempt a hung native device call; host adapters must
+set native operation timeouts and avoid callbacks that wait for the lock.
+The host must avoid concurrent recovery by an independent adapter while
+a previous adapter still owns active operations; the provider has to
+coordinate a single device owner across processes.
+With retention disabled, initiating authorized stop (after any in-flight
+device operation completes) revokes transcript
 access and transitions to `stopping` then `purge_pending` until the
 device confirms deletion. An explicitly authorized local operator can
 call `adapter.recover_cleanup(session_id=..., owner=...,
@@ -143,7 +166,8 @@ workflow privileges.
 - Existing Phase 4 `WorkflowEngine` is unchanged; approved graph digest
   and service/named-task allowlists continue to gate all actions. Skill
   metadata does not make a workflow executable or locally approved.
-- When #15/#16 are merged, rebase and integrate the **consented meeting
+- After #15 merges (and with #16 **already merged**), reconcile the
+  **consented meeting
   evidence packet** only into the appropriate same-task context, never
   global retained session slots. No transcript read without explicit ID.
 
@@ -156,7 +180,9 @@ python -m alfred --skills
 ```
 
 The fake provider tests cover missing devices, real graph approval status,
-consent/retention with device discard verification, owner/task/session
+consent/retention with device discard verification, separate stop approval,
+cross-adapter/Store uniqueness and owner isolation, deterministic concurrent
+read/export/delivery barriers versus stop/purge and revocation, owner/task/session
 mismatch, expiry/revocation, opaque handles, redaction, timestamp/
 overlap/cross-talk, post-validation evidence mutation, hallucinated
 owners/dates/decisions, PDFs with modified content, failed OBEX delivery,
