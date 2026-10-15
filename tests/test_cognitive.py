@@ -152,17 +152,23 @@ class LedgerTests(unittest.TestCase):
         first=self.ledger.begin_task("voice", 8)
         self.ledger.append(first.task_id, Completion("completed", "no_action"))
         cutoff=int(time.time()) + 10
-        # Live voice process is idle: no running tasks, but it owns the session.
-        self.assertEqual(self.ledger.prune(cutoff),0)
-        self.assertEqual(len(self.ledger.list_tasks(first.session_id)),1)
-        resumed=self.ledger.begin_task("voice", 12, first.session_id)
-        self.assertEqual(resumed.session_id,first.session_id)
-        self.ledger.append(resumed.task_id,Completion("completed","no_action"))
-        self.assertEqual(self.ledger.prune(cutoff),0)
-        self.ledger.release_ownership()
-        self.assertEqual(self.ledger.prune(cutoff),1)
-        with self.assertRaises(ValueError):
-            self.ledger.begin_task("voice",2,first.session_id)
+        # A separate retention client runs while the voice process remains
+        # alive but has no running task. Its SQLite session claim must survive.
+        other=Store(self.database)
+        retention=SessionLedger(other)
+        try:
+            self.assertEqual(retention.prune(cutoff),0)
+            self.assertEqual(len(self.ledger.list_tasks(first.session_id)),1)
+            resumed=self.ledger.begin_task("voice", 12, first.session_id)
+            self.assertEqual(resumed.session_id,first.session_id)
+            self.ledger.append(resumed.task_id,Completion("completed","no_action"))
+            self.assertEqual(retention.prune(cutoff),0)
+            self.ledger.release_ownership()
+            self.assertEqual(retention.prune(cutoff),1)
+            with self.assertRaises(ValueError):
+                self.ledger.begin_task("voice",2,first.session_id)
+        finally:
+            other.db.close()
 
     def test_prune_dead_owner_after_completed_task(self):
         finished=self.ledger.begin_task("text",6)
