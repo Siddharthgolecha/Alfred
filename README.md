@@ -32,6 +32,9 @@ cd Alfred
 alfred                # start listening — no flags required
 ```
 
+On Windows, run `install.ps1` from PowerShell. Voice capture uses FFmpeg DirectShow; setup
+offers `winget` installation when it is available.
+
 Full instructions: [Installation](docs/getting-started/installation.md) and
 [Quickstart](docs/getting-started/quickstart.md).
 

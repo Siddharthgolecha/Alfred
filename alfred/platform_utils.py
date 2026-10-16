@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -19,6 +20,10 @@ from pathlib import Path
 IS_LINUX = sys.platform.startswith("linux")
 IS_MACOS = sys.platform == "darwin"
 IS_WINDOWS = sys.platform == "win32"
+_WINDOWS_CPU_LOCK = threading.Lock()
+_WINDOWS_CPU_BASELINE = None
+_WINDOWS_CPU_SAMPLED_AT = 0.0
+_WINDOWS_CPU_LOAD = None
 
 # AF_UNIX is unavailable on Windows before Python 3.9 / Windows 10 1803.
 HAS_AF_UNIX: bool = hasattr(__import__("socket"), "AF_UNIX")
@@ -49,6 +54,38 @@ def _default_state_dir() -> str:
     # Linux / other POSIX: follow XDG state spec.
     base = os.environ.get("XDG_STATE_HOME") or str(Path("~/.local/state").expanduser())
     return str(Path(base) / "alfred")
+
+
+def _windows_cpu_load() -> float:
+    """Measure Windows CPU use over 50ms, then reuse samples for 250ms."""
+    global _WINDOWS_CPU_BASELINE, _WINDOWS_CPU_SAMPLED_AT, _WINDOWS_CPU_LOAD
+    import ctypes
+    from ctypes import wintypes
+
+    class FILETIME(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
+
+    def read_times():
+        idle, kernel, user = FILETIME(), FILETIME(), FILETIME()
+        if not ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user)):
+            raise OSError("GetSystemTimes failed")
+        value = lambda item: (int(item.dwHighDateTime) << 32) | int(item.dwLowDateTime)
+        return value(idle), value(kernel), value(user)
+
+    with _WINDOWS_CPU_LOCK:
+        now = time.monotonic()
+        if _WINDOWS_CPU_BASELINE is not None and now - _WINDOWS_CPU_SAMPLED_AT < 0.25:
+            return _WINDOWS_CPU_LOAD
+        before = _WINDOWS_CPU_BASELINE or read_times()
+        if _WINDOWS_CPU_BASELINE is None:
+            time.sleep(0.05)
+        after = read_times()
+        total = (after[1] - before[1]) + (after[2] - before[2])
+        busy = total - (after[0] - before[0])
+        _WINDOWS_CPU_LOAD = max(0.0, min(1.0, busy / total)) if total else 0.0
+        _WINDOWS_CPU_BASELINE = after
+        _WINDOWS_CPU_SAMPLED_AT = time.monotonic()
+        return _WINDOWS_CPU_LOAD
 
 
 # ---------------------------------------------------------------------------
@@ -137,16 +174,46 @@ def sample_resources() -> dict:
                             pass
             free = pages.get("Pages free", 0) + pages.get("Pages inactive", 0)
             available_mib = free * page_size / (1024 * 1024)
-            # macOS does not expose a simple swap-used figure; use None.
-            swap_used_mib = None
+            swap = subprocess.check_output(
+                ["sysctl", "-n", "vm.swapusage"], text=True, timeout=3
+            )
+            import re
+            match = re.search(r"used\s*=\s*([0-9.]+)M", swap)
+            if match:
+                swap_used_mib = float(match.group(1))
         except (OSError, subprocess.SubprocessError, ValueError):
             return _NA
+    elif IS_WINDOWS:
+        try:
+            import ctypes
+            from ctypes import wintypes
 
-    try:
-        count = os.cpu_count() or 1
-        cpu_load = os.getloadavg()[0] / max(1, count)
-    except (OSError, AttributeError):
-        cpu_load = None  # Windows has no getloadavg
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [("dwLength", wintypes.DWORD), ("dwMemoryLoad", wintypes.DWORD),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+            memory = MEMORYSTATUSEX()
+            memory.dwLength = ctypes.sizeof(memory)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(memory)):
+                return _NA
+            available_mib = memory.ullAvailPhys / (1024 * 1024)
+            # Commit beyond physical RAM is the memory pressure that can page to disk.
+            swap_used_mib = max(0.0, (memory.ullTotalPageFile - memory.ullAvailPageFile
+                                      - memory.ullTotalPhys) / (1024 * 1024))
+
+            cpu_load = _windows_cpu_load()
+        except (OSError, AttributeError, ValueError):
+            return _NA
+
+    if cpu_load is None:
+        try:
+            count = os.cpu_count() or 1
+            cpu_load = os.getloadavg()[0] / max(1, count)
+        except (OSError, AttributeError):
+            cpu_load = None  # All required fields are checked before inference admission.
 
     return {
         "available_mib": available_mib,

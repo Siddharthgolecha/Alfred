@@ -8,16 +8,34 @@
   "status": "developer-preview-prerelease",
   "sdk": {
     "filename": "deepseek_harness_sdk-0.1.5rc1-py3-none-any.whl",
-    "sha256": "8d9897e97e8a95fd738cb2c3e2c563951d824e43847ec6f3b0fb172c0729b4d8"
+    "sha256": "8d9897e97e8a95fd738cb2c3e2c563951d824e43847ec6f3b0fb172c0729b4d8",
+    "url": "https://files.pythonhosted.org/packages/ee/fa/9b3e2a449f876211fdcbd8082edcf70f0ead08617aa4e064a9bb14372291/deepseek_harness_sdk-0.1.5rc1-py3-none-any.whl"
   },
   "runtime": {
     "linux_x86_64": {
       "filename": "deepseek_harness_runtime_bin-0.1.5rc1-py3-none-manylinux_2_28_x86_64.whl",
-      "sha256": "ad877237382baff4628969a9ebdbfe38486d971b7987c032d0e29775759b5229"
+      "sha256": "ad877237382baff4628969a9ebdbfe38486d971b7987c032d0e29775759b5229",
+      "url": "https://files.pythonhosted.org/packages/bc/ff/632fddc738effdbc8752f02641aba6eaeb96f820367b8cee68397501948d/deepseek_harness_runtime_bin-0.1.5rc1-py3-none-manylinux_2_28_x86_64.whl"
     },
     "linux_aarch64": {
       "filename": "deepseek_harness_runtime_bin-0.1.5rc1-py3-none-manylinux_2_28_aarch64.whl",
-      "sha256": "32b7bb7887ea89f12462274d1b21acfafb00d38d94e11a5d7122492f185e4f85"
+      "sha256": "32b7bb7887ea89f12462274d1b21acfafb00d38d94e11a5d7122492f185e4f85",
+      "url": "https://files.pythonhosted.org/packages/b0/33/9bb2ad17dc0a48d3641c7dd0bfdb8742333577739b31c70f46356847706a/deepseek_harness_runtime_bin-0.1.5rc1-py3-none-manylinux_2_28_aarch64.whl"
+    },
+    "macos_x86_64": {
+      "filename": "deepseek_harness_runtime_bin-0.1.5rc1-py3-none-macosx_14_0_x86_64.whl",
+      "sha256": "c94e6b7f6339a79fea47cba2d841976d87faabab1fb35e7bb9609d8cde9238d5",
+      "url": "https://files.pythonhosted.org/packages/51/f3/624219faa56a6a4883cc8dcdeece5f32c5ee3e4cd3cc65c8b3ccefeb57a0/deepseek_harness_runtime_bin-0.1.5rc1-py3-none-macosx_14_0_x86_64.whl"
+    },
+    "macos_aarch64": {
+      "filename": "deepseek_harness_runtime_bin-0.1.5rc1-py3-none-macosx_14_0_arm64.whl",
+      "sha256": "65f20c541a499f08c36ac3bfdafce350ca8c7cc23488c1faf4d9b9524b547156",
+      "url": "https://files.pythonhosted.org/packages/ec/2d/04d1871e2e3dc8d4d04a3439e5286d55ae64e31a514ae12e95f3f4c9dfa2/deepseek_harness_runtime_bin-0.1.5rc1-py3-none-macosx_14_0_arm64.whl"
+    },
+    "windows_x86_64": {
+      "filename": "deepseek_harness_runtime_bin-0.1.5rc1-py3-none-win_amd64.whl",
+      "sha256": "d031a5ab4919c572fd7e48c7ef19ec8b1896e93d93c44b0937bb958c528f8acf",
+      "url": "https://files.pythonhosted.org/packages/a2/0e/4b52e5792a7accb09c70831ad3182efa253e15118c683a49dc66f3cbd83a/deepseek_harness_runtime_bin-0.1.5rc1-py3-none-win_amd64.whl"
     }
   },
   "profile": "sdk-minimal",

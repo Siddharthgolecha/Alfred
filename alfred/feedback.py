@@ -8,9 +8,10 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import base64
 import threading
 from .constants import Truncation
-from .platform_utils import IS_MACOS
+from .platform_utils import IS_MACOS, IS_WINDOWS
 
 LOG = logging.getLogger(__name__)
 
@@ -20,6 +21,17 @@ _TTS_COMMAND: list[str] | None = None
 
 def _tts_argv(message: str) -> list[str] | None:
     """Return the TTS command argv for the current platform, or None if unavailable."""
+    if IS_WINDOWS:
+        # Pass speech as base64 data; never interpolate model/user text into PowerShell code.
+        script = (
+            "Add-Type -AssemblyName System.Speech; "
+            "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+            "$s.Speak([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" +
+            base64.b64encode(str(message)[:Truncation.MESSAGE].encode("utf-8")).decode("ascii") +
+            "'))); $s.Dispose()"
+        )
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        return ["powershell", "-NoProfile", "-EncodedCommand", encoded]
     if IS_MACOS:
         if shutil.which("say"):
             return ["say", "--", str(message)[:Truncation.MESSAGE]]

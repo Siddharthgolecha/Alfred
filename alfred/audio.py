@@ -18,9 +18,10 @@ import select
 import subprocess
 import sys
 import time
+import shutil
 
 from .exceptions import AlfredError
-from .platform_utils import IS_LINUX, IS_MACOS
+from .platform_utils import IS_LINUX, IS_MACOS, IS_WINDOWS
 
 LOG = logging.getLogger(__name__)
 RATE = 16000
@@ -178,6 +179,154 @@ def _macos_capture_command(tool: str, rate: int) -> list[str]:
         "-ar", str(rate), "-ac", "1",
         "-f", "s16le", "-",
     ]
+
+
+def _windows_capture_command(device: str, rate: int = RATE) -> list[str]:
+    """Capture mono PCM from a DirectShow audio input via FFmpeg."""
+    return ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "dshow",
+            "-i", 'audio="' + device.replace('"', '\\"') + '"', "-vn", "-ac", "1", "-ar", str(rate),
+            "-f", "s16le", "-"]
+
+
+def _windows_audio_devices() -> list[str]:
+    """Enumerate DirectShow microphones; FFmpeg writes its device list to stderr."""
+    if not shutil.which("ffmpeg"):
+        return []
+    try:
+        result = subprocess.run(["ffmpeg", "-hide_banner", "-list_devices", "true",
+                                 "-f", "dshow", "-i", "dummy"],
+                                capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return list(dict.fromkeys(re.findall(r'"([^"\r\n]+)"\s+\(audio\)', result.stderr)))
+
+
+class WindowsAudioManager:
+    """Windows microphone capture with bounded DirectShow pipe reads."""
+
+    def __init__(self, cfg):
+        self.config = cfg
+        self.process = None
+        self.active_source = None
+        self._prefetched = b""
+
+    def diagnostics(self):
+        devices = _windows_audio_devices()
+        if not devices:
+            reason = ("Install FFmpeg with DirectShow support" if not shutil.which("ffmpeg")
+                      else "FFmpeg did not report a microphone; check Windows microphone privacy settings")
+            return [{"name": "default", "description": "Windows microphone", "eligible": False,
+                     "reason": reason}]
+        return [{"name": name, "description": "Windows DirectShow audio input",
+                 "eligible": True, "reason": "DirectShow; must pass live capture probe"}
+                for name in devices]
+
+    def candidate_sources(self):
+        devices = _windows_audio_devices()
+        selected = self.config.get("direct_source", "")
+        if selected:
+            return [selected] if selected in devices else []
+        return devices
+
+    def choose_source(self):
+        devices = self.candidate_sources()
+        return devices[0] if devices else None
+
+    def _read_pcm(self, nbytes, timeout):
+        if self.process is None or self.process.stdout is None:
+            raise AudioUnavailableError("Windows microphone capture is not running")
+        import ctypes
+        import msvcrt
+        end = time.monotonic() + float(timeout)
+        handle = msvcrt.get_osfhandle(self.process.stdout.fileno())
+        buf = bytearray()
+        while len(buf) < nbytes:
+            if self.process.poll() is not None:
+                raise AudioUnavailableError(
+                    f"FFmpeg stopped for {self.active_source} (exit {self.process.returncode}); "
+                    "check device permissions and microphone connection")
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                raise AudioUnavailableError(f"No microphone audio received within {timeout}s")
+            available = ctypes.c_ulong()
+            ok = ctypes.windll.kernel32.PeekNamedPipe(
+                ctypes.c_void_p(handle), None, 0, None, ctypes.byref(available), None)
+            if not ok:
+                raise AudioUnavailableError("Windows closed the microphone capture pipe")
+            if available.value:
+                buf.extend(os.read(self.process.stdout.fileno(), min(nbytes - len(buf), available.value)))
+            else:
+                time.sleep(min(0.04, remaining))
+        return bytes(buf)
+
+    def _open(self, source):
+        try:
+            self.process = subprocess.Popen(_windows_capture_command(source), stdout=subprocess.PIPE,
+                                            stderr=subprocess.DEVNULL, bufsize=0)
+        except OSError as exc:
+            raise AudioUnavailableError(f"Cannot start FFmpeg DirectShow microphone capture: {exc}") from exc
+        self.active_source = source
+
+    def ensure_input(self):
+        if not shutil.which("ffmpeg"):
+            raise AudioUnavailableError("Windows voice needs FFmpeg with DirectShow support; install FFmpeg and rerun Alfred setup")
+        devices = self.candidate_sources()
+        if not devices:
+            raise AudioUnavailableError(
+                "No Windows microphone was reported by FFmpeg. Check Windows Settings > Privacy & security > Microphone, "
+                "or select another input in config.json.")
+        failures = []
+        for source in devices:
+            self.close()
+            try:
+                self._open(source)
+                self._prefetched = self._read_pcm(RATE // 10 * 2,
+                                                   self.config.get("probe_timeout_seconds", 5))
+                return source
+            except AudioUnavailableError as exc:
+                failures.append(f"{source}: {exc}")
+        self.close()
+        raise AudioUnavailableError("No Windows microphone delivered audio. " + "; ".join(failures))
+
+    def close(self):
+        proc, self.process = self.process, None
+        self.active_source, self._prefetched = None, b""
+        if proc:
+            if proc.poll() is None:
+                proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+            if proc.stdout:
+                proc.stdout.close()
+
+    def frames(self):
+        samples = RATE * int(self.config["frame_ms"]) // 1000
+        nbytes = samples * 2
+        if self.process is None:
+            self.ensure_input()
+        failures = 0
+        while True:
+            try:
+                data = self._prefetched
+                self._prefetched = b""
+                if len(data) < nbytes:
+                    data += self._read_pcm(nbytes - len(data),
+                                           self.config.get("read_timeout_seconds", 5))
+            except AudioUnavailableError as exc:
+                failures += 1
+                self.close()
+                if failures >= 3:
+                    raise AudioUnavailableError("Windows microphone stopped delivering audio after 3 attempts") from exc
+                self.ensure_input()
+                continue
+            failures = 0
+            pcm = array("h")
+            pcm.frombytes(data[:nbytes])
+            self._prefetched = data[nbytes:]
+            yield [sample / 32768.0 for sample in pcm]
 
 
 class MacAudioManager:
@@ -351,6 +500,7 @@ class AudioManager:
         self.config = cfg
         # On macOS, delegate all I/O to MacAudioManager.
         self._mac: MacAudioManager | None = MacAudioManager(cfg) if IS_MACOS else None
+        self._windows: WindowsAudioManager | None = WindowsAudioManager(cfg) if IS_WINDOWS else None
         self.active_source = None
         self.process = None
         self.last_check = 0
@@ -430,6 +580,8 @@ class AudioManager:
         """All advertised inputs with rejection reasons; no false 'mic connected' claim."""
         if self._mac is not None:
             return self._mac.diagnostics()
+        if self._windows is not None:
+            return self._windows.diagnostics()
         direct = self.config.get("direct_source")
         entries = []
         for src in pactl_json("sources"):
@@ -444,6 +596,8 @@ class AudioManager:
         """Return eligible source names ordered by preference."""
         if self._mac is not None:
             return self._mac.candidate_sources()
+        if self._windows is not None:
+            return self._windows.candidate_sources()
         mode=self.config["mode"]
         if mode!="direct":
             if self._headset_card() is None:
@@ -477,6 +631,8 @@ class AudioManager:
 
     def choose_source(self) -> str | None:
         """Return the highest-priority eligible source, or None."""
+        if self._windows is not None:
+            return self._windows.choose_source()
         candidates=self.candidate_sources()
         return candidates[0] if candidates else None
 
@@ -526,6 +682,10 @@ class AudioManager:
             result = self._mac.ensure_input()
             self.active_source = self._mac.active_source
             return result
+        if self._windows is not None:
+            result = self._windows.ensure_input()
+            self.active_source = self._windows.active_source
+            return result
         candidates=self.candidate_sources()
         if not candidates:
             self.close()
@@ -554,6 +714,10 @@ class AudioManager:
             self._mac.close()
             self.active_source = None
             return
+        if self._windows is not None:
+            self._windows.close()
+            self.active_source = None
+            return
         proc, self.process = self.process, None
         self.active_source = None
         self._prefetched = b""
@@ -572,6 +736,9 @@ class AudioManager:
         """Produce PCM buffers or raise AudioUnavailableError; never retry forever."""
         if self._mac is not None:
             yield from self._mac.frames()
+            return
+        if self._windows is not None:
+            yield from self._windows.frames()
             return
         samples=RATE*int(self.config["frame_ms"])//1000
         nbytes=samples*2
