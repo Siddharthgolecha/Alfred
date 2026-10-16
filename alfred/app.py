@@ -28,12 +28,12 @@ from .cognitive import SessionLedger
 from .cognitive.harness_sdk import LocalHarness, HarnessUnavailable
 # NeedleAgentLoop must stay importable as `alfred.app.NeedleAgentLoop`: tests/test_escalation.py
 # patches "alfred.app.NeedleAgentLoop.run" to simulate a mismatched Needle result.
-# (SessionSlots is used in annotations below.)
 from .cognitive.needle_loop import SessionSlots, NeedleAgentLoop  # noqa: F401
 from .cognitive.context import ContextManager
 from .listener import WakeWordListener
 from .router import RequestRouter
 from .session import SessionManager
+from .watchdog import WatchdogManager
 
 LOG = logging.getLogger(__name__)
 
@@ -108,11 +108,15 @@ class Alfred:
         )
 
     def _build_lifecycle_services(self, meeting_adapter: Any) -> None:
-        """Initialise SkillRegistry, Scheduler, RequestRouter, WakeWordListener, and watchdog state."""
+        """Initialise SkillRegistry, Scheduler, RequestRouter, WakeWordListener, and Watchdog."""
         self.skills = SkillRegistry(tools=self.tools, meeting=meeting_adapter)
         self.scheduler = Scheduler(self.store, self.tools, self._remind)
-        self._watchdog_stop = threading.Event()
-        self._watchdog_thread: threading.Thread | None = None
+        self.watchdog = WatchdogManager(
+            supervisor=self.supervisor,
+            admission=self.admission,
+            poll_interval=self.cfg["qwen"].get("supervisor_poll_seconds", 10),
+            enabled=self.cfg["qwen"].get("enabled", True),
+        )
         self._closed = False
 
         self.router = RequestRouter(
@@ -140,14 +144,11 @@ class Alfred:
         )
 
     # -----------------------------------------------------------------------
-    # Delegated properties — backward-compat aliases onto sub-services
+    # Delegated properties & helpers
     # -----------------------------------------------------------------------
-
-    # --- Session state aliases (callers use app.session_id / app.sessions / etc.) ---
 
     @property
     def session_id(self) -> str | None:
-        # Backward-compat alias: external callers (cli, tests) access app.session_id.
         return self.session_manager.session_id
 
     @session_id.setter
@@ -156,7 +157,6 @@ class Alfred:
 
     @property
     def sessions(self) -> SessionLedger:
-        # Backward-compat alias: external callers (cli, tests) access app.sessions.
         return self.session_manager.sessions
 
     @sessions.setter
@@ -166,7 +166,6 @@ class Alfred:
 
     @property
     def context(self) -> ContextManager:
-        # Backward-compat alias: external callers (cli, tests) access app.context.
         return self.session_manager.context
 
     @context.setter
@@ -175,7 +174,6 @@ class Alfred:
 
     @property
     def needle_slots(self) -> SessionSlots:
-        # Backward-compat alias: external callers (phase5_qa) access app.needle_slots.
         return self.session_manager.needle_slots
 
     @needle_slots.setter
@@ -184,7 +182,6 @@ class Alfred:
 
     @property
     def _command_source(self) -> str:
-        # Backward-compat alias: tests set app._command_source to simulate voice/text.
         return self.router._command_source
 
     @_command_source.setter
@@ -193,14 +190,20 @@ class Alfred:
 
     @property
     def _needle_cancel(self) -> threading.Event:
-        # Backward-compat alias: tests call app._needle_cancel.set() to abort needle loops.
         return self.router._needle_cancel
 
-    # --- Write-propagating service properties (assignment keeps sub-services in sync) ---
+    @property
+    def _watchdog_stop(self) -> threading.Event:
+        return self.watchdog.stop_event
+
+    @property
+    def _watchdog_thread(self) -> threading.Thread | None:
+        return self.watchdog.thread
+
+    # --- Write-propagating service properties (keeps sub-services in sync) ---
 
     @property
     def cactus(self) -> Cactus | None:
-        # Write-propagating: assigning app.cactus also updates router and listener.
         return getattr(self, "_cactus", None)
 
     @cactus.setter
@@ -213,7 +216,6 @@ class Alfred:
 
     @property
     def harness(self) -> LocalHarness:
-        # Write-propagating: assigning app.harness also updates router.
         return getattr(self, "_harness", None)
 
     @harness.setter
@@ -224,7 +226,6 @@ class Alfred:
 
     @property
     def system2(self) -> System2:
-        # Write-propagating: assigning app.system2 also updates router.
         return getattr(self, "_system2", None)
 
     @system2.setter
@@ -235,7 +236,6 @@ class Alfred:
 
     @property
     def supervisor(self) -> LlamaSupervisor:
-        # Write-propagating: assigning app.supervisor also updates router.
         return getattr(self, "_supervisor", None)
 
     @supervisor.setter
@@ -243,10 +243,11 @@ class Alfred:
         self._supervisor = value
         if hasattr(self, "router"):
             self.router.supervisor = value
+        if hasattr(self, "watchdog"):
+            self.watchdog.supervisor = value
 
     @property
     def feedback(self) -> Feedback:
-        # Write-propagating: assigning app.feedback also updates router and listener.
         return getattr(self, "_feedback", None)
 
     @feedback.setter
@@ -259,7 +260,6 @@ class Alfred:
 
     @property
     def tools(self) -> Tools:
-        # Write-propagating: assigning app.tools also updates router.
         return getattr(self, "_tools", None)
 
     @tools.setter
@@ -270,7 +270,6 @@ class Alfred:
 
     @property
     def store(self) -> Store:
-        # Write-propagating: assigning app.store also updates router and session_manager.
         return getattr(self, "_store", None)
 
     @store.setter
@@ -283,7 +282,6 @@ class Alfred:
 
     @property
     def admission(self) -> InferenceAdmission:
-        # Write-propagating: assigning app.admission also updates router and listener.
         return getattr(self, "_admission", None)
 
     @admission.setter
@@ -293,12 +291,15 @@ class Alfred:
             self.router.admission = value
         if hasattr(self, "listener"):
             self.listener.admission = value
+        if hasattr(self, "watchdog"):
+            self.watchdog.admission = value
 
-    # --- Delegated methods exposed as properties for mockability ---
+    # -----------------------------------------------------------------------
+    # Core orchestration API & Delegated Mockable Entrypoints
+    # -----------------------------------------------------------------------
 
     @property
     def reason(self) -> Any:
-        # Backward-compat alias: cli and tests call/replace app.reason.
         return self.router.reason
 
     @reason.setter
@@ -307,7 +308,6 @@ class Alfred:
 
     @property
     def handle_text(self) -> Any:
-        # Backward-compat alias: cli and tests call/replace app.handle_text.
         return self.router.handle_text
 
     @handle_text.setter
@@ -318,7 +318,6 @@ class Alfred:
 
     @property
     def _start_task(self) -> Any:
-        # Backward-compat alias: cli and tests call app._start_task to open a task envelope.
         return self.session_manager.start_task
 
     @_start_task.setter
@@ -327,7 +326,6 @@ class Alfred:
 
     @property
     def resume_session(self) -> Any:
-        # Backward-compat alias: cli and tests call app.resume_session(sid).
         return self._resume_session_wrapper
 
     @resume_session.setter
@@ -338,38 +336,17 @@ class Alfred:
         with self.router._needle_execution_lock:
             return self.session_manager.resume_session(session_id)
 
-    # -----------------------------------------------------------------------
-    # Service lifecycle
-    # -----------------------------------------------------------------------
-
     def _remind(self, event: dict[str, Any]) -> None:
         text = f"Reminder #{event['id']}: {event['message']}"
         self.feedback.tell(text)
         self.store.event("reminder", event)
 
     def start_services(self) -> None:
+        """Start scheduler and background watchdog monitoring."""
         self.scheduler.start()
-        if self.cfg["qwen"]["enabled"]:
-
-            def watchdog() -> None:
-                while not self._watchdog_stop.is_set():
-                    try:
-                        if self.admission.enabled:
-                            if not self.admission.capture_active:
-                                with self.admission.claim("qwen"):
-                                    self.supervisor.ensure_running()
-                                LOG.info("Qwen available: %s", self.supervisor.status())
-                        else:
-                            self.supervisor.ensure_running()
-                            LOG.info("Qwen available: %s", self.supervisor.status())
-                    except Exception as exc:
-                        LOG.warning("Qwen unavailable; will retry: %s", exc)
-                    self._watchdog_stop.wait(int(self.cfg["qwen"]["supervisor_poll_seconds"]))
-
-            self._watchdog_thread = threading.Thread(
-                target=watchdog, name="model-supervisor", daemon=True
-            )
-            self._watchdog_thread.start()
+        poll_interval = self.cfg["qwen"].get("supervisor_poll_seconds", 10)
+        enabled = self.cfg["qwen"].get("enabled", True)
+        self.watchdog.start(poll_interval=poll_interval, enabled=enabled)
 
     def require_cognitive_runtime(self) -> dict[str, Any]:
         """Audit installed Cordis graph and launch SDK before an interactive task."""
@@ -391,6 +368,7 @@ class Alfred:
         return diagnosis
 
     def listen(self) -> None:
+        """Start listening for wake-word and processing audio input."""
         return self.listener.listen()
 
     def close(self) -> None:
@@ -399,7 +377,7 @@ class Alfred:
             return
         self._closed = True
         self.admission.close()
-        self._watchdog_stop.set()
+        self.watchdog.stop()
         self.router._needle_cancel.set()
         self.session_manager.close()
         for component, action in (
@@ -411,14 +389,13 @@ class Alfred:
         ):
             try:
                 action()
-            except Exception:
-                LOG.exception("Could not fully stop %s", component)
-        if self._watchdog_thread and self._watchdog_thread.is_alive():
-            self._watchdog_thread.join(timeout=5)
+            except Exception as stop_error:
+                LOG.exception("Could not fully stop %s: %s", component, stop_error)
+        self.watchdog.join(timeout=5)
         threads = (
             self.scheduler.thread,
             self.scheduler.workflow_thread,
-            self._watchdog_thread,
+            self.watchdog.thread,
         )
         if any(t is not None and t.is_alive() for t in threads):
             LOG.warning(

@@ -21,6 +21,25 @@ Microphone → wake word → Whistle STT → Needle 3 tool router → validated 
 
 ## Quick start
 
+Requires Python 3.10+. Run `./install.sh` to set up all dependencies automatically.
+
+```bash
+git clone https://github.com/Siddharthgolecha/Alfred.git
+cd Alfred
+./install.sh          # guided interactive setup
+# or: ./install.sh --auto       for CI / headless
+# or: ./install.sh --service    to also register a systemd auto-start service
+alfred                # start listening — no flags required
+```
+
+On Windows, run `install.ps1` from PowerShell. Voice capture uses FFmpeg DirectShow; setup
+offers `winget` installation when it is available.
+
+For optional acoustic wake-word detection on Linux Python 3.12+, use
+`uv sync --extra wakeword` rather than `pip install -e '.[wakeword]'` to avoid
+upstream openWakeWord's unused TFLite dependency. If your active virtualenv
+is outside `.venv`, use `uv sync --active --extra wakeword`.
+
 ## Phase 2 planning and approvals
 
 Alfred includes schema-grounded Qwen planning and local approvals for sensitive commands. The integrated security design and CLI examples are documented in [Phase 2](docs/guides/approvals.md). These commands are available without microphone input: `--reason`, `--pending`, `--approve ID`, and `--reject ID`. Voice-only speech cannot approve a privileged action.

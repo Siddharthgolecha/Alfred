@@ -68,13 +68,13 @@ headless mode needs no microphone, no Cactus models and no Qwen:
 
 ```bash
 # Long-running scheduler
-alfred --config config.json --scheduler-only
+alfred --scheduler-only
 
 # Inspect every automation, including paused and cancelled, without loading models
-alfred --config config.json --automations
+alfred --automations
 
 # Run one scheduler cycle by hand
-alfred --config config.json --automation-tick
+alfred --automation-tick
 ```
 
 To keep it running in the background, install the scheduler service. See

@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 import threading
 import time
 from typing import Any
@@ -147,14 +148,17 @@ class ContextManager:
         # New DB files created by Store may be 0644 under default umask.
         path=Path(self.store.db.execute("PRAGMA database_list").fetchone()[2])
         meta=os.lstat(path)
-        if not stat.S_ISREG(meta.st_mode) or meta.st_uid!=os.getuid():
+        # Skip uid check on Windows (no getuid).
+        uid_ok = sys.platform == "win32" or meta.st_uid == os.getuid()
+        if not stat.S_ISREG(meta.st_mode) or not uid_ok:
             raise PermissionError("Context database must be an owned regular file")
         os.chmod(path, 0o600)
         for suffix in ("-wal","-shm"):
             sibling=Path(str(path)+suffix)
             if sibling.exists():
                 m=os.lstat(sibling)
-                if not stat.S_ISREG(m.st_mode) or m.st_uid!=os.getuid():
+                sib_uid_ok = sys.platform == "win32" or m.st_uid == os.getuid()
+                if not stat.S_ISREG(m.st_mode) or not sib_uid_ok:
                     raise PermissionError("Unsafe SQLite auxiliary file")
                 os.chmod(sibling,0o600)
 

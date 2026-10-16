@@ -79,7 +79,7 @@ guarantee that a microphone is physically present on every driver.
    playback but no microphone. If A2DP works but no `bluez_input.*` source appears, fix HFP/HSP
    support in your Bluetooth and audio-session configuration first. In `auto` mode Alfred
    switches the card to the headset profile with `pactl set-card-profile`.
-5. Run `alfred --config config.json --doctor`, then start Alfred.
+5. Run `alfred --doctor`, then start Alfred.
 
 Switching to HFP/HSP lowers playback quality compared with A2DP. This is normal.
 
@@ -95,7 +95,7 @@ recordings of your own speech and noise. `audio.end_silence_frames` and
 ```bash
 pactl -f json list sources
 pactl -f json list cards
-alfred --config config.json --doctor
+alfred --doctor
 echo $?    # 0: working microphone, 2: no valid input
 ```
 

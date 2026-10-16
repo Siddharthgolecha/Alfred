@@ -17,6 +17,8 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 
+from .platform_utils import terminate_process_group, kill_process_group, IS_WINDOWS
+
 # Import lazily to keep the existing request_json mock contract in models.py.
 LOG = logging.getLogger(__name__)
 
@@ -258,15 +260,22 @@ class ModelSupervisor:
         if self.backend == "ollama":
             url_parts = urlsplit(self.url)
             environment["OLLAMA_HOST"] = f"127.0.0.1:{url_parts.port}"
+        popen_kwargs: dict = dict(
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=None,  # set below
+            stderr=subprocess.STDOUT,
+        )
+        # start_new_session creates a private process group on POSIX so that
+        # SIGTERM/SIGKILL can target the whole group. Windows uses
+        # CREATE_NEW_PROCESS_GROUP instead (via creationflags).
+        if IS_WINDOWS:
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
         with open(log_file, "ab", buffering=0) as output:
-            self.process = subprocess.Popen(
-                command,
-                env=environment,
-                stdin=subprocess.DEVNULL,
-                stdout=output,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
+            popen_kwargs["stdout"] = output
+            self.process = subprocess.Popen(command, **popen_kwargs)
         self.started_here = True
         LOG.info("Started %s PID=%s log=%s", self.backend, self.process.pid, log_file)
 
@@ -313,26 +322,13 @@ class ModelSupervisor:
             if process is not None:
                 try:
                     if process.poll() is None:
-                        # Popen(start_new_session=True) creates a private process group.
-                        # A bare terminate() would leak backend worker descendants.
-                        try:
-                            if os.getpgid(process.pid) == process.pid:
-                                os.killpg(process.pid, signal.SIGTERM)
-                            else:
-                                process.terminate()
-                        except ProcessLookupError:
-                            pass
+                        # Use cross-platform helpers to signal the process group.
+                        terminate_process_group(process)
                         try:
                             process.wait(timeout=5)
                         except subprocess.TimeoutExpired:
                             LOG.warning("%s did not terminate; killing managed process group", self.backend)
-                            try:
-                                if os.getpgid(process.pid) == process.pid:
-                                    os.killpg(process.pid, signal.SIGKILL)
-                                else:
-                                    process.kill()
-                            except ProcessLookupError:
-                                pass
+                            kill_process_group(process)
                             process.wait(timeout=3)
                 except (OSError, subprocess.TimeoutExpired) as error:
                     LOG.warning("Could not fully stop managed %s: %s", self.backend, error)

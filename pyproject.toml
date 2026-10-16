@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "alfred-jetson"
 version = "0.1.0"
-description = "Offline-first Jetson voice agent using Whistle, Needle 3 and Qwen 3.5"
+description = "Offline-first voice agent using Whistle, Needle 3 and Qwen 3.5 (Linux/macOS)"
 requires-python = ">=3.10"
 dependencies = [
     "cactus-needle>=0.1",
@@ -18,6 +18,10 @@ dependencies = [
 test = ["pytest>=8"]
 wakeword = ["openwakeword>=0.6", "numpy>=1.24"]
 jetson = ["reportlab>=4.0", "qrcode[pil]>=7.4", "tzdata>=2024.1"]
+# macOS audio: install sox via Homebrew (`brew install sox`) or ffmpeg (`brew install ffmpeg`).
+# Linux audio: install pulseaudio-utils for pactl/parec (`apt install pulseaudio-utils`).
+# macOS TTS: built-in `say` command is used automatically; no extra package needed.
+# Linux TTS: install speech-dispatcher (`apt install speech-dispatcher`).
 docs = [
     "sphinx>=8",
     "myst-parser>=4",

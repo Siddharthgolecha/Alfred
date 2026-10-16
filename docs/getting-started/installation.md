@@ -1,11 +1,73 @@
 # Installation
 
-Install Alfred on the Jetson Orin Nano 8GB, then connect it to a local inference backend.
+Install Alfred on Linux, macOS, Windows x64 or Jetson Orin Nano, then connect it to a local inference backend.
 
 :::{note}
 Alfred is unit-tested offline but has not been validated on Jetson hardware. Treat the steps
 below as the intended procedure and verify each one on your board. See the
 [hardware checklist](hardware-setup.md#hardware-acceptance-checklist).
+:::
+
+## Scripted installation
+
+```bash
+git clone https://github.com/Siddharthgolecha/Alfred.git
+cd Alfred
+./install.sh
+```
+
+On Windows, use PowerShell from the cloned project directory:
+
+```powershell
+.\install.ps1
+```
+
+The guided terminal flow is compact and keeps its answers in the terminal history:
+
+```text
+▲  Alfred  guided setup
+› System check                 Linux aarch64 · Python 3.12
+› Microphone
+  ❯ Use the detected default
+    Configure later
+› Choose your local model server
+  ❯ Ollama · detected
+    LM Studio
+    llama.cpp
+    Configure later
+Setup review
+  Microphone   auto
+  Model server ollama
+  Model        qwen3.5:4b
+  Model pulls  offer if needed
+› Continue with these settings?  Yes
+```
+
+Use arrow keys and Enter in a compatible terminal, or pass `--plain` for numbered prompts.
+On an existing installation, choose **Quick setup** to reuse saved choices or **Customize**
+to review them again.
+
+The installer uses Python's standard library for its terminal interface. It guides first-time
+setup, checks the selected platform, and verifies the pinned Harness wheels before installation.
+Windows voice capture requires FFmpeg with DirectShow; Alfred offers `winget` setup when it is
+available. Allow microphone access in Windows Privacy settings. Installers do not claim voice
+readiness until `alfred --doctor` verifies a live microphone stream.
+
+| Flag | Purpose |
+|---|---|
+| *(none)* | Guided interactive setup |
+| `--auto` | Non-interactive / CI / headless |
+| `--service` | Also register a systemd auto-start service |
+| `--backend ollama` | Use Ollama (default) |
+| `--backend llamacpp` | Configure a local llama.cpp server or GGUF model |
+| `--skip-models` | Skip model cache download (air-gapped) |
+| `--no-update-check` | Compatibility flag; the installer does not run update checks |
+| `--wheelhouse PATH` | Require local Harness wheels (verified; no network fallback) |
+| `--plain` | Use numbered line prompts |
+| `--customize` | Reopen setup choices on an existing install |
+
+:::{note}
+`config.json` is optional — Alfred runs on built-in defaults without it. The wizard creates or safely updates it when you choose a microphone or inference backend.
 :::
 
 ## Requirements
@@ -18,14 +80,18 @@ below as the intended procedure and verify each one on your board. See the
 | Inference backend | One of llama.cpp, Ollama or LM Studio, serving a Qwen 3.5 model on loopback. See [Inference backends](../guides/inference-backends.md). |
 | Operating system user | A normal user. Never run Alfred as root. |
 
-## 1. System packages
+## Manual installation
+
+Use these steps if you prefer to set up Alfred without the install script, or to understand what the script does.
+
+### 1. System packages
 
 ```bash
 sudo apt update
 sudo apt install -y bluez pulseaudio-utils libasound2-dev python3-venv
 ```
 
-## 2. Python environment
+### 2. Python environment
 
 ```bash
 git clone https://github.com/Siddharthgolecha/Alfred.git
@@ -43,7 +109,7 @@ Optional extras:
 
 | Extra | Command | Purpose |
 |---|---|---|
-| `wakeword` | `uv sync --extra wakeword` (Linux, recommended), or `pip install -e '.[wakeword]'` (Python 3.10/3.11 only) | ONNX `openwakeword` and `numpy`, for [acoustic wake-word gating](../guides/wake-word.md#acoustic-gating). |
+| `wakeword` | `uv sync --extra wakeword` (Linux, recommended), or `pip install -e '.[wakeword]'` (Python 3.10/3.11 only) | `openwakeword` and `numpy`, for [acoustic wake-word gating](../guides/wake-word.md#acoustic-gating). |
 | `test` | `pip install -e '.[test]'` | `pytest`, an optional runner. CI and these docs use `python -m unittest`. |
 | `docs` | `pip install -e '.[docs]'` | Sphinx toolchain, to [build these docs](../development/documentation.md). |
 
@@ -89,11 +155,12 @@ python scripts/install_harness.py --wheelhouse /path/to/wheels --verify
 python scripts/install_harness.py --wheelhouse /path/to/wheels --install
 ```
 
-Pass `--platform linux_x86_64` or `--platform linux_aarch64` to choose the runtime wheel. By
-default it is detected from the machine. `--install` refuses a wheel for another platform. The
+Pass `--platform linux_x86_64`, `linux_aarch64`, `macos_x86_64`, `macos_aarch64`, or
+`windows_x86_64` to choose the runtime wheel. By default it is detected from the machine.
+`--install` refuses a wheel for another platform. The
 script exits with status 2 and prints `Harness wheelhouse verification failed` on any error.
 
-## 3. Configuration
+### 3. Configuration
 
 ```bash
 cp config.example.json config.json
@@ -107,7 +174,7 @@ key is optional; see the [configuration reference](../reference/configuration.md
 Qwen model and a larger `max_tokens`. Read it before relying on it.
 :::
 
-## 4. Model caches
+### 4. Model caches
 
 Populate the Cactus caches while you still have network access:
 
@@ -120,7 +187,7 @@ The Qwen model comes from your inference backend. For llama.cpp's `-hf` form, th
 downloads and caches it. To run strictly offline, set `qwen.model_path` to a local GGUF file
 instead.
 
-## 5. Build llama.cpp (optional)
+### 5. Build llama.cpp (optional)
 
 If you use llama.cpp on the Orin with CUDA, a typical native build is:
 
@@ -134,11 +201,11 @@ context of 4096 and parallelism 1, and lower `qwen.gpu_layers` if the shared 8 G
 becomes constrained. Alfred does not change the memory settings of a server that is already
 running.
 
-## 6. Verify
+### 6. Verify
 
 ```bash
 python -m unittest discover -s tests -v    # no hardware needed
-alfred --config config.json --doctor
+alfred --doctor
 ```
 
 `--doctor` exits with status 2 if there is no usable microphone or if the Harness audit fails.

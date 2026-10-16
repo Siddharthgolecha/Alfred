@@ -123,7 +123,7 @@ Use disk encryption if that matters. The API key passed to the SDK is the consta
 ## Checking it
 
 ```bash
-python -m alfred --config config.json --doctor
+alfred --doctor
 ```
 
 prints the plugin audit result, then, if the backend is ready, starts a real SDK child and

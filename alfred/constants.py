@@ -5,6 +5,7 @@ patterns live here. Import from this module instead of repeating raw literals.
 """
 from __future__ import annotations
 
+import enum
 import re
 
 
@@ -245,6 +246,10 @@ class Patterns:
     )
     # Explicit workflow mention.
     EXPLICIT_WORKFLOW: re.Pattern[str] = re.compile(r"\bworkflow\b", re.I)
+    # Explicit workflow-save intent (save/create/remember/store … workflow).
+    WORKFLOW_SAVE_REQUEST: re.Pattern[str] = re.compile(
+        r"\b(save|create|remember|store)\b.*\bworkflow\b", re.I
+    )
     # Multi-step chaining keywords.
     MULTISTEP: re.Pattern[str] = re.compile(
         r"\b(?:then|afterwards|after that|next|depending on|based on)\b", re.I
@@ -286,3 +291,56 @@ class Patterns:
     MEETING_OWNER: re.Pattern[str] = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
     # Generic meeting entity ID.
     MEETING_ENTITY_ID: re.Pattern[str] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+# ---------------------------------------------------------------------------
+# Routing decision enumerations
+# ---------------------------------------------------------------------------
+
+class RouteType(str, enum.Enum):
+    """Canonical routing decisions made by Needle 3 or the local fast-path.
+
+    Using ``str`` as a mixin keeps the values JSON-serialisable and backward-
+    compatible with the string literals already stored in ``Decision.route``.
+    """
+
+    #: Tool calls routed directly to System 2 for immediate execution.
+    DIRECT = "direct"
+    #: No Needle tool calls; request delegated to Qwen reasoning.
+    DELEGATE = "delegate"
+    #: Read-only fast path (no Needle calls at all).
+    READONLY = "readonly"
+    #: Needle was uncertain; escalated to Qwen read-only.
+    UNCERTAIN = "uncertain"
+    #: Request rejected before execution.
+    REJECTED = "rejected"
+    #: Shutdown / session-end command.
+    SHUTDOWN = "shutdown"
+
+
+class LoopOutcomeType(str, enum.Enum):
+    """Stop reasons produced by :class:`~alfred.cognitive.needle_loop.NeedleAgentLoop`.
+
+    Values match the ``stop`` field of :class:`~alfred.cognitive.needle_loop.LoopOutcome`
+    exactly so existing comparisons like ``loop_outcome.stop == "completed"``
+    remain valid whether the caller uses the string literal or the enum member.
+    """
+
+    #: All calls succeeded and the loop ran to natural completion.
+    COMPLETED = "completed"
+    #: A consequential (write) call was accepted; policy hand-off to System 2.
+    PROTECTED = "protected"
+    #: Some read-only calls succeeded but the loop hit the decision budget.
+    PARTIAL = "partial"
+    #: Needle was uncertain on a follow-up decision.
+    UNCERTAIN = "uncertain"
+    #: An unsafe or structurally invalid response was received.
+    UNSAFE = "unsafe"
+    #: A duplicate tool fingerprint was detected.
+    REPEATED = "repeated"
+    #: The per-task decision or tool budget was exhausted.
+    BUDGET = "budget"
+    #: The task was cancelled before the next tool call.
+    CANCELLED = "cancelled"
+    #: Feedback inference failed after a successful read.
+    FEEDBACK_UNAVAILABLE = "feedback_unavailable"

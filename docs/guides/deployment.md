@@ -72,7 +72,7 @@ PID file, port scan or `pkill`. A second instance of the same role refuses to st
 
 ## Checks before relying on it
 
-1. `alfred --config config.json --doctor` exits 0.
+1. `alfred --doctor` exits 0.
 2. `systemctl --user status alfred` shows the service active.
 3. Reboot or restart, then confirm reminders and schedules are still listed
    (`alfred --automations`).
