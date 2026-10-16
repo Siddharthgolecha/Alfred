@@ -57,6 +57,18 @@ class InstallerUITests(unittest.TestCase):
 
 
 class ConfigPersistenceTests(unittest.TestCase):
+    def test_project_verification_reads_installed_metadata_outside_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "checkout"
+            root.mkdir()
+            expected = {"version": "0.1.0", "direct": json.dumps({
+                "url": root.resolve().as_uri(), "dir_info": {"editable": True}})}
+            result = subprocess.CompletedProcess([], 0, stdout=json.dumps(expected), stderr="")
+            with patch.object(core, "ROOT", root), \
+                 patch.object(core.subprocess, "run", return_value=result) as run_probe:
+                self.assertTrue(core.Wizard.__new__(core.Wizard)._project_ready(Path("python")))
+            self.assertEqual(run_probe.call_args.kwargs["cwd"], root.parent)
+
     def test_config_is_atomic_preserves_unrelated_keys_and_keeps_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "folder with spaces" / "config.json"

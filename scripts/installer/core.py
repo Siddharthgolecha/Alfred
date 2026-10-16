@@ -824,7 +824,12 @@ class Wizard:
                  "print(json.dumps({'version':d.version,'direct':d.read_text('direct_url.json')}))")
         try:
             result = subprocess.run([str(python), "-c", probe], capture_output=True,
-                                    text=True, timeout=8, check=False)
+                                    text=True, timeout=8, check=False,
+                                    # The checkout may contain source-tree egg-info. If
+                                    # this probe runs from ROOT, importlib.metadata can
+                                    # select that metadata ahead of the installed
+                                    # editable distribution and miss direct_url.json.
+                                    cwd=ROOT.parent)
             value = json.loads(result.stdout) if result.returncode == 0 else {}
             direct = json.loads(value["direct"]) if value.get("direct") else {}
             return (value.get("version") == "0.1.0"
