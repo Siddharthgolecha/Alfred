@@ -12,6 +12,21 @@ Numbers such as `#27` refer to GitHub pull requests and issues.
 
 ### Added
 
+- Hardcoded `minutes` voice command in `alfred/router.py`: saying "Alfred minutes",
+  "meeting minutes", "start minutes", or "minutes of the meeting" now bypasses Needle and
+  directly queues the approved `meeting_minutes` workflow. The workflow must be drafted and
+  approved before the command will succeed. Error messages guide the operator through the
+  setup steps.
+- `--minutes` CLI flag: equivalent to `alfred --workflow-start meeting_minutes` but with a
+  shorter invocation. Useful for scripting and local testing without voice.
+
+### Fixed
+
+- "Alfred minutes" voice command did not trigger the Minutes of Meeting workflow because
+  Needle could not reliably route the short phrase to `run_workflow`. A hardcoded pattern
+  match now guarantees the command reaches the engine regardless of model confidence.
+
+
 - Sphinx documentation in `docs/`, organised by topic: getting started, guides, architecture
   with diagrams and decision records, reference, and development. Built with MyST, Furo and
   Mermaid.

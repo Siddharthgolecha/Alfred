@@ -147,6 +147,8 @@ def _main(argv=None) -> int:
                        help="Locally approve and execute a proposal once")
     group.add_argument("--reject", type=int, metavar="ID",
                        help="Locally reject a proposal")
+    group.add_argument("--minutes", action="store_true",
+                       help="Directly queue the approved 'meeting_minutes' workflow and exit")
     group.add_argument("--workflow-draft", metavar="JSON_FILE",
                        help="Validate and save a local workflow graph as unapproved draft")
     group.add_argument("--workflow-approve", metavar="NAME",
@@ -202,6 +204,7 @@ def _main(argv=None) -> int:
             args.skills or args.doctor or args.ensure_backend or args.scheduler_only
             or args.automations or args.automation_tick or args.pending
             or args.approve is not None or args.reject is not None
+            or args.minutes
             or args.workflow_draft or args.workflow_approve or args.workflow_list
             or args.workflow_start or args.workflow_runs
             or args.workflow_status is not None or args.workflow_cancel is not None
@@ -247,6 +250,14 @@ def _main(argv=None) -> int:
         supervisor = LlamaSupervisor(config["qwen"], logs)
         supervisor.ensure_running()
         print(json.dumps(supervisor.status()))
+        return 0
+    if args.minutes:
+        app = Alfred(config, load_models=False)
+        try:
+            result = app.tools.workflow_engine.start("meeting_minutes")
+            print(json.dumps(result, indent=2, default=str))
+        finally:
+            app.close()
         return 0
     if (args.workflow_draft or args.workflow_approve or args.workflow_list
             or args.workflow_start or args.workflow_runs

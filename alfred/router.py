@@ -40,6 +40,21 @@ from .system2 import HandoffConfig, System2, VerifiedRead, parse_plan
 LOG = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Hardcoded command patterns
+# ---------------------------------------------------------------------------
+
+# "Alfred minutes" / "start minutes" / "meeting minutes" — bypasses Needle and
+# directly queues the approved `meeting_minutes` workflow.  The workflow must
+# have been drafted and approved via `--workflow-draft` / `--workflow-approve`
+# before this command will succeed.
+_MINUTES = re.compile(
+    r"^(?:start\s+)?(?:(?:the\s+)?meeting\s+)?minutes(?:\s+of\s+(?:the\s+)?meeting)?[.!?]*$",
+    re.IGNORECASE,
+)
+
+MEETING_MINUTES_WORKFLOW = "meeting_minutes"
+
+# ---------------------------------------------------------------------------
 # GPU-status routing helpers
 # ---------------------------------------------------------------------------
 
@@ -351,8 +366,40 @@ class RequestRouter:
             self.session_manager.context.finish_task(task.session_id, task.task_id)
             self.session_manager.clear_active_task()
 
+    def _start_minutes_workflow(self, task: TaskEnvelope) -> None:
+        """Hardcoded fast-path: queue the meeting_minutes workflow without Needle."""
+        LOG.info("Hardcoded minutes command: starting %r workflow", MEETING_MINUTES_WORKFLOW)
+        self.session_manager.sessions.append(
+            task.task_id, Decision(engine="local", route="direct", call_count=1)
+        )
+        try:
+            result = self.tools.workflow_engine.start(MEETING_MINUTES_WORKFLOW)
+        except ValueError as exc:
+            self.session_manager.sessions.append(
+                task.task_id, Completion(outcome="failed", reason="exception")
+            )
+            self.feedback.tell(
+                f"Could not start minutes workflow: {exc}. "
+                "Run: alfred --workflow-draft minutes.json && alfred --workflow-approve meeting_minutes"
+            )
+            return
+        self.session_manager.sessions.append(
+            task.task_id,
+            Observation(tool="run_workflow", outcome="returned"),
+        )
+        self.session_manager.sessions.append(
+            task.task_id, Completion(outcome="completed", reason="executed")
+        )
+        self.store.event("workflow_queued", {"name": MEETING_MINUTES_WORKFLOW, "run_id": result.get("run_id")})
+        self.feedback.tell(json.dumps(result, default=str))
+
     def _process_authorized_task(self, task: TaskEnvelope, text: str) -> None:
         self.store.event("utterance", {"length": len(text)})
+        # Hardcoded command: "minutes" / "meeting minutes" / "start minutes" bypass
+        # Needle and directly queue the approved meeting_minutes workflow.
+        if _MINUTES.fullmatch(text.strip()):
+            self._start_minutes_workflow(task)
+            return
         if self.session_manager.context.enabled and re.fullmatch(
             r"(?:clear|forget) (?:this|current) session" r"(?: context)?[.!?]*", text, re.I
         ):

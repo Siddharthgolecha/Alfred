@@ -120,6 +120,30 @@ responsive. `--scheduler-only` does this without any microphone or model.
 
 ### Starting from voice
 
+#### Hardcoded command: minutes of meeting
+
+Saying **"Alfred minutes"**, **"meeting minutes"**, **"start minutes"**, or
+**"minutes of the meeting"** (with or without trailing punctuation) **bypasses Needle entirely**
+and directly queues the approved `meeting_minutes` workflow. This is a hardcoded fast-path added
+because the short phrase is too ambiguous for reliable Needle routing.
+
+You must draft and approve the workflow before the command will work:
+
+```bash
+alfred --workflow-draft meeting_minutes.json   # validate and save as draft
+alfred --workflow-approve meeting_minutes       # approve it
+
+# Then any of the following will queue a run:
+alfred --minutes                               # CLI shortcut
+alfred --text "minutes"                        # via --text flag
+# or just say "Alfred minutes" in voice mode
+```
+
+If the workflow is missing or not yet approved, Alfred speaks an error message and prints
+setup instructions.
+
+#### Other workflows
+
 Saying "run gpu_health workflow" can make Needle propose `run_workflow`. That only **stages an
 approval** carrying the graph digest. Run `alfred --pending`, then `alfred --approve ID`. Alfred
 re-checks the digest before the run is queued, and a changed graph invalidates the request. See

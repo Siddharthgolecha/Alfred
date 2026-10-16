@@ -68,6 +68,7 @@ See the [Workflows guide](../guides/workflows.md). All of these print JSON.
 
 | Operation | Meaning |
 |---|---|
+| `--minutes` | Directly queue the approved `meeting_minutes` workflow and exit. Equivalent to `--workflow-start meeting_minutes`. Prints the queued run as JSON. |
 | `--workflow-draft JSON_FILE` | Validate and save a graph as an **unapproved** draft. The file must be local and at most 40 000 bytes. |
 | `--workflow-approve NAME` | Approve the validated graph version. |
 | `--workflow-list` | List definitions and their approval state. |
