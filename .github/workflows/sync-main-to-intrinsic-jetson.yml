@@ -81,7 +81,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install "reportlab>=4" "qrcode[pil]>=7.4"
+          # Merged tree requires both Alfred's typed models/tests and Jetson extras.
+          python -m pip install "pydantic>=2.12,<3" "pytest>=8" "reportlab>=4" "qrcode[pil]>=7.4"
           python -m compileall -q alfred tests
           python -m unittest discover -s tests -v
 
@@ -98,7 +99,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install "reportlab>=4" "qrcode[pil]>=7.4"
+          # Merged tree requires both Alfred's typed models/tests and Jetson extras.
+          python -m pip install "pydantic>=2.12,<3" "pytest>=8" "reportlab>=4" "qrcode[pil]>=7.4"
           python -m compileall -q alfred tests
           python -m unittest discover -s tests -v
 

@@ -23,23 +23,23 @@ Microphone → wake word → Whistle STT → Needle 3 tool router → validated 
 
 ## Phase 2 planning and approvals
 
-Alfred includes schema-grounded Qwen planning and local approvals for sensitive commands. The integrated security design and CLI examples are documented in [Phase 2](docs/PHASE2.md). These commands are available without microphone input: `--reason`, `--pending`, `--approve ID`, and `--reject ID`. Voice-only speech cannot approve a privileged action.
+Alfred includes schema-grounded Qwen planning and local approvals for sensitive commands. The integrated security design and CLI examples are documented in [Phase 2](docs/guides/approvals.md). These commands are available without microphone input: `--reason`, `--pending`, `--approve ID`, and `--reject ID`. Voice-only speech cannot approve a privileged action.
 
 **Qwen planner troubleshooting (issue #24):** On llama.cpp, Alfred requests non-thinking JSON output because some Qwen3.5 chat templates produce incomplete or schema-breaking plans when thinking consumes the output budget. A malformed plan gets one generation-only retry. If neither response matches the schema, Alfred reports that no action was taken; it will **not** claim a schedule was saved or run a partially parsed step. Test the local endpoint with `python -m alfred --config config.json --reason "Schedule a GPU status check every 10 minutes"`. If it repeatedly fails, verify the model/chat-template compatibility, inspect local backend logs, and check `qwen.max_tokens`. Sensitive schedules still require `--approve ID`; a vague request such as "create a schedule" needs an action and interval.
 
 ## Phase 3 — automations and typing-style speech
 
-Phase 3 adds [persistent absolute/daily reminders and GPU-temperature watches](docs/PHASE3.md), with SQLite notification delivery and a headless `--scheduler-only` service that works without a microphone. Sensitive recurring changes still need local approval. Run `python -m alfred --automations` to inspect jobs.
+Phase 3 adds [persistent absolute/daily reminders and GPU-temperature watches](docs/guides/automations.md), with SQLite notification delivery and a headless `--scheduler-only` service that works without a microphone. Sensitive recurring changes still need local approval. Run `python -m alfred --automations` to inspect jobs.
 
 Whistle now updates **one terminal line like typing** as new speech arrives. Corrections revise only the changed suffix. It does not print a new line for every partial phrase; the final transcript is committed and used for tool execution. Non-TTY logs only print the final transcript.
 
 ## Phase 4 — Durable workflow graphs
 
-Phase 4 introduces [approved, persistent workflow DAGs](docs/PHASE4.md), conditional branches, bounded read-only retries, safe cancellation and restart-aware execution. Use `--workflow-draft` and `--workflow-approve` locally to register approved graphs, `--workflow-start` to run them, and `--workflow-status` to inspect results. Read-only graphs can also run on recurring schedules. Voice requests to run these workflows still require Phase 2 local approval. The `intrinsic_jetson` branch remains separate.
+Phase 4 introduces [approved, persistent workflow DAGs](docs/guides/workflows.md), conditional branches, bounded read-only retries, safe cancellation and restart-aware execution. Use `--workflow-draft` and `--workflow-approve` locally to register approved graphs, `--workflow-start` to run them, and `--workflow-status` to inspect results. Read-only graphs can also run on recurring schedules. Voice requests to run these workflows still require Phase 2 local approval. The `intrinsic_jetson` branch remains separate.
 
 ## Phase 5 — Maestaris orchestration and DeepSeek Harness roadmap
 
-Phase 5 is organized as [detailed, dependency-linked GitHub Issues](https://github.com/Siddharthgolecha/Alfred/issues/11), with Maestaris Worker A implementing one ready issue at a time and a separate reviewer assessing PR diffs and CI before merging. The workflow follows `AGENTS.md` and `coordination/maestaris.yaml`. See [Phase 5 Maestaris and main-to-Jetson sync](docs/PHASE5_MAESTARIS.md).
+Phase 5 is organized as [detailed, dependency-linked GitHub Issues](https://github.com/Siddharthgolecha/Alfred/issues/11), with Maestaris Worker A implementing one ready issue at a time and a separate reviewer assessing PR diffs and CI before merging. The workflow follows `AGENTS.md` and `coordination/maestaris.yaml`. See [Phase 5 Maestaris and main-to-Jetson sync](docs/development/maestaris.md).
 
 Every new `main` commit triggers a **non-destructive tested merge** into `intrinsic_jetson`. Merge conflicts and failing tests create an issue rather than overwriting branch-specific code.
 
@@ -82,6 +82,11 @@ python -m alfred --config config.json --doctor                  # microphone, ba
 python -m alfred --config config.json --text "Show my system status"
 python -m alfred --config config.json                           # listen continuously
 ```
+
+For optional acoustic wake-word detection on Linux Python 3.12+, use
+`uv sync --extra wakeword` rather than `pip install -e '.[wakeword]'` to avoid
+upstream openWakeWord's unused TFLite dependency. If your active virtualenv
+is outside `.venv`, use `uv sync --active --extra wakeword`.
 
 Full instructions: [Installation](docs/getting-started/installation.md) and
 [Quickstart](docs/getting-started/quickstart.md).

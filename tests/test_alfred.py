@@ -141,7 +141,7 @@ class ModelTests(unittest.TestCase):
             sup=LlamaSupervisor(cfg,temp)
             with patch.object(sup,"health",return_value="ready"), \
                  patch.object(sup,"model_id",return_value="Qwen3.5-4B-Q4_K_M.gguf"), \
-                 patch("alfred.models.subprocess.Popen") as spawn:
+                 patch("alfred.backends.subprocess.Popen") as spawn:
                 self.assertTrue(sup.ensure_running())
                 spawn.assert_not_called()
 
@@ -151,7 +151,7 @@ class ModelTests(unittest.TestCase):
             sup=LlamaSupervisor(cfg,temp)
             with patch.object(sup,"health",return_value="unhealthy"), \
                  patch.object(sup,"port_open",return_value=True), \
-                 patch("alfred.models.subprocess.Popen") as spawn:
+                 patch("alfred.backends.subprocess.Popen") as spawn:
                 with self.assertRaises(RuntimeError):
                     sup.ensure_running()
                 spawn.assert_not_called()
@@ -181,8 +181,8 @@ class ModelTests(unittest.TestCase):
             with patch.object(sup,"health",side_effect=["down","ready"]), \
                  patch.object(sup,"port_open",return_value=False), \
                  patch.object(sup,"verify_model",return_value="Qwen3.5-4B"), \
-                 patch("alfred.models.shutil.which",return_value="/fake/llama-server"), \
-                 patch("alfred.models.subprocess.Popen",return_value=proc) as spawn:
+                 patch("alfred.backends.shutil.which",return_value="/fake/llama-server"), \
+                 patch("alfred.backends.subprocess.Popen",return_value=proc) as spawn:
                 self.assertTrue(sup.ensure_running())
                 self.assertEqual(sup.process.pid,12345)
                 self.assertTrue(sup.started_here)
