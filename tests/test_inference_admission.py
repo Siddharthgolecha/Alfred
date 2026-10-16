@@ -48,12 +48,29 @@ class AdmissionUnitTests(unittest.TestCase):
                  {"available_mib":1000,"swap_used_mib":2000,"cpu_load_per_core":.2},
                  {"available_mib":1000,"swap_used_mib":0,"cpu_load_per_core":5},
                  {"available_mib":None,"swap_used_mib":0,"cpu_load_per_core":.2})
-        for sample in samples:
-            a=gate(sample=sample)
-            with self.subTest(sample=sample),self.assertRaises(AdmissionRejected):
-                with a.claim("qwen"):
+        with patch("alfred.inference_admission.IS_MACOS",False):
+            for sample in samples:
+                a=gate(sample=sample)
+                with self.subTest(sample=sample),self.assertRaises(AdmissionRejected):
+                    with a.claim("qwen"):
+                        pass
+                self.assertEqual(a.snapshot()["granted"],0)
+
+    def test_macos_historical_swap_does_not_override_available_memory(self):
+        sample={"available_mib":11000,"swap_used_mib":8000,
+                "cpu_load_per_core":.4}
+        with patch("alfred.inference_admission.IS_MACOS",True):
+            with gate(sample=sample).claim("harness"):
+                pass
+
+    def test_pressure_rejection_reports_measured_reason(self):
+        sample={"available_mib":300,"swap_used_mib":8000,
+                "cpu_load_per_core":.4}
+        with patch("alfred.inference_admission.IS_MACOS",True):
+            with self.assertRaisesRegex(AdmissionRejected,
+                                        "available memory 300 MiB is below 512 MiB"):
+                with gate(sample=sample).claim("harness"):
                     pass
-            self.assertEqual(a.snapshot()["granted"],0)
 
     def test_priority_whistle_beats_waiting_qwen(self):
         a=gate(wait=700)
