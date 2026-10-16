@@ -415,6 +415,7 @@ class ConfigPersistenceTests(unittest.TestCase):
             self.assertTrue(any("verified" in call.args[0].lower()
                                 for call in ui.ok.call_args_list))
 
+    @unittest.skipIf(IS_WINDOWS, "systemd user services are Linux-only")
     def test_systemd_service_quotes_paths_and_includes_selected_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
