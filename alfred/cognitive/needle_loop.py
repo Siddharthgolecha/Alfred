@@ -7,14 +7,13 @@ read-only results can be fed into the same agent via Cactus.route_feedback().
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 import math
-import re
 import time
 
 from .contracts import Decision, Observation
 from ..system2 import preflight
 from ..runtime import validate
+from ..constants import Limits, Patterns, TTL
 
 # Never feed commands, transcripts, user/tool strings or arbitrary JSON to
 # Needle as observations. A number cannot carry a prompt injection.
@@ -24,10 +23,9 @@ METRICS = frozenset({
 READONLY = frozenset({
     "get_gpu_status", "get_system_status", "list_services",
 })
-PRONOUN = re.compile(r"^\s*(?:check|show|read|get)\s+(?:it|that)(?:\s+again)?\s*[.!?]*\s*$", re.I)
-MULTISTEP = re.compile(r"\b(?:then|afterwards|after that|next|depending on|based on)\b", re.I)
-GPU_TEMP = re.compile(r"\b(?:gpu|graphics\s+(?:card|processor))\b.*\btemp(?:erature)?\b|"
-                      r"\btemp(?:erature)?\b.*\b(?:gpu|graphics\s+(?:card|processor))\b", re.I)
+PRONOUN = Patterns.PRONOUN_REF
+MULTISTEP = Patterns.MULTISTEP
+GPU_TEMP = Patterns.GPU_TEMP
 
 
 class ContextUnavailable(ValueError):
@@ -52,8 +50,8 @@ def _arguments(call):
 
 
 def _fingerprint(call):
-    return json.dumps({"name": call["name"], "arguments": _arguments(call)},
-                      sort_keys=True, separators=(",", ":"), allow_nan=False)
+    from ..validators import to_compact_json
+    return to_compact_json({"name": call["name"], "arguments": _arguments(call)})
 
 
 def _bounded_metrics(value):
@@ -70,11 +68,12 @@ def _bounded_metrics(value):
     return safe
 
 
-def _feedback_metrics(tool, value):
+def _feedback_metrics(tool: str, value: object) -> dict:
+    """Return bounded scalar metrics for Needle feedback; never raw text."""
     if tool == "list_services":
         # The local registry returns a mapping of service name -> status. The
         # model only learns an integer count, never text from service responses.
-        if type(value) is not dict or len(value) > 32:
+        if type(value) is not dict or len(value) > Limits.MAX_SERVICES:
             raise ValueError("Unsafe service list result")
         return {"service_count": len(value)}
     if tool not in ("get_gpu_status", "get_system_status"):
@@ -84,12 +83,12 @@ def _feedback_metrics(tool, value):
 
 class SessionSlots:
     """Short-lived, unambiguous and purely local *verified* GPU-temp referents."""
-    def __init__(self, ttl_seconds=120, clock=time.monotonic):
-        if type(ttl_seconds) is not int or not 1 <= ttl_seconds <= 300:
+    def __init__(self, ttl_seconds: int = TTL.NEEDLE_SLOT_DEFAULT, clock=time.monotonic):
+        if type(ttl_seconds) is not int or not TTL.NEEDLE_SLOT_MIN <= ttl_seconds <= TTL.NEEDLE_SLOT_MAX:
             raise ValueError("Invalid session slot TTL")
         self.ttl = ttl_seconds
         self.clock = clock
-        self._slots = {}
+        self._slots: dict[str, object] = {}
 
     def clear(self, session_id=None):
         if session_id is None:
@@ -117,7 +116,7 @@ class SessionSlots:
                 and type(result.get("available")) is bool and result["available"]
                 and type(result.get("gpu_temp_c")) in (int, float)
                 and math.isfinite(result["gpu_temp_c"])
-                and -50 <= result["gpu_temp_c"] <= 150):
+                and Limits.GPU_TEMP_MIN_C <= result["gpu_temp_c"] <= Limits.GPU_TEMP_MAX_C):
             self._slots[session_id] = ("gpu_temperature", self.clock())
 
 
@@ -125,12 +124,12 @@ class NeedleAgentLoop:
     """One bounded task. Consequential calls stop and remain System2-owned."""
 
     def __init__(self, system2, feedback, ledger=None, task_id=None,
-                 *, confidence_floor=0.7, max_decisions=3, max_tools=3,
-                 cancelled=None):
-        if type(max_decisions) is not int or not 1 <= max_decisions <= 3:
-            raise ValueError("needle decisions must be 1..3")
-        if type(max_tools) is not int or not 1 <= max_tools <= 3:
-            raise ValueError("needle tool calls must be 1..3")
+                 *, confidence_floor=0.7, max_decisions: int = Limits.NEEDLE_MAX_DECISIONS,
+                 max_tools: int = Limits.NEEDLE_MAX_TOOLS, cancelled=None):
+        if type(max_decisions) is not int or not 1 <= max_decisions <= Limits.NEEDLE_MAX_DECISIONS:
+            raise ValueError(f"needle decisions must be 1..{Limits.NEEDLE_MAX_DECISIONS}")
+        if type(max_tools) is not int or not 1 <= max_tools <= Limits.NEEDLE_MAX_TOOLS:
+            raise ValueError(f"needle tool calls must be 1..{Limits.NEEDLE_MAX_TOOLS}")
         if (type(confidence_floor) not in (float, int)
                 or not math.isfinite(confidence_floor) or not 0 < confidence_floor <= 1):
             raise ValueError("invalid confidence floor")
@@ -192,8 +191,12 @@ class NeedleAgentLoop:
                 safe_confidence = (float(confidence) if type(confidence) in (int, float)
                                    and math.isfinite(confidence) and 0 <= confidence <= 1
                                    else None)
-                self._record(Decision("needle3", "direct" if calls else "readonly",
-                                      min(len(calls), 50), safe_confidence))
+                self._record(Decision(
+                    engine="needle3",
+                    route="direct" if calls else "readonly",
+                    call_count=min(len(calls), 50),
+                    confidence=safe_confidence,
+                ))
             if response.get("suppressed_calls") or (
                 isinstance(response.get("validation"), dict)
                 and response["validation"].get("ungrounded")
@@ -259,7 +262,7 @@ class NeedleAgentLoop:
                 return self._stop("unsafe", accepted, observed, outputs)
             outputs.extend(batch)
             for call in calls:
-                self._record(Observation(call["name"], "returned"))
+                self._record(Observation(tool=call["name"], outcome="returned"))
                 observed.append(call["name"])
             if not permit_feedback or not all(call["name"] in READONLY for call in calls):
                 # Safe but non-chainable listings execute once through System2
@@ -288,9 +291,9 @@ class NeedleAgentLoop:
             except ValueError:
                 return self._stop("unsafe", accepted, observed, outputs)
             try:
-                response = self.feedback(json.dumps(feedback, sort_keys=True,
-                                                   separators=(",", ":")))
-            except Exception:
+                from ..validators import to_compact_json
+                response = self.feedback(to_compact_json(feedback))
+            except (OSError, RuntimeError, ValueError, TypeError):
                 # Inference may crash AFTER the read returned. Keep that
                 # observation visible, do not replay or attempt an action.
                 outcome = self._stop("feedback_unavailable", accepted, observed, outputs)

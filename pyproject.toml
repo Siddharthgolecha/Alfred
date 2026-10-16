@@ -18,6 +18,12 @@ dependencies = [
 test = ["pytest>=8"]
 wakeword = ["openwakeword>=0.6", "numpy>=1.24"]
 jetson = ["reportlab>=4.0", "qrcode[pil]>=7.4", "tzdata>=2024.1"]
+docs = [
+    "sphinx>=8",
+    "myst-parser>=4",
+    "furo>=2024.8",
+    "sphinxcontrib-mermaid>=1.0",
+]
 
 [project.scripts]
 alfred = "alfred.app:main"

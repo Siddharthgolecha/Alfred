@@ -134,29 +134,29 @@ class SourceClassificationTests(unittest.TestCase):
 
 class CLIFailFastTests(unittest.TestCase):
     def test_voice_startup_exits_nonzero_before_cactus_loaded(self):
-        with patch("alfred.app.AudioManager.ensure_input",
+        with patch("alfred.cli.AudioManager.ensure_input",
                    side_effect=AudioUnavailableError("No headset connected")), \
-             patch("alfred.app.Alfred") as model_start:
+             patch("alfred.cli.Alfred") as model_start:
             result=main(["--config","/does/not/exist.json"])
         self.assertEqual(result,2)
         model_start.assert_not_called()
 
     def test_text_mode_does_not_require_mic(self):
-        with patch("alfred.app.Alfred") as app, \
-             patch("alfred.app.AudioManager.ensure_input") as check:
+        with patch("alfred.cli.Alfred") as app, \
+             patch("alfred.cli.AudioManager.ensure_input") as check:
             result=main(["--text","GPU status","--config","/does/not/exist.json"])
         self.assertEqual(result,0)
         check.assert_not_called()
         app.return_value.handle_text.assert_called_once_with("GPU status")
 
     def test_doctor_reports_failed_detection_and_exits_nonzero(self):
-        with patch("alfred.app.AudioManager.diagnostics",return_value=[
+        with patch("alfred.cli.AudioManager.diagnostics",return_value=[
              {"name":BUILTIN["name"],"description":"Built-in Audio",
               "eligible":False,"reason":"no confirmed input port"}]), \
-             patch("alfred.app.AudioManager.ensure_input",
+             patch("alfred.cli.AudioManager.ensure_input",
                    side_effect=AudioUnavailableError("no mic")), \
-             patch("alfred.app.pactl_json",return_value=[]), \
-             patch("alfred.app.LlamaSupervisor") as supervisor, \
+             patch("alfred.cli.pactl_json",return_value=[]), \
+             patch("alfred.cli.LlamaSupervisor") as supervisor, \
              patch("builtins.print") as output:
             supervisor.return_value.status.return_value={"health":"down"}
             result=main(["--doctor","--config","/does/not/exist.json"])
@@ -166,11 +166,11 @@ class CLIFailFastTests(unittest.TestCase):
         self.assertIn("MICROPHONE NOT CONNECTED",text)
 
     def test_doctor_success_requires_actual_capture(self):
-        with patch("alfred.app.AudioManager.diagnostics",return_value=[]), \
-             patch("alfred.app.AudioManager.ensure_input",return_value=USB["name"]), \
-             patch("alfred.app.pactl_json",return_value=[]), \
-             patch("alfred.app.LlamaSupervisor") as supervisor, \
-             patch("alfred.app.LocalHarness") as harness:
+        with patch("alfred.cli.AudioManager.diagnostics",return_value=[]), \
+             patch("alfred.cli.AudioManager.ensure_input",return_value=USB["name"]), \
+             patch("alfred.cli.pactl_json",return_value=[]), \
+             patch("alfred.cli.LlamaSupervisor") as supervisor, \
+             patch("alfred.cli.LocalHarness") as harness:
             supervisor.return_value.status.return_value={"health":"ready","model":"Qwen3.5-4B"}
             harness.return_value.audit_installation.return_value={
                 "sdk_version":"0.1.5rc1","runtime_version":"0.1.5rc1","profile":"sdk-minimal"}
@@ -179,11 +179,11 @@ class CLIFailFastTests(unittest.TestCase):
 
     def test_doctor_rejects_sdk_startup_failure_despite_valid_plugin_audit(self):
         from alfred.cognitive.harness_sdk import HarnessUnavailable
-        with patch("alfred.app.AudioManager.diagnostics",return_value=[]), \
-             patch("alfred.app.AudioManager.ensure_input",return_value=USB["name"]), \
-             patch("alfred.app.pactl_json",return_value=[]), \
-             patch("alfred.app.LlamaSupervisor") as supervisor, \
-             patch("alfred.app.LocalHarness") as harness:
+        with patch("alfred.cli.AudioManager.diagnostics",return_value=[]), \
+             patch("alfred.cli.AudioManager.ensure_input",return_value=USB["name"]), \
+             patch("alfred.cli.pactl_json",return_value=[]), \
+             patch("alfred.cli.LlamaSupervisor") as supervisor, \
+             patch("alfred.cli.LocalHarness") as harness:
             supervisor.return_value.status.return_value={
                 "health":"ready","model":"Qwen3.5-4B"}
             harness.return_value.audit_installation.return_value={
@@ -197,13 +197,13 @@ class CLIFailFastTests(unittest.TestCase):
         from alfred.config import load_config
         cfg=load_config()
         cfg["runtime"]["resource_admission_enabled"]=True
-        with patch("alfred.app.load_config",return_value=cfg), \
-             patch("alfred.app.AudioManager.diagnostics",return_value=[]), \
-             patch("alfred.app.AudioManager.ensure_input",return_value=USB["name"]), \
-             patch("alfred.app.pactl_json",return_value=[]), \
-             patch("alfred.app.LlamaSupervisor") as supervisor, \
-             patch("alfred.app.LocalHarness") as harness, \
-             patch("alfred.app.InferenceAdmission") as gate, \
+        with patch("alfred.cli.load_config",return_value=cfg), \
+             patch("alfred.cli.AudioManager.diagnostics",return_value=[]), \
+             patch("alfred.cli.AudioManager.ensure_input",return_value=USB["name"]), \
+             patch("alfred.cli.pactl_json",return_value=[]), \
+             patch("alfred.cli.LlamaSupervisor") as supervisor, \
+             patch("alfred.cli.LocalHarness") as harness, \
+             patch("alfred.cli.InferenceAdmission") as gate, \
              patch("builtins.print") as printed:
             supervisor.return_value.status.return_value={
                 "health":"ready","model":"Qwen3.5-4B"}

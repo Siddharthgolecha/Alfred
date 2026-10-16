@@ -5,7 +5,7 @@ are deterministic, bounded, and are *not* arbitrary program execution.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import json
 import logging
@@ -13,6 +13,10 @@ import re
 import time
 
 LOG = logging.getLogger(__name__)
+
+# GPU temperature watch threshold bounds (degrees Celsius).
+MIN_CELSIUS = 20
+MAX_CELSIUS = 110
 
 def _zone(name):
     if not isinstance(name, str) or len(name)>90 or not re.fullmatch(r"[A-Za-z0-9_+\-/]+",name):
@@ -25,8 +29,8 @@ def _zone(name):
 def _time(hhmm):
     if not isinstance(hhmm,str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d",hhmm):
         raise ValueError("local_time must be HH:MM in 24-hour time")
-    hh,mm=(int(x) for x in hhmm.split(":"))
-    return hh,mm
+    hour, minute = (int(x) for x in hhmm.split(":"))
+    return hour, minute
 
 def parse_aware_time(value,now=None):
     """Require explicit offset or Z, reject local timestamps missing zone."""
@@ -52,13 +56,13 @@ def next_daily_time(local_time, timezone_name,now=None):
     Ambiguous fall-back times use fold=0 (first occurrence). Missing spring-
     forward times are skipped, not silently moved to another clock time.
     """
-    hh,mm=_time(local_time)
+    hour, minute = _time(local_time)
     zone=_zone(timezone_name)
     now=int(time.time()) if now is None else int(now)
     today=datetime.fromtimestamp(now,zone).date()
     for offset in range(370):
         day=today+timedelta(days=offset)
-        naive=datetime(day.year,day.month,day.day,hh,mm)
+        naive=datetime(day.year,day.month,day.day,hour,minute)
         candidate=naive.replace(tzinfo=zone,fold=0)
         timestamp=int(candidate.timestamp())
         # Roundtrip catches imaginary spring-forward local times.
@@ -104,14 +108,14 @@ class Automations:
             store.db.execute("CREATE INDEX IF NOT EXISTS idx_auto_jobs ON automation_jobs(status,next_at)")
             store.db.execute("CREATE INDEX IF NOT EXISTS idx_auto_outbox ON automation_outbox(status,retry_at)")
 
-    def _create(self,kind,payload,next_at,interval=None,tz=None,local_time=None):
+    def _create(self,kind,payload,next_at,interval=None,timezone=None,local_time=None):
         with self.store.lock,self.store.db:
             cur=self.store.db.execute(
                 "INSERT INTO automation_jobs(kind,status,payload,next_at,interval_minutes,timezone,local_time,created_at)"
                 " VALUES(?,'active',?,?,?,?,?,?)",
-                (kind,json.dumps(payload,sort_keys=True),next_at,interval,tz,local_time,int(time.time())))
+                (kind,json.dumps(payload,sort_keys=True),next_at,interval,timezone,local_time,int(time.time())))
             return {"id":cur.lastrowid,"kind":kind,"status":"active",
-                    "next_at":next_at,"timezone":tz}
+                    "next_at":next_at,"timezone":timezone}
 
     def remind_at(self,message,when):
         return self._create("reminder_once",{"message":_message(message)},parse_aware_time(when))
@@ -119,11 +123,11 @@ class Automations:
     def remind_daily(self,message,local_time,timezone_name):
         return self._create("reminder_daily",{"message":_message(message)},
                             next_daily_time(local_time,timezone_name),
-                            tz=timezone_name,local_time=local_time)
+                            timezone=timezone_name,local_time=local_time)
 
     def watch_gpu(self,threshold_c,interval_minutes,cooldown_minutes):
-        if type(threshold_c) is not int or not 20<=threshold_c<=110:
-            raise ValueError("GPU threshold must be 20..110 C")
+        if type(threshold_c) is not int or not MIN_CELSIUS<=threshold_c<=MAX_CELSIUS:
+            raise ValueError(f"GPU threshold must be {MIN_CELSIUS}..{MAX_CELSIUS} C")
         if type(interval_minutes) is not int or not 1<=interval_minutes<=1440:
             raise ValueError("Watch interval must be 1..1440 minutes")
         if type(cooldown_minutes) is not int or not 1<=cooldown_minutes<=10080:
@@ -184,8 +188,25 @@ class Automations:
             "INSERT OR IGNORE INTO automation_outbox(job_id,due_at,message,status,retry_at)"
             " VALUES(?,?,?,'pending',?)",(job_id,due_at,message,now))
 
-    def _claim_jobs(self,now):
-        """Atomic due-date advancement before expensive read-only measurements."""
+    def _advance_job(self,row,next_at):
+        """Atomically advance or complete a job row; returns the UPDATE rowcount.
+
+        Pass next_at=None to mark the job 'completed' (reminder_once semantics).
+        Pass a future timestamp to update next_at (recurring job semantics).
+        Both forms guard on the current next_at to prevent double-firing.
+        """
+        if next_at is None:
+            cur=self.store.db.execute(
+                "UPDATE automation_jobs SET status='completed' WHERE id=? AND status='active'"
+                " AND next_at=?",(row["id"],row["next_at"]))
+        else:
+            cur=self.store.db.execute(
+                "UPDATE automation_jobs SET next_at=? WHERE id=? AND status='active'"
+                " AND next_at=?",(next_at,row["id"],row["next_at"]))
+        return cur.rowcount
+
+    def _check_reminder_jobs(self,now):
+        """Atomic due-date advancement and reminder enqueueing before expensive measurements."""
         jobs=[]
         with self.store.lock,self.store.db:
             rows=self.store.db.execute(
@@ -194,25 +215,15 @@ class Automations:
             for r in rows:
                 payload=json.loads(r["payload"])
                 if r["kind"]=="reminder_once":
-                    cur=self.store.db.execute(
-                        "UPDATE automation_jobs SET status='completed' WHERE id=? AND status='active'"
-                        " AND next_at=?",(r["id"],r["next_at"]))
-                    if cur.rowcount:
+                    if self._advance_job(r,None):
                         self._enqueue(r["id"],r["next_at"],payload["message"],now)
                 elif r["kind"]=="reminder_daily":
                     next_at=next_daily_time(r["local_time"],r["timezone"],now)
-                    cur=self.store.db.execute(
-                        "UPDATE automation_jobs SET next_at=? WHERE id=? AND status='active'"
-                        " AND next_at=?",(next_at,r["id"],r["next_at"]))
-                    if cur.rowcount:
-                        # Coalesce missed recurrences to a single reminder per restart.
+                    if self._advance_job(r,next_at):
                         self._enqueue(r["id"],r["next_at"],payload["message"],now)
                 elif r["kind"]=="gpu_temperature_watch":
                     new_due=now+r["interval_minutes"]*60
-                    cur=self.store.db.execute(
-                        "UPDATE automation_jobs SET next_at=? WHERE id=? AND status='active'"
-                        " AND next_at=?",(new_due,r["id"],r["next_at"]))
-                    if cur.rowcount:
+                    if self._advance_job(r,new_due):
                         jobs.append((dict(r),payload))
         return jobs
 
@@ -274,14 +285,7 @@ class Automations:
                     "UPDATE automation_outbox SET status='delivered',lease_until=0"
                     " WHERE id=? AND status='sending'",(row["id"],))
 
-    def tick(self,tools,on_reminder,now=None):
-        """One scheduler iteration; safe to call after restart.
-
-        Watch checks do not invoke Qwen or mutating system tools.
-        Notifications retry on errors, with at-least-once semantics.
-        """
-        now=int(time.time()) if now is None else int(now)
-        watches=self._claim_jobs(now)
+    def _check_watch_conditions(self,tools,watches,now):
         for job,payload in watches:
             try:
                 metrics=tools.execute("get_gpu_status",{},from_plan=True)
@@ -289,6 +293,8 @@ class Automations:
             except Exception as exc:
                 LOG.warning("Watch %s failed: %s",job["id"],exc)
                 self.store.event("watch_error",{"job_id":job["id"],"error":str(exc)})
+
+    def _deliver_notifications(self,on_reminder,now):
         # Bounded batch; never starve other system-agent work.
         for _ in range(20):
             item=self._claim_notification(now)
@@ -303,3 +309,14 @@ class Automations:
             else:
                 self._finish_notification(item,now)
                 self.store.event("delivery_sent",{"id":item["id"],"job_id":item["job_id"]})
+
+    def tick(self,tools,on_reminder,now=None):
+        """One scheduler iteration; safe to call after restart.
+
+        Watch checks do not invoke Qwen or mutating system tools.
+        Notifications retry on errors, with at-least-once semantics.
+        """
+        now=int(time.time()) if now is None else int(now)
+        watches=self._check_reminder_jobs(now)
+        self._check_watch_conditions(tools,watches,now)
+        self._deliver_notifications(on_reminder,now)

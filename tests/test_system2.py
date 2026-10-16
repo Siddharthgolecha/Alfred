@@ -536,7 +536,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(len(tasks),1)
         self.assertEqual(tasks[0]["state"],"failed")
         events=self.app.sessions.events(tasks[0]["id"])
-        self.assertEqual(events[-1],Completion("failed","invalid_plan"))
+        self.assertEqual(events[-1],Completion(outcome="failed",reason="invalid_plan"))
         self.assertEqual(self.app.store.list_schedules(),[])
         self.assertEqual(self.app.system2.approvals.pending(),[])
         self.app.feedback.tell.assert_called_once()
@@ -551,7 +551,7 @@ class RoutingTests(unittest.TestCase):
         self.app.handle_text("Create a schedule")
         task_id=self.app.sessions.list_tasks(self.app.session_id)[0]["id"]
         self.assertEqual(self.app.sessions.events(task_id)[-1],
-                         Completion("failed","invalid_plan"))
+                         Completion(outcome="failed",reason="invalid_plan"))
         self.assertEqual(self.app.store.list_schedules(),[])
 
     def test_empty_needle_call_invokes_read_only_qwen(self):
@@ -561,14 +561,48 @@ class RoutingTests(unittest.TestCase):
         self.app.reason.assert_called_once_with(
             "What is quantum computing?",allow_actions=False)
 
+class System2ConstantsAndRejectionTests(unittest.TestCase):
+    def test_voice_executable_and_approval_required_constants(self):
+        from alfred.system2 import APPROVAL_REQUIRED_TOOLS, VOICE_EXECUTABLE_TOOLS
+        self.assertIn("get_system_status", VOICE_EXECUTABLE_TOOLS)
+        self.assertIn("get_gpu_status", VOICE_EXECUTABLE_TOOLS)
+        self.assertIn("create_reminder", VOICE_EXECUTABLE_TOOLS)
+        self.assertIn("control_service", APPROVAL_REQUIRED_TOOLS)
+        self.assertIn("run_named_task", APPROVAL_REQUIRED_TOOLS)
+        self.assertIn("watch_gpu_temperature", APPROVAL_REQUIRED_TOOLS)
+        # Sets must be disjoint
+        self.assertTrue(VOICE_EXECUTABLE_TOOLS.isdisjoint(APPROVAL_REQUIRED_TOOLS))
+
+    def test_parse_plan_raises_value_error_on_invalid_structure(self):
+        tools = Mock()
+        with self.assertRaises(ValueError):
+            parse_plan("not a dict", "text", tools, 5)
+        with self.assertRaises(ValueError):
+            parse_plan({"steps": "not a list"}, "text", tools, 5)
+
+    def test_parse_plan_raises_value_error_on_unrecognized_fields(self):
+        tools = Mock()
+        with self.assertRaises(ValueError):
+            parse_plan({"steps": [], "message": "hi", "extra_field": 123}, "text", tools, 5)
+
+    def test_parse_plan_raises_value_error_on_invalid_save_as(self):
+        tools = Mock()
+        with self.assertRaises(ValueError):
+            parse_plan({"steps": [{"tool": "get_gpu_status", "args": {}}], "save_as": "123invalid"}, "save workflow", tools, 5)
+        with self.assertRaises(ValueError):
+            parse_plan({"steps": [{"tool": "get_gpu_status", "args": {}}], "save_as": "my_flow"}, "just run it", tools, 5)
+        with self.assertRaises(ValueError):
+            parse_plan({"steps": [], "save_as": "my_flow"}, "save workflow", tools, 5)
+
+
 class PlannerCliTests(unittest.TestCase):
     def test_reason_cli_records_failure_and_returns_nonzero(self):
-        from alfred.app import _main
+        from alfred.cli import _main
         with tempfile.TemporaryDirectory() as tmp:
             cfg=load_config()
             cfg["runtime"]["database"]=str(Path(tmp)/"store.db")
             cfg["runtime"]["logs"]=tmp
-            with patch("alfred.app.load_config",return_value=cfg), patch(
+            with patch("alfred.cli.load_config",return_value=cfg), patch(
                      "alfred.app.Alfred.require_cognitive_runtime"), patch(
                      "alfred.app.Alfred.reason",return_value={
                          "status":"incomplete","error":"invalid_plan",
@@ -584,7 +618,7 @@ class PlannerCliTests(unittest.TestCase):
                 self.assertEqual(len(rows),1)
                 self.assertEqual(rows[0]["state"],"failed")
                 event=SessionLedger(store).events(rows[0]["id"])[-1]
-                self.assertEqual(event,Completion("failed","invalid_plan"))
+                self.assertEqual(event,Completion(outcome="failed",reason="invalid_plan"))
                 self.assertEqual(store.list_schedules(),[])
                 self.assertEqual(store.db.execute("SELECT COUNT(*) FROM approvals").fetchone()[0],0)
             finally:

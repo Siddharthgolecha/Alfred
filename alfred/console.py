@@ -8,11 +8,15 @@ from __future__ import annotations
 import re
 import sys
 
-_ANSI=re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
-_CONTROL=re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_ANSI_ESCAPE_PATTERN = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+_CURSOR_BACK = "\b"
+_ERASE_TO_EOL = "\x1b[K"
+
 
 def clean(value):
-    return _CONTROL.sub(" ",_ANSI.sub("",str(value or ""))).strip()
+    return _CONTROL_CHAR_PATTERN.sub(" ", _ANSI_ESCAPE_PATTERN.sub("", str(value or ""))).strip()
 
 class TranscriptDisplay:
     """TTY incremental typing with in-place correction and one final line."""
@@ -36,19 +40,20 @@ class TranscriptDisplay:
         if not self.live:
             self.stream.write("Whistle: ")
             self.live=True
-        old=self.last
-        # Appends are typed as deltas. A revised hypothesis erases the changed
-        # suffix and types only the replacement. No artificial sleep/delay.
-        common=0
-        for a,b in zip(old,new):
-            if a!=b:
+        old = self.last
+        # Compute the longest common prefix between previous and new hypothesis.
+        # Backtrack over the divergent suffix with backspaces, emit the new suffix,
+        # and clear any trailing characters to the end of the line.
+        common = 0
+        for a, b in zip(old, new):
+            if a != b:
                 break
-            common+=1
-        changed=len(old)-common
+            common += 1
+        changed = len(old) - common
         if changed:
-            self.stream.write("\b"*changed)
+            self.stream.write(_CURSOR_BACK * changed)
             self.stream.write(new[common:])
-            self.stream.write("\x1b[K")
+            self.stream.write(_ERASE_TO_EOL)
         else:
             self.stream.write(new[common:])
         self.stream.flush()
@@ -71,7 +76,7 @@ class TranscriptDisplay:
     def discard(self):
         """Erase an unconfirmed wake hypothesis without printing bystander text."""
         if self.live and self._tty():
-            self.stream.write("\r\x1b[K")
+            self.stream.write("\r" + _ERASE_TO_EOL)
             self.stream.flush()
         self.last=""
         self.live=False

@@ -45,8 +45,39 @@ class ShutdownSocket:
         self._stop = threading.Event()
         self._inode = None
 
+    def _cleanup_interrupted_bind(self, listener_socket: socket.socket, bound_here: bool) -> None:
+        """Unlink the socket path if this descriptor successfully bound it before an interruption."""
+        try:
+            descriptor_bound = listener_socket.getsockname() == str(self.path)
+        except OSError:
+            descriptor_bound = False
+        if descriptor_bound and not bound_here:
+            # This is the narrow bind-interruption window. If a new
+            # live listener replaced our unlinked pathname, the
+            # descriptor still reports its old name; do NOT remove
+            # the replacement. This socket has not called listen yet.
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                probe.settimeout(0.2)
+                try:
+                    probe.connect(str(self.path))
+                except OSError:
+                    pass
+                else:
+                    descriptor_bound = False
+        if bound_here or descriptor_bound:
+            try:
+                info = self.path.lstat()
+                if (
+                    stat.S_ISSOCK(info.st_mode)
+                    and info.st_uid == os.getuid()
+                    and (self._inode is None or info.st_ino == self._inode)
+                ):
+                    self.path.unlink()
+            except FileNotFoundError:
+                pass
+
     def __enter__(self):
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         bound_here = False
         try:
             if self.path.is_symlink() or self.path.exists():
@@ -63,55 +94,25 @@ class ShutdownSocket:
                     else:
                         raise RuntimeError(f"Alfred {self.path.stem} is already running")
                 self.path.unlink()  # Stale socket; never touch an active listener.
-            sock.bind(str(self.path))
+            listener_socket.bind(str(self.path))
             bound_here = True
             os.chmod(self.path, 0o600)
             self._inode = self.path.stat().st_ino
-            sock.listen(4)
-            sock.settimeout(0.25)
-            self._socket = sock
+            listener_socket.listen(4)
+            listener_socket.settimeout(0.25)
+            self._socket = listener_socket
             self._thread = threading.Thread(target=self._serve, name="alfred-close-listener", daemon=True)
             self._thread.start()
             return self
-        except BaseException:
+        except (OSError, RuntimeError, KeyboardInterrupt, SystemExit):
             # SIGINT/SIGTERM can interrupt __enter__ AFTER bind but BEFORE
             # the with statement installs __exit__. Unlink *only* the owned
             # socket we bound; otherwise a dead scheduler socket survives.
             self._stop.set()
             try:
-                # A signal can arrive INSIDE bind(), after the kernel has
-                # created the socket path but before Python sets bound_here.
-                # getsockname identifies whether THIS descriptor bound the
-                # exact requested pathname; never delete an unrelated path
-                # merely because it appeared while trying to bind.
-                try:
-                    descriptor_bound = sock.getsockname() == str(self.path)
-                except OSError:
-                    descriptor_bound = False
-                if descriptor_bound and not bound_here:
-                    # This is the narrow bind-interruption window. If a new
-                    # live listener replaced our unlinked pathname, the
-                    # descriptor still reports its old name; do NOT remove
-                    # the replacement. This socket has not called listen yet.
-                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
-                        probe.settimeout(0.2)
-                        try:
-                            probe.connect(str(self.path))
-                        except OSError:
-                            pass
-                        else:
-                            descriptor_bound = False
-                if bound_here or descriptor_bound:
-                    try:
-                        info = self.path.lstat()
-                        if (stat.S_ISSOCK(info.st_mode) and
-                                info.st_uid == os.getuid() and
-                                (self._inode is None or info.st_ino == self._inode)):
-                            self.path.unlink()
-                    except FileNotFoundError:
-                        pass
+                self._cleanup_interrupted_bind(listener_socket, bound_here)
             finally:
-                sock.close()
+                listener_socket.close()
                 if self._thread is not None and self._thread.is_alive():
                     self._thread.join(timeout=2)
             raise

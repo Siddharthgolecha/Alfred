@@ -19,53 +19,79 @@ from urllib.parse import urlsplit
 
 # Import lazily to keep the existing request_json mock contract in models.py.
 LOG = logging.getLogger(__name__)
-DEFAULT_PORTS = {"llama_cpp": 8080, "llama_server": 8080,
-                 "ollama": 11434, "lm_studio": 1234}
-DEFAULT_BINARIES = {"llama_cpp": "llama", "llama_server": "llama-server",
-                    "ollama": "ollama", "lm_studio": "lms"}
+
+# Module-level sentinel port constants
+PORT_LLAMA_CPP = 8080
+PORT_LLAMA_SERVER = 8080
+PORT_OLLAMA = 11434
+PORT_LM_STUDIO = 1234
+
+DEFAULT_PORTS = {
+    "llama_cpp": PORT_LLAMA_CPP,
+    "llama_server": PORT_LLAMA_SERVER,
+    "ollama": PORT_OLLAMA,
+    "lm_studio": PORT_LM_STUDIO,
+}
+DEFAULT_BINARIES = {
+    "llama_cpp": "llama",
+    "llama_server": "llama-server",
+    "ollama": "ollama",
+    "lm_studio": "lms",
+}
 
 
-def backend_kind(cfg):
+def _lookup_backend_by_binary_or_port(binary: str, url: str) -> str | None:
+    """Resolve a well-known backend by its binary name or url port.
+
+    Returns None when neither identifies a known backend; callers fall back to llama_cpp.
+    """
+    if binary:
+        name = Path(binary).name.lower()
+        if "llama-server" in name or "llama_server" in name:
+            return "llama_server"
+        if name in ("ollama", "ollama.exe"):
+            return "ollama"
+        if name in ("lms", "lms.exe", "lmstudio", "lm-studio"):
+            return "lm_studio"
+    else:
+        try:
+            url_parts = urlsplit(url)
+            port = url_parts.port
+            if port == PORT_OLLAMA:
+                return "ollama"
+            if port == PORT_LM_STUDIO:
+                return "lm_studio"
+        except ValueError:
+            pass
+    return None
+
+
+def backend_kind(config):
     """Resolve explicit type, executable/path, or well-known loopback port."""
-    choice = str(cfg.get("backend", "auto")).lower().replace("-", "_").replace(".", "_")
+    choice = str(config.get("backend", "auto")).lower().replace("-", "_").replace(".", "_")
     choice = {"lmstudio": "lm_studio", "lms": "lm_studio"}.get(choice, choice)
     if choice != "auto":
         if choice not in DEFAULT_PORTS:
             raise ValueError(f"Unsupported inference backend: {choice}")
         return choice
-    binary = str(cfg.get("binary") or "").rstrip("/")
-    name = Path(binary).name.lower()
-    if "llama-server" in name or "llama_server" in name:
-        return "llama_server"
-    if name in ("ollama", "ollama.exe"):
-        return "ollama"
-    if name in ("lms", "lms.exe", "lmstudio", "lm-studio"):
-        return "lm_studio"
-    # If a URL was explicitly supplied and no executable was named, its port
-    # is sufficient to select the Ollama/LM Studio adapter.
-    if not binary:
-        try:
-            port = urlsplit(str(cfg.get("url", ""))).port
-            if port == 11434:
-                return "ollama"
-            if port == 1234:
-                return "lm_studio"
-        except ValueError:
-            pass
+    binary = str(config.get("binary") or "").rstrip("/")
+    resolved = _lookup_backend_by_binary_or_port(binary, str(config.get("url", "")))
+    if resolved is not None:
+        return resolved
     return "llama_cpp"
 
 
 def _canonical(value):
     """Normalize separators and quantization punctuation in model aliases."""
-    return "".join(ch for ch in value.casefold() if ch.isalnum())
+    return "".join(character for character in value.casefold() if character.isalnum())
 
 
 class ModelSupervisor:
     """Adopt a compatible local server or start one without shell execution."""
-    def __init__(self, cfg, logdir):
-        self.cfg = cfg
-        self.backend = backend_kind(cfg)
-        self.url = cfg["url"].rstrip("/")
+    def __init__(self, config, logdir):
+        self.config = config
+        self.backend = backend_kind(config)
+        self.url = config["url"].rstrip("/")
         self.logdir = Path(logdir).expanduser()
         self.logdir.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
@@ -74,9 +100,10 @@ class ModelSupervisor:
         self._stopping = threading.Event()
 
     def executable_name(self):
-        return self.cfg.get("binary") or DEFAULT_BINARIES[self.backend]
+        return self.config.get("binary") or DEFAULT_BINARIES[self.backend]
 
-    def _binary(self):
+    def _resolve_binary(self) -> str:
+        """Resolve and validate the path to the backend executable."""
         name = self.executable_name()
         path = Path(name).expanduser()
         # Accept the llama.cpp source/build directory, not just a binary.
@@ -103,7 +130,7 @@ class ModelSupervisor:
             raise ValueError("Invalid /v1/models response")
         return [str(item["id"]) for item in entries if isinstance(item, dict) and item.get("id")]
 
-    def health(self):
+    def health(self) -> str:
         from .models import request_json
         try:
             if self.backend in ("llama_cpp", "llama_server"):
@@ -113,15 +140,15 @@ class ModelSupervisor:
                 return "loading"
             self._models()
             return "ready"
-        except HTTPError as exc:
-            return "loading" if exc.code == 503 else "unhealthy"
-        except (OSError, ValueError, URLError, KeyError, TypeError):
+        except HTTPError as error:
+            return "loading" if error.code == 503 else "unhealthy"
+        except (OSError, ValueError):
             return "down"
 
     def port_open(self):
-        u = urlsplit(self.url)
+        url_parts = urlsplit(self.url)
         try:
-            with socket.create_connection((u.hostname, u.port), timeout=1):
+            with socket.create_connection((url_parts.hostname, url_parts.port), timeout=1):
                 return True
         except OSError:
             return False
@@ -129,8 +156,8 @@ class ModelSupervisor:
     def model_id(self):
         """Never pick the first arbitrary model from a multi-model endpoint."""
         available = self._models()
-        requested = str(self.cfg.get("model") or "").strip()
-        expected = str(self.cfg.get("expected_model") or "").strip()
+        requested = str(self.config.get("model") or "").strip()
+        expected = str(self.config.get("expected_model") or "").strip()
         if requested:
             for model in available:
                 if model.casefold() == requested.casefold():
@@ -160,80 +187,112 @@ class ModelSupervisor:
     def verify_model(self):
         return self.model_id()
 
-    def _start_command(self, binary):
+    def _start_command(self, binary: str) -> list[str]:
         port = str(urlsplit(self.url).port)
-        model_path = str(self.cfg.get("model_path") or "").strip()
-        requested = str(self.cfg.get("model") or "").strip()
+        model_path = str(self.config.get("model_path") or "").strip()
+        requested = str(self.config.get("model") or "").strip()
         if self.backend in ("llama_cpp", "llama_server"):
-            cmd = [binary]
+            command = [binary]
             if Path(binary).name == "llama":
-                cmd.append("serve")
+                command.append("serve")
             if model_path:
                 file = Path(model_path).expanduser()
                 if not file.is_file():
                     raise FileNotFoundError(f"Configured GGUF not found: {model_path}")
-                cmd += ["--model", str(file.resolve())]
+                command += ["--model", str(file.resolve())]
             elif requested:
-                cmd += ["-hf", requested]
+                command += ["-hf", requested]
             else:
                 raise ValueError("Set qwen.model (Hugging Face repo:quant) or qwen.model_path (GGUF)")
-            cmd += ["--host", "127.0.0.1", "--port", port,
-                    "--ctx-size", str(self.cfg["ctx_size"])]
+            command += ["--host", "127.0.0.1", "--port", port,
+                        "--ctx-size", str(self.config["ctx_size"])]
             if Path(binary).name == "llama":
-                cmd += ["-ngl", str(self.cfg["gpu_layers"]), "-np", "1"]
+                command += ["-ngl", str(self.config["gpu_layers"]), "-np", "1"]
             else:
-                cmd += ["--n-gpu-layers", str(self.cfg["gpu_layers"]), "--parallel", "1"]
-            return cmd
+                command += ["--n-gpu-layers", str(self.config["gpu_layers"]), "--parallel", "1"]
+            return command
         if self.backend == "ollama":
             # OLLAMA_HOST is set by ensure_running; never pull a model implicitly.
             return [binary, "serve"]
         return [binary, "server", "start", "--port", port, "--bind", "127.0.0.1"]
 
-    def ensure_running(self):
+    def _check_health(self) -> bool:
+        """Check if the backend is already ready or loading on the target port."""
+        state = self.health()
+        if state == "ready":
+            self.verify_model()
+            return True
+        if self.port_open():
+            if state == "loading":
+                return self._wait_ready()
+            raise RuntimeError(f"{self.url} is occupied by another/unhealthy service; not replacing it")
+        return False
+
+    def _start_lm_studio_daemon(self, command: list[str], binary: str, log_file: Path) -> None:
+        """Launch the LM Studio daemon and optionally load the requested model."""
+        startup_timeout = int(self.config["startup_timeout_seconds"])
+        with open(log_file, "ab", buffering=0) as output:
+            subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                timeout=startup_timeout,
+                check=True,
+            )
+            if self.config.get("model"):
+                # No interactive model picker and no implicit download.
+                subprocess.run(
+                    [binary, "load", self.config["model"], "--yes"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    timeout=startup_timeout,
+                    check=True,
+                )
+        self.started_here = True
+
+    def _start_background_service(self, command: list[str], log_file: Path) -> None:
+        """Launch Ollama or llama-server/llama.cpp as a background process group."""
+        environment = os.environ.copy()
+        if self.backend == "ollama":
+            url_parts = urlsplit(self.url)
+            environment["OLLAMA_HOST"] = f"127.0.0.1:{url_parts.port}"
+        with open(log_file, "ab", buffering=0) as output:
+            self.process = subprocess.Popen(
+                command,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        self.started_here = True
+        LOG.info("Started %s PID=%s log=%s", self.backend, self.process.pid, log_file)
+
+    def _start_process(self, binary: str) -> None:
+        """Start the backend process, configuring logging, environment, and CLI flags."""
+        command = self._start_command(binary)
+        log_file = self.logdir / f"{self.backend}.log"
+        if self.backend == "lm_studio":
+            self._start_lm_studio_daemon(command, binary, log_file)
+        else:
+            self._start_background_service(command, log_file)
+
+    def ensure_running(self) -> bool:
+        """Ensure the backend is running, adopting any active instance or starting a new one."""
         with self.lock:
             if self._stopping.is_set():
                 raise RuntimeError("Alfred inference backend is shutting down")
-            state = self.health()
-            if state == "ready":
-                self.verify_model()
+            if self._check_health():
                 return True
-            if self.port_open():
-                if state == "loading":
-                    return self._wait_ready()
-                raise RuntimeError(f"{self.url} is occupied by another/unhealthy service; not replacing it")
-            binary = self._binary()
-            cmd = self._start_command(binary)
-            log_file = self.logdir / (self.backend + ".log")
-            if self.backend == "lm_studio":
-                # lms server start invokes the LM Studio daemon and exits.
-                # Do not treat a successful CLI exit as a failed server process.
-                with open(log_file, "ab", buffering=0) as output:
-                    subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=output,
-                                   stderr=subprocess.STDOUT,
-                                   timeout=int(self.cfg["startup_timeout_seconds"]), check=True)
-                    if self.cfg.get("model"):
-                        # No interactive model picker and no implicit download.
-                        subprocess.run([binary, "load", self.cfg["model"], "--yes"],
-                                       stdin=subprocess.DEVNULL, stdout=output,
-                                       stderr=subprocess.STDOUT,
-                                       timeout=int(self.cfg["startup_timeout_seconds"]), check=True)
-                self.started_here = True
-            else:
-                env = os.environ.copy()
-                if self.backend == "ollama":
-                    url = urlsplit(self.url)
-                    env["OLLAMA_HOST"] = f"127.0.0.1:{url.port}"
-                with open(log_file, "ab", buffering=0) as output:
-                    self.process = subprocess.Popen(
-                        cmd, env=env, stdin=subprocess.DEVNULL, stdout=output,
-                        stderr=subprocess.STDOUT, start_new_session=True)
-                self.started_here = True
-                LOG.info("Started %s PID=%s log=%s", self.backend, self.process.pid, log_file)
+            binary = self._resolve_binary()
+            self._start_process(binary)
             return self._wait_ready()
 
-    def _wait_ready(self):
-        end = time.monotonic() + int(self.cfg["startup_timeout_seconds"])
-        while time.monotonic() < end:
+    def _wait_ready(self) -> bool:
+        end_time = time.monotonic() + int(self.config["startup_timeout_seconds"])
+        while time.monotonic() < end_time:
             if self._stopping.is_set():
                 raise RuntimeError("Alfred inference backend startup cancelled")
             if self.process and self.process.poll() is not None:
@@ -275,18 +334,18 @@ class ModelSupervisor:
                             except ProcessLookupError:
                                 pass
                             process.wait(timeout=3)
-                except (OSError, subprocess.TimeoutExpired) as exc:
-                    LOG.warning("Could not fully stop managed %s: %s", self.backend, exc)
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    LOG.warning("Could not fully stop managed %s: %s", self.backend, error)
                 finally:
                     self.process = None
             elif self.backend == "lm_studio":
                 # LM Studio's CLI launches a daemon and exits; only undo our own start.
                 try:
-                    subprocess.run([self._binary(), "server", "stop"],
+                    subprocess.run([self._resolve_binary(), "server", "stop"],
                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, timeout=10, check=False)
-                except (OSError, subprocess.TimeoutExpired) as exc:
-                    LOG.warning("Could not stop Alfred-started LM Studio: %s", exc)
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    LOG.warning("Could not stop Alfred-started LM Studio: %s", error)
             self.started_here = False
 
     def status(self):

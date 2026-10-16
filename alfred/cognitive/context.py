@@ -9,7 +9,6 @@ meeting content is stored in these tables. This is not a model authority.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import math
 import os
@@ -18,27 +17,27 @@ import re
 import stat
 import threading
 import time
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from .contracts import valid_id
 from .needle_loop import GPU_TEMP, ContextUnavailable, _bounded_metrics
 
-SCOPE_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,31}$")
-FACT_KEY = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
-FORBIDDEN = re.compile(r"secret|password|token|api_key|command|script|system|"
-                       r"prompt|instruction|shell|tool|policy|approval|credential", re.I)
-SENSITIVE_VALUE = re.compile(
-    r"(?i)(?:sk-[A-Za-z0-9]{8,}|bearer\s+\S+|"
-    r"ignore\s+(?:previous|all)\s+instructions|"
-    r"(?:^|\s)(?:sudo|curl|wget)\s|rm\s+-rf|https?://)")
-REF = re.compile(r"^\s*(?:check|read|show|get)\s+(?:it|that)(?:\s+again)?[.!?]*\s*$",re.I)
-DANGEROUS_REF = re.compile(r"^\s*(?:restart|stop|start|cancel|delete|run|"
-                            r"approve|change|disable|enable)\s+(?:it|that)(?:\s+again)?[.!?]*\s*$",re.I)
-EXPLICIT_SYSTEM = re.compile(r"\b(?:system|machine|computer)\s+(?:status|health)\b",re.I)
-EXPLICIT_WORKFLOW = re.compile(r"\bworkflow\b",re.I)
+from ..constants import Limits, Patterns, TTL
+
+SCOPE_RE = Patterns.SCOPE_OWNER
+FACT_KEY = Patterns.FACT_KEY
+FORBIDDEN = Patterns.FACT_KEY_FORBIDDEN
+SENSITIVE_VALUE = Patterns.SENSITIVE_VALUE
+REF = Patterns.PRONOUN_REF
+DANGEROUS_REF = Patterns.DANGEROUS_REF
+EXPLICIT_SYSTEM = Patterns.EXPLICIT_SYSTEM
+EXPLICIT_WORKFLOW = Patterns.EXPLICIT_WORKFLOW
 READS = frozenset(("get_gpu_status","get_system_status","list_services"))
 SLOT_TYPES = frozenset(("gpu_temperature","system_status","active_workflow"))
-MAX_TASK_OBSERVATIONS = 3
-MAX_FACTS = 8
+MAX_TASK_OBSERVATIONS = Limits.MAX_TASK_OBSERVATIONS
+MAX_FACTS = Limits.MAX_FACTS
 
 
 def _scope(owner, mode, session_id):
@@ -53,7 +52,7 @@ def _safe_metrics(tool, output):
     if tool not in READS or type(output) is not dict:
         return None
     if tool == "list_services":
-        if len(output) > 32:
+        if len(output) > Limits.MAX_SERVICES:
             return None
         return {"service_count": len(output)}
     safe = _bounded_metrics(output)
@@ -61,40 +60,57 @@ def _safe_metrics(tool, output):
         # A failed or fabricated reading is not a trusted fresh referent.
         if (safe.get("available") is not True
                 or type(safe.get("gpu_temp_c")) not in (float,int)
-                or not -50 <= safe["gpu_temp_c"] <= 150):
+                or not Limits.GPU_TEMP_MIN_C <= safe["gpu_temp_c"] <= Limits.GPU_TEMP_MAX_C):
             return None
     if not safe:
         return None
     return safe
 
 
-@dataclass(frozen=True)
-class Slot:
+class Slot(BaseModel):
+    """Immutable context slot holding a single verified observation."""
+
+    model_config = ConfigDict(frozen=True)
+
     kind: str
-    metrics: dict
+    metrics: dict[str, Any]
     provenance: str
     confidence: float
     observed_at: float
     expires_at: float
     task_id: str
 
-    def public(self, now):
-        return {"kind":self.kind,"metrics":dict(self.metrics),
-                "provenance":self.provenance,"confidence":self.confidence,
-                "age_seconds":max(0,int(now-self.observed_at)),
-                "ttl_remaining_seconds":max(0,int(self.expires_at-now))}
+    @model_validator(mode="after")
+    def _validate(self) -> "Slot":
+        if self.kind not in SLOT_TYPES:
+            raise ValueError(f"Unknown slot kind: {self.kind!r}")
+        if self.provenance != "observed":
+            raise ValueError("Slot provenance must be 'observed'")
+        if not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("Slot confidence out of range")
+        return self
+
+    def public(self, now: float) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "metrics": dict(self.metrics),
+            "provenance": self.provenance,
+            "confidence": self.confidence,
+            "age_seconds": max(0, int(now - self.observed_at)),
+            "ttl_remaining_seconds": max(0, int(self.expires_at - now)),
+        }
 
 
 class ContextManager:
     """Shared packet API. No tool authority; SQLite only for approved facts."""
 
     def __init__(self, store, *, enabled=False, persist_facts=False,
-                 owner="local", mode="assistant", ttl=120,
-                 budget_chars=1200, clock=time.time):
+                 owner="local", mode="assistant", ttl=TTL.CONTEXT_DEFAULT,
+                 budget_chars=Limits.CONTEXT_BUDGET_CHARS_MIN * 5, clock=time.time):
         if (type(enabled) is not bool or type(persist_facts) is not bool
                 or persist_facts and not enabled
-                or type(ttl) is not int or not 1 <= ttl <= 300
-                or type(budget_chars) is not int or not 256 <= budget_chars <= 3200):
+                or type(ttl) is not int or not TTL.CONTEXT_MIN <= ttl <= TTL.CONTEXT_MAX
+                or type(budget_chars) is not int or not Limits.CONTEXT_BUDGET_CHARS_MIN <= budget_chars <= Limits.CONTEXT_BUDGET_CHARS_MAX):
             raise ValueError("Invalid context configuration")
         _scope(owner,mode,"a"*32)
         self.store=store
@@ -214,8 +230,10 @@ class ContextManager:
                     "confidence":confidence,"observed_at":now})
             if kind:
                 slots=self._slots.setdefault(key,{})
-                slots[kind]=Slot(kind,metrics,"observed",float(confidence),
-                                 now,now+self.ttl,task_id)
+                slots[kind]=Slot(
+                    kind=kind, metrics=metrics, provenance="observed",
+                    confidence=float(confidence),
+                    observed_at=now, expires_at=now+self.ttl, task_id=task_id)
                 self._prune_slots(slots,now)
             return True
 
@@ -235,8 +253,9 @@ class ContextManager:
                     (key,task_id) not in self._tasks):
                 return False
             self._slots.setdefault(key,{})["active_workflow"]=Slot(
-                "active_workflow",{"registered":True},"observed",1.0,
-                now,now+self.ttl,task_id)
+                kind="active_workflow", metrics={"registered": True},
+                provenance="observed", confidence=1.0,
+                observed_at=now, expires_at=now+self.ttl, task_id=task_id)
             return True
 
     def _prune_slots(self, slots, now):
@@ -272,7 +291,7 @@ class ContextManager:
             key=self._read_scope(session_id,task_id)
             slots=self._slots.get(key,{})
             self._prune_slots(slots,float(self.clock()))
-            refs=[k for k in ("gpu_temperature","system_status") if k in slots]
+            refs=[key for key in ("gpu_temperature","system_status") if key in slots]
             # Active workflows never become an authority for action pronouns.
             if len(refs)!=1:
                 raise ContextUnavailable("Reference is stale or ambiguous; please name the metric.")
@@ -388,7 +407,7 @@ class ContextManager:
             slots=self._slots.get(key,{})
             self._prune_slots(slots,now)
             order=("gpu_temperature","system_status","active_workflow")
-            subset={k:slots[k].public(now) for k in order if k in slots}
+            subset={key:slots[key].public(now) for key in order if key in slots}
             observation=[]
             if task_id is not None:
                 valid_id(task_id)
@@ -407,16 +426,16 @@ class ContextManager:
                 while packet["task_observations"] and size()>self.budget_chars:
                     packet["task_observations"].pop(0)
             if size()>self.budget_chars and "user_approved_facts" in packet:
-                for k in sorted(packet["user_approved_facts"],reverse=True):
+                for key in sorted(packet["user_approved_facts"],reverse=True):
                     if size()<=self.budget_chars: break
-                    del packet["user_approved_facts"][k]
-            for k in reversed(order):
+                    del packet["user_approved_facts"][key]
+            for key in reversed(order):
                 if size()>self.budget_chars:
-                    packet["slots"].pop(k,None)
+                    packet["slots"].pop(key,None)
             if size()>self.budget_chars:
                 raise ValueError("Context packet budget below structural minimum")
             return packet
 
     def as_model_json(self, session_id, task_id=None, *, for_needle=False):
-        return json.dumps(self.compact(session_id,task_id,for_needle=for_needle),
-                          sort_keys=True,separators=(",",":"),allow_nan=False)
+        from ..validators import to_compact_json
+        return to_compact_json(self.compact(session_id, task_id, for_needle=for_needle))
