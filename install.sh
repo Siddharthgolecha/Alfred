@@ -12,7 +12,7 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     exec python3 -m scripts.installer.core "$@" 2>/dev/null || {
         exec python -m scripts.installer.core "$@" 2>/dev/null || {
             cat <<'EOF'
-Usage: ./install.sh [--auto] [--plain] [--customize] [--service]
+Usage: ./install.sh [--auto] [--plain] [--customize] [--service] [--repair]
                     [--backend ollama|lmstudio|llamacpp|skip]
                     [--wheelhouse PATH] [--skip-models]
 EOF

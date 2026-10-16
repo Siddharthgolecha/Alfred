@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import http.client
 import json
+import copy
 import os
 from pathlib import Path
 import platform
@@ -18,6 +20,7 @@ import urllib.error
 import urllib.request
 
 from .ui import Terminal
+from .state import InstallerLock, InstallerState, cache_root, fingerprint, log_path, state_root
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = "0.1.5rc1"
@@ -33,6 +36,7 @@ def parser():
     p.add_argument("--backend", choices=("ollama", "lmstudio", "llamacpp", "skip"))
     p.add_argument("--wheelhouse", help="Use verified local Harness wheels; never fetch replacements")
     p.add_argument("--skip-models", action="store_true", help="Skip every model download")
+    p.add_argument("--repair", action="store_true", help="Preserve and rebuild a damaged Alfred environment")
     p.add_argument("--no-update-check", action="store_true", help=argparse.SUPPRESS)
     return p
 
@@ -320,45 +324,125 @@ def _wheel_records(wheelhouse, target):
 
 
 def _download_verified_wheels(directory, target, ui):
-    """Download only the exact wheel bytes pinned in the repository lock."""
+    """Reuse or download only exact pinned wheel bytes, retaining safe partials."""
     lock = json.loads((ROOT / "coordination" / "deepseek-harness-lock.json").read_text())
     verified = []
     for row in (lock["sdk"], lock["runtime"][target]):
         path = directory / row["filename"]
+        partial = path.with_suffix(path.suffix + ".part")
         url = row.get("url")
         if not url:
             raise RuntimeError(f"The lock has no pinned download URL for {row['filename']}")
-        digest = hashlib.sha256()
-        request = urllib.request.Request(url, headers={"User-Agent": "Alfred-installer/1"})
-        try:
-            with urllib.request.urlopen(request, timeout=45) as response, path.open("wb") as out:
-                total = int(response.headers.get("Content-Length", "0") or 0) or None
-                ui.info("Downloading pinned " + path.name)
-                received = 0
-                last_update = 0.0
-                while True:
-                    block = response.read(1024 * 1024)
-                    if not block:
-                        break
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name != "nt":
+            path.parent.chmod(0o700)
+        if partial.is_symlink():
+            partial.unlink()
+
+        def digest_file(candidate):
+            digest = hashlib.sha256()
+            with candidate.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
                     digest.update(block)
-                    out.write(block)
-                    received += len(block)
-                    now = time.monotonic()
-                    if now - last_update >= 0.25:
-                        ui.download_progress(path.name, received, total)
-                        last_update = now
-                ui.finish_download()
-        except (OSError, urllib.error.URLError) as exc:
-            raise RuntimeError(f"Could not download pinned Harness wheel {path.name}: {exc}") from exc
-        if digest.hexdigest() != row["sha256"]:
-            path.unlink(missing_ok=True)
-            raise RuntimeError(f"SHA-256 mismatch for downloaded {path.name}; wheel rejected")
+            return digest.hexdigest()
+
+        if path.is_file() and not path.is_symlink():
+            if digest_file(path) == row["sha256"]:
+                if os.name != "nt":
+                    path.chmod(0o600)
+                ui.ok("Using cached, verified " + path.name)
+                verified.append(path)
+                continue
+            path.unlink()
+        for attempt in range(3):
+            offset = partial.stat().st_size if partial.is_file() and not partial.is_symlink() else 0
+            headers = {"User-Agent": "Alfred-installer/1"}
+            if offset:
+                headers["Range"] = f"bytes={offset}-"
+            request = urllib.request.Request(url, headers=headers)
+            try:
+                with urllib.request.urlopen(request, timeout=45) as response:
+                    status = getattr(response, "status", response.getcode())
+                    append = False
+                    if offset and status == 206:
+                        content_range = response.headers.get("Content-Range", "")
+                        if not content_range.startswith(f"bytes {offset}-"):
+                            partial.unlink(missing_ok=True)
+                            raise RuntimeError("Server returned an invalid Harness download range")
+                        append = True
+                    elif offset and status == 200:
+                        # Range requests are optional; a full response replaces stale partial data.
+                        offset = 0
+                    elif status != 200:
+                        raise RuntimeError(f"Unexpected HTTP status {status} for {path.name}")
+                    total_header = response.headers.get("Content-Length", "")
+                    total = (int(total_header) + offset) if total_header.isdigit() else None
+                    ui.info("Downloading pinned " + path.name +
+                            (f" (resuming at {offset // (1024 * 1024)} MiB)" if offset else ""))
+                    received = offset
+                    mode = "ab" if append else "wb"
+                    with partial.open(mode) as out:
+                        last_update = 0.0
+                        while True:
+                            block = response.read(1024 * 1024)
+                            if not block:
+                                break
+                            out.write(block)
+                            received += len(block)
+                            now = time.monotonic()
+                            if now - last_update >= 0.25:
+                                ui.download_progress(path.name, received, total)
+                                last_update = now
+                        out.flush()
+                        os.fsync(out.fileno())
+                    ui.finish_download()
+                if digest_file(partial) != row["sha256"]:
+                    partial.unlink(missing_ok=True)
+                    raise RuntimeError(f"SHA-256 mismatch for downloaded {path.name}; wheel rejected")
+                os.replace(partial, path)
+                if os.name != "nt":
+                    path.chmod(0o600)
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code == 416 and attempt < 2:
+                    partial.unlink(missing_ok=True)
+                    continue
+                if attempt == 2:
+                    raise RuntimeError(f"Could not download pinned Harness wheel {path.name}: {exc}") from exc
+                time.sleep(2 ** attempt)
+            except (OSError, urllib.error.URLError, http.client.HTTPException, TimeoutError) as exc:
+                if attempt == 2:
+                    raise RuntimeError(f"Could not download pinned Harness wheel {path.name}: {exc}") from exc
+                time.sleep(2 ** attempt)
+            except RuntimeError:
+                raise
         ui.ok("Verified " + path.name)
         verified.append(path)
     return verified
 
 
-def _service(ui, python, root):
+def _package_snapshot(uv, python, env):
+    result = subprocess.run([str(uv), "pip", "list", "--format", "json", "--python", str(python)],
+                            capture_output=True, text=True, env=env, check=False, timeout=30)
+    if result.returncode:
+        return None
+    try:
+        rows = json.loads(result.stdout)
+        return {str(row["name"]).lower().replace("_", "-"): str(row["version"])
+                for row in rows if isinstance(row, dict) and "name" in row and "version" in row}
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def _file_hash(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _service(ui, python, root, config=None):
     if platform.system() != "Linux" or not _has("systemctl"):
         ui.warn("Automatic startup is available on Linux with systemd only")
         return False
@@ -370,11 +454,28 @@ def _service(ui, python, root):
     unit_dir = Path.home() / ".config" / "systemd" / "user"
     unit_dir.mkdir(parents=True, exist_ok=True)
     unit = unit_dir / "alfred.service"
+    def quote(value):
+        value = str(value).replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
+        return '"' + value + '"'
+
+    argv = [python, "-m", "alfred"]
+    if config is not None:
+        argv.extend(("--config", config))
+    command = " ".join(quote(item) for item in argv)
     body = ("[Unit]\nDescription=Alfred voice assistant\nAfter=default.target\n\n"
-            "[Service]\nType=simple\nWorkingDirectory=" + str(root) + "\nExecStart=" + str(python) +
-            " -m alfred\nRestart=on-failure\nRestartPreventExitStatus=2\n\n"
+            "[Service]\nType=simple\nWorkingDirectory=" + quote(root) + "\nExecStart=" + command +
+            "\nRestart=on-failure\nRestartPreventExitStatus=2\n\n"
             "[Install]\nWantedBy=default.target\n")
-    unit.write_text(body, encoding="utf-8")
+    fd, name = tempfile.mkstemp(prefix=".alfred-service-", suffix=".tmp", dir=unit_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, unit)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(name)
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
     subprocess.run(["systemctl", "--user", "enable", "--now", "alfred.service"], check=True)
     ui.ok("Autostart enabled. Check with: systemctl --user status alfred")
@@ -387,8 +488,18 @@ class Wizard:
         self.system = platform.system()
         self.config_path = ROOT / "config.json"
         self.config = load_config(self.config_path)
+        self.original_config = copy.deepcopy(self.config)
         self.installed = self.config_path.exists() or (ROOT / ".venv").exists()
         self.settings = {}
+        self.state = InstallerState(ROOT)
+        self._restore_choices = False
+        saved = self.state.saved_choices()
+        if saved:
+            config_hash = fingerprint(self.config)
+            self._restore_choices = config_hash in (
+                saved.get("base_config_hash"), saved.get("configured_config_hash"))
+            if self._restore_choices:
+                self.settings.update(saved["values"])
         self.existing_backends = _detect_backend(ui)
         self.existing_audio = _detect_audio(self.system)
 
@@ -429,9 +540,13 @@ class Wizard:
             audio = self.config.get("audio", {})
             source = audio.get("direct_source", "")
             mode = audio.get("mode", "auto")
-            self.settings["audio"] = (f"device:{self.existing_audio.index(source)}"
-                                       if source in self.existing_audio else
-                                       "auto" if mode == "auto" else "later")
+            if source in self.existing_audio:
+                self.settings["audio"] = f"device:{self.existing_audio.index(source)}"
+            elif mode == "auto":
+                self.settings["audio"] = "auto"
+            else:
+                # Keep a configured but temporarily unavailable device intact.
+                self.settings["audio"] = "saved"
             return
         if self.existing_audio:
             self.ui.info("Detected microphones: " + ", ".join(self.existing_audio[:5]))
@@ -582,6 +697,15 @@ class Wizard:
     def collect(self):
         self.ui.header("guided setup")
         self.preflight()
+        if self._restore_choices and not self.args.customize:
+            if self.args.backend:
+                self.settings["backend"] = self.args.backend
+            self.settings["auto"] = self.args.auto
+            self.settings["skip_models"] = (self.settings.get("skip_models", False)
+                                             or self.args.skip_models
+                                             or _read_env_bool("ALFRED_SKIP_MODELS"))
+            self.ui.info("Resuming with the saved setup choices; completed steps will be verified and reused.")
+            return True
         if self.installed and not self.args.customize and not self.args.auto:
             flow = self.ui.choose("Welcome back. What would you like to do?", _options([
                 ("quick", "Quick setup", "Keep saved choices and repair missing install steps."),
@@ -607,6 +731,10 @@ class Wizard:
                 self.quick = False
                 self.choose_audio()
                 continue
+            if result == "continue":
+                self.settings["auto"] = self.args.auto
+                self.state.remember_choices(self.settings,
+                                            base_config_hash=fingerprint(self.original_config))
             return result == "continue"
 
     def _configure(self):
@@ -631,12 +759,86 @@ class Wizard:
         qwen = self.config.setdefault("qwen", {})
         backend = self.settings["backend"]
         if backend != "skip":
-            qwen["backend"] = {"lmstudio": "lm_studio", "llamacpp": "llama_cpp"}.get(backend, backend)
-            qwen["url"] = {"ollama": "http://127.0.0.1:11434",
-                           "lmstudio": "http://127.0.0.1:1234",
-                           "llamacpp": "http://127.0.0.1:8080"}.get(backend, qwen.get("url", ""))
+            previous_backend = qwen.get("backend", "auto")
+            defaults = {"ollama": "http://127.0.0.1:11434",
+                        "lm_studio": "http://127.0.0.1:1234",
+                        "llama_cpp": "http://127.0.0.1:8080"}
+            configured_backend = {"lmstudio": "lm_studio", "llamacpp": "llama_cpp"}.get(backend, backend)
+            qwen["backend"] = configured_backend
+            # A user-selected loopback port is configuration, not a backend default.
+            old_url = qwen.get("url", "")
+            if not old_url or old_url == defaults.get(previous_backend):
+                qwen["url"] = defaults.get(configured_backend, "")
             if self.settings.get("model"):
                 qwen["model"] = self.settings["model"]
+
+    def _step(self, name, inputs, check, action):
+        receipt = self.state.data["steps"].get(name, {})
+        if self.state.matches(name, inputs) and check(receipt.get("output")):
+            self.ui.ok(name.replace("_", " ").capitalize() + " already complete; reusing it")
+            return receipt.get("output")
+        self.state.forget(name)
+        output = action()
+        if not check(output):
+            raise RuntimeError(f"Installation step {name.replace('_', ' ')} did not pass its verification")
+        self.state.complete(name, inputs, output=output)
+        return output
+
+    def install_service(self, python):
+        if not self.settings.get("service"):
+            return True
+        inputs = {"python": str(python), "root": str(ROOT.resolve()),
+                  "config": str(self.config_path.resolve())}
+
+        def ready(output):
+            if isinstance(output, dict) and output.get("enabled") is False:
+                return True
+            return subprocess.run(["systemctl", "--user", "is-enabled", "alfred.service"],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  check=False).returncode == 0
+
+        def enable():
+            enabled = _service(self.ui, python, ROOT, self.config_path)
+            return {"enabled": enabled}
+
+        output = self._step("service", inputs, ready, enable)
+        return bool(output and output.get("enabled"))
+
+    def _environment_ready(self, python):
+        try:
+            result = subprocess.run([str(python), "-c",
+                                     "import json,sys; print(json.dumps({'prefix':sys.prefix,'version':list(sys.version_info[:3])}))"],
+                                    capture_output=True, text=True, timeout=8, check=False)
+            value = json.loads(result.stdout) if result.returncode == 0 else {}
+            prefix = Path(value.get("prefix", "")).resolve()
+            version = value.get("version", [])
+            return (prefix == (ROOT / ".venv").resolve() and len(version) == 3
+                    and tuple(version[:2]) == tuple(sys.version_info[:2])
+                    and tuple(version[:2]) >= (3, 10))
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return False
+
+    def _project_ready(self, python):
+        probe = ("import importlib.metadata as m,json; "
+                 "d=m.distribution('alfred-jetson'); "
+                 "print(json.dumps({'version':d.version,'direct':d.read_text('direct_url.json')}))")
+        try:
+            result = subprocess.run([str(python), "-c", probe], capture_output=True,
+                                    text=True, timeout=8, check=False)
+            value = json.loads(result.stdout) if result.returncode == 0 else {}
+            direct = json.loads(value["direct"]) if value.get("direct") else {}
+            return (value.get("version") == "0.1.0"
+                    and direct.get("url") == ROOT.resolve().as_uri()
+                    and direct.get("dir_info", {}).get("editable") is True)
+        except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+            return False
+
+    def _runtime_ready(self, output, current):
+        if not isinstance(output, dict) or not isinstance(current, dict):
+            return False
+        harness_packages = {"deepseek-harness-sdk", "deepseek-harness-runtime-bin"}
+        return all(name in harness_packages or current.get(name) == version
+                   for name, version in output.items())
 
     def install(self):
         env_root = ROOT / ".venv"
@@ -644,45 +846,152 @@ class Wizard:
         uv = _install_uv(self.ui, self.system, auto=self.args.auto)
         env = os.environ.copy()
         env["PATH"] = str(Path(uv).parent) + os.pathsep + env.get("PATH", "")
-        log = Path.home() / ".local" / "state" / "alfred" / "installer.log"
-        if self.system == "Windows":
-            local = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Alfred" / "logs"
-            log = local / "installer.log"
+        log = log_path()
+        log.parent.mkdir(parents=True, exist_ok=True)
         _ensure_system_tools(self.ui, self.system, self.settings)
-        if not env_root.exists():
-            _call([uv, "venv", str(env_root), "--python", sys.executable], self.ui,
-                  "Creating Alfred's isolated environment", cwd=ROOT, env=env, log=log)
-        # The project dependency set is explicit so pinned Harness bytes are
-        # installed only after their lock hashes have been checked.
-        _call([uv, "pip", "install", "--python", str(python), "--no-deps", "-e", str(ROOT)],
-              self.ui, "Installing Alfred", cwd=ROOT, env=env, log=log)
-        _call([uv, "pip", "install", "--python", str(python), "cactus-needle>=0.1",
-               "pydantic>=2.12,<3"], self.ui, "Installing Alfred's Python runtime",
-              cwd=ROOT, env=env, log=log)
+        self.existing_backends = _detect_backend(self.ui)
+        self.existing_audio = _detect_audio(self.system)
+
+        if self.args.repair and env_root.exists():
+            backup_root = ROOT / ".venv.recovery"
+            backup_root.mkdir(exist_ok=True)
+            backup = backup_root / ("venv-" + str(time.time_ns()))
+            os.replace(env_root, backup)
+            self.ui.warn("Preserved the previous Alfred environment at " + str(backup))
+            self.state.forget("environment")
+            self.state.forget("project")
+            self.state.forget("dependencies")
+            self.state.forget("harness")
+
+        if env_root.exists() and not self._environment_ready(python):
+            raise RuntimeError("The existing .venv is damaged or uses another Python version. "
+                               "Rerun with --repair to preserve it and build a matching environment")
+
+        env_inputs = {"python": str(Path(sys.executable).resolve()),
+                      "version": list(sys.version_info[:3]), "platform": self.settings["runtime_target"]}
+        def create_environment():
+            if not self._environment_ready(python):
+                _call([uv, "venv", str(env_root), "--python", sys.executable], self.ui,
+                      "Creating Alfred's isolated environment", cwd=ROOT, env=env, log=log)
+            return {"python": str(python)}
+
+        self._step("environment", env_inputs,
+                   lambda _output: self._environment_ready(python), create_environment)
+
+        project_inputs = {"pyproject": _file_hash(ROOT / "pyproject.toml"),
+                          "python": str(python), "root": str(ROOT.resolve())}
+        self._step("project", project_inputs, lambda _output: self._project_ready(python),
+                   lambda: (_call([uv, "pip", "install", "--python", str(python), "--no-deps",
+                                   "-e", str(ROOT)], self.ui, "Installing Alfred", cwd=ROOT,
+                                  env=env, log=log), {"editable": True})[1])
+
+        dependency_inputs = {"lock": _file_hash(ROOT / "uv.lock"),
+                            "project": _file_hash(ROOT / "pyproject.toml"),
+                            "python": list(sys.version_info[:3]),
+                            "target": self.settings["runtime_target"]}
+
+        def install_dependencies():
+            temp_dir = state_root() / "requirements"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            requirements = temp_dir / (fingerprint(dependency_inputs) + ".txt")
+            try:
+                _call([uv, "export", "--frozen", "--no-dev", "--no-emit-project",
+                       "--no-emit-package", "deepseek-harness-sdk",
+                       "--no-emit-package", "deepseek-harness-runtime-bin",
+                       "--format", "requirements.txt", "--output-file", str(requirements)],
+                      self.ui, "Preparing locked runtime dependencies", cwd=ROOT, env=env, log=log)
+                _call([uv, "pip", "install", "--python", str(python), "--no-deps",
+                       "--requirement", str(requirements)], self.ui,
+                      "Installing Alfred's locked Python runtime", cwd=ROOT, env=env, log=log)
+            finally:
+                requirements.unlink(missing_ok=True)
+            packages = _package_snapshot(uv, python, env)
+            if packages is None:
+                raise RuntimeError("Could not verify the installed Python runtime packages")
+            return packages
+
+        current_packages = _package_snapshot(uv, python, env)
+        dependency_receipt = self.state.data["steps"].get("dependencies", {})
+        if not (self.state.matches("dependencies", dependency_inputs)
+                and self._runtime_ready(dependency_receipt.get("output"), current_packages)):
+            self._step("dependencies", dependency_inputs,
+                       lambda output: self._runtime_ready(output, _package_snapshot(uv, python, env)),
+                       install_dependencies)
 
         target = self.settings["runtime_target"]
-        temp = None
-        try:
+        wheel_lock = json.loads((ROOT / "coordination" / "deepseek-harness-lock.json").read_text(encoding="utf-8"))
+        harness_inputs = {"lock": _file_hash(ROOT / "coordination" / "deepseek-harness-lock.json"),
+                          "target": target, "sdk": wheel_lock["sdk"]["sha256"],
+                          "runtime": wheel_lock["runtime"][target]["sha256"], "python": str(python)}
+
+        def harness_ready(output):
+            packages = _package_snapshot(uv, python, env)
+            return (isinstance(output, dict) and packages is not None
+                    and packages.get("deepseek-harness-sdk") == RUNTIME
+                    and packages.get("deepseek-harness-runtime-bin") == RUNTIME
+                    and output.get("verified_wheels") ==
+                    [wheel_lock["sdk"]["sha256"], wheel_lock["runtime"][target]["sha256"]])
+
+        def install_harness():
             if self.args.wheelhouse:
                 wheels = _wheel_records(self.args.wheelhouse, target)
             else:
-                temp = Path(tempfile.mkdtemp(prefix="alfred-harness-"))
-                wheels = _download_verified_wheels(temp, target, self.ui)
+                wheel_dir = (cache_root() / "checkouts" / self.state.path.parent.name /
+                             "harness" / target / RUNTIME /
+                             fingerprint([wheel_lock["sdk"]["sha256"],
+                                          wheel_lock["runtime"][target]["sha256"]]))
+                wheels = _download_verified_wheels(wheel_dir, target, self.ui)
             _call([uv, "pip", "install", "--python", str(python), "--no-deps",
                    *map(str, wheels)], self.ui, "Installing verified DeepSeek Harness",
                   cwd=ROOT, env=env, log=log)
-        finally:
-            if temp:
-                shutil.rmtree(temp, ignore_errors=True)
+            return {"verified_wheels": [_file_hash(wheel) for wheel in wheels]}
+
+        self._step("harness", harness_inputs, harness_ready, install_harness)
 
         self._configure()
-        save_config(self.config_path, self.config)
-        self._install_launcher(python)
-        self._backend(uv, python, env, log)
+        configured_hash = fingerprint(self.config)
+        choice_row = self.state.saved_choices() or {}
+        self.state.remember_choices(self.settings, base_config_hash=choice_row.get(
+            "base_config_hash", fingerprint(self.original_config)))
+        self.state.data["choices"]["configured_config_hash"] = configured_hash
+        self.state.save()
+        if self.config != self.original_config:
+            save_config(self.config_path, self.config)
+
+        launcher_inputs = {"python": str(python), "config": str(self.config_path.resolve()),
+                           "system": self.system}
+        launcher_path = (Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Programs" /
+                         "Alfred" / "alfred.cmd" if self.system == "Windows" else
+                         Path.home() / ".local" / "bin" / "alfred")
+        expected_launcher = (f'@echo off\n"{python}" -m alfred --config "{self.config_path}" %*\n'
+                             if self.system == "Windows" else None)
+
+        def launcher_ready(_output):
+            try:
+                content = launcher_path.read_text(encoding="utf-8")
+                if self.system == "Windows":
+                    return content == expected_launcher
+                return (str(python) in content and str(self.config_path.resolve()) in content
+                        and os.access(launcher_path, os.X_OK))
+            except OSError:
+                return False
+
+        self._step("launcher", launcher_inputs, launcher_ready,
+                   lambda: (self._install_launcher(python), {"path": str(launcher_path)})[1])
+
+        backend_inputs = {"backend": self.settings["backend"],
+                          "url": self.config.get("qwen", {}).get("url", ""),
+                          "system": self.system}
+        def backend_ready(_output):
+            if self.settings["backend"] in ("skip", "lmstudio", "llamacpp"):
+                return True
+            return _has("ollama") or "Ollama server" in _detect_backend(self.ui)
+
+        self._step("backend", backend_inputs, backend_ready,
+                   lambda: (self._backend(uv, python, env, log), {"backend": self.settings["backend"]})[1])
+
         if not self.settings["skip_models"]:
             self._models(python, log, env)
-        if self.settings["service"]:
-            _service(self.ui, python, ROOT)
         return python
 
     def _install_launcher(self, python):
@@ -765,11 +1074,28 @@ class Wizard:
         for model in ("needle3", "whistle"):
             cached = subprocess.run([str(needle), "list"], capture_output=True, text=True,
                                     timeout=8, check=False)
-            if cached.returncode == 0 and model.lower() in cached.stdout.lower():
+            import re
+            present = (cached.returncode == 0 and
+                       re.search(r"(?<![a-z0-9_.-])" + re.escape(model.lower()) +
+                                 r"(?![a-z0-9_.-])", cached.stdout.lower()) is not None)
+            if present:
+                self.state.data.setdefault("choices", {}).setdefault("models", {})[model] = "downloaded"
+                self.state.save()
                 self.ui.ok(model + " is already cached")
-            elif self.args.auto or self.ui.confirm(f"Download the {model} model? (~250 MB combined)", default=True):
+                continue
+            decisions = self.state.data.setdefault("choices", {}).setdefault("models", {})
+            decision = decisions.get(model)
+            if decision not in ("download", "defer"):
+                decision = ("download" if self.args.auto or
+                            self.ui.confirm(f"Download the {model} model? (~250 MB combined)", default=True)
+                            else "defer")
+                decisions[model] = decision
+                self.state.save()
+            if decision == "download":
                 _call([str(needle), "download", model], self.ui, "Downloading " + model,
                       cwd=ROOT, env=env, log=log)
+                decisions[model] = "downloaded"
+                self.state.save()
         if self.settings["backend"] == "ollama" and _has("ollama"):
             tag = self.settings.get("model") or DEFAULT_MODEL
             self.ui.info(f"Ollama model: {tag}")
@@ -779,10 +1105,26 @@ class Wizard:
                 line.split() and line.split()[0] == tag for line in listed.stdout.splitlines()[1:])
             if cached:
                 self.ui.ok(tag + " is already available")
-            elif self.args.auto or self.ui.confirm(f"Download {tag} with Ollama? Model size depends on the quantization.", default=False):
+                self.state.data.setdefault("choices", {}).setdefault("models", {})["ollama"] = "downloaded"
+                self.state.save()
+            else:
+                decisions = self.state.data.setdefault("choices", {}).setdefault("models", {})
+                decision = decisions.get("ollama")
+                if decision not in ("download", "defer"):
+                    decision = ("download" if self.args.auto or self.ui.confirm(
+                        f"Download {tag} with Ollama? Model size depends on the quantization.",
+                        default=False) else "defer")
+                    decisions["ollama"] = decision
+                    self.state.save()
+                if decision != "download":
+                    return
                 _call(["ollama", "pull", tag], self.ui, "Downloading " + tag, log=log)
                 self.config["qwen"]["model"] = tag
-                save_config(self.config_path, self.config)
+                self.state.data.setdefault("choices", {}).setdefault("models", {})["ollama"] = "downloaded"
+                self.state.data["choices"]["configured_config_hash"] = fingerprint(self.config)
+                self.state.save()
+                if self.config != self.original_config:
+                    save_config(self.config_path, self.config)
 
 
 def main(argv=None):
@@ -792,32 +1134,31 @@ def main(argv=None):
     ui = Terminal(plain=args.plain or _read_env_bool("ALFRED_PLAIN"))
     old_handler = signal.getsignal(signal.SIGINT)
     try:
-        wizard = Wizard(args, ui)
-        wizard.settings["auto"] = args.auto
-        if not wizard.collect():
-            ui.warn("Setup paused before installation. Run the installer again when ready.")
-            return 0
-        python = wizard.install()
+        with InstallerLock(ROOT):
+            wizard = Wizard(args, ui)
+            wizard.settings["auto"] = args.auto
+            if not wizard.collect():
+                ui.warn("Setup paused before installation. Run the installer again when ready.")
+                return 0
+            python = wizard.install()
         ui.section("System check", "verifying the installed backend, microphone and Harness")
         doctor = subprocess.run([str(python), "-m", "alfred", "--config",
                                  str(wizard.config_path), "--doctor"], cwd=ROOT, check=False)
         if doctor.returncode == 0:
+            if wizard.settings.get("service") and not wizard.install_service(python):
+                ui.warn("Alfred is ready, but automatic startup could not be enabled on this system")
             ui.ok("Alfred is ready. Open a new terminal and run: alfred")
             return 0
         ui.warn("Setup complete, but a readiness check needs attention")
         ui.info("Run `alfred --doctor` after setting up a microphone and local model server")
-        ui.info("Installer log: " + str(Path.home() / ".local" / "state" / "alfred" / "installer.log"))
+        ui.info("Installer log: " + str(log_path()))
         return 0
     except KeyboardInterrupt:
         ui.warn("Setup interrupted. Completed steps are safe to reuse; rerun the installer to continue.")
         return 130
-    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         ui.error(str(exc))
-        log = (Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Alfred" / "logs" / "installer.log"
-               if platform.system() == "Windows" else
-               Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state")))
-               / "alfred" / "installer.log")
-        ui.info("Installer log: " + str(log))
+        ui.info("Installer log: " + str(log_path()))
         return 1
     finally:
         signal.signal(signal.SIGINT, old_handler)

@@ -4,12 +4,15 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 from types import SimpleNamespace
+import urllib.error
 import unittest
 from unittest.mock import Mock, patch
 
 from scripts.installer import core
+from scripts.installer.state import InstallerLock, InstallerState
 from scripts.installer.ui import Terminal
 from alfred.audio import AudioManager, WindowsAudioManager, _windows_capture_command
 from alfred.feedback import _tts_argv
@@ -102,6 +105,208 @@ class ConfigPersistenceTests(unittest.TestCase):
                  patch.dict(os.environ, {"ALFRED_BACKEND": "llamacpp"}):
                 wizard = core.Wizard(args, ui)
                 self.assertEqual(wizard.choose_backend(), "lmstudio")
+
+    def test_quick_setup_preserves_custom_backend_url_and_missing_bluetooth_device(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "coordination").mkdir()
+            (root / "config.example.json").write_text(json.dumps({
+                "audio": {"mode": "bluetooth", "bluetooth_address": "AA:BB:CC:DD:EE:FF",
+                          "direct_source": "bluez_input.AA_BB_CC_DD_EE_FF.0"},
+                "qwen": {"backend": "ollama", "url": "http://127.0.0.1:22434",
+                         "model": "custom:latest"}}))
+            args = SimpleNamespace(backend=None, auto=False, customize=False,
+                                   skip_models=True, service=False, wheelhouse=None)
+            ui = Terminal(stream=io.StringIO(), input_stream=io.StringIO(), plain=True)
+            with patch.object(core, "ROOT", root), patch.object(core, "_detect_audio", return_value=[]), \
+                 patch.object(core, "_detect_backend", return_value=[]):
+                wizard = core.Wizard(args, ui)
+                wizard.quick = True
+                wizard.choose_audio()
+                wizard.settings.update(backend="ollama", model="custom:latest")
+                self.assertEqual(wizard.settings["audio"], "saved")
+                wizard._configure()
+                self.assertEqual(wizard.config["audio"]["bluetooth_address"], "AA:BB:CC:DD:EE:FF")
+                self.assertEqual(wizard.config["audio"]["direct_source"],
+                                 "bluez_input.AA_BB_CC_DD_EE_FF.0")
+                self.assertEqual(wizard.config["qwen"]["url"], "http://127.0.0.1:22434")
+
+    def test_installer_state_is_atomic_and_scoped_to_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_home = root / "state"
+            with patch("scripts.installer.state.state_root", return_value=state_home):
+                state = InstallerState(root / "checkout")
+                inputs = {"python": "3.12", "lock": "abc"}
+                state.complete("runtime", inputs, output={"pydantic": "2.12.0"})
+                state.remember_choices({"backend": "ollama"}, base_config_hash="base")
+                loaded = InstallerState(root / "checkout")
+                self.assertTrue(loaded.matches("runtime", inputs))
+                self.assertEqual(loaded.data["steps"]["runtime"]["output"],
+                                 {"pydantic": "2.12.0"})
+                self.assertEqual(loaded.saved_choices()["values"], {"backend": "ollama"})
+                self.assertFalse(loaded.matches("runtime", {**inputs, "python": "3.10"}))
+                self.assertNotEqual(loaded.path, InstallerState(root / "other-checkout").path)
+                self.assertEqual(list(loaded.path.parent.glob("*.tmp")), [])
+
+    def test_checkout_lock_rejects_concurrent_installers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch("scripts.installer.state.state_root", return_value=root / "state"):
+                with InstallerLock(root / "checkout"):
+                    with self.assertRaisesRegex(RuntimeError, "Another Alfred installer"):
+                        with InstallerLock(root / "checkout"):
+                            pass
+
+    def test_unchanged_second_install_reuses_environment_packages_and_harness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "coordination").mkdir()
+            (root / "pyproject.toml").write_text("[project]\nname='alfred-jetson'\nversion='0.1.0'\n")
+            (root / "uv.lock").write_text("locked packages")
+            sdk_data, runtime_data = b"verified sdk wheel", b"verified runtime wheel"
+            sdk_sha, runtime_sha = (hashlib.sha256(sdk_data).hexdigest(),
+                                    hashlib.sha256(runtime_data).hexdigest())
+            lock = {"version": core.RUNTIME,
+                    "sdk": {"filename": "sdk.whl", "sha256": sdk_sha},
+                    "runtime": {"linux_x86_64": {"filename": "runtime.whl",
+                                                    "sha256": runtime_sha}}}
+            (root / "coordination" / "deepseek-harness-lock.json").write_text(json.dumps(lock))
+            wheels = [root / "sdk.whl", root / "runtime.whl"]
+            wheels[0].write_bytes(sdk_data)
+            wheels[1].write_bytes(runtime_data)
+            state_dir = root / "state"
+            packages = {"cactus-needle": "3.2.2", "pydantic": "2.14.1",
+                        "alfred-jetson": "0.1.0"}
+            ui = SimpleNamespace(ok=Mock(), info=Mock(), warn=Mock(), section=Mock(),
+                                 out=io.StringIO())
+            args = SimpleNamespace(auto=True, repair=False, wheelhouse=None)
+            with patch.object(core, "ROOT", root), \
+                 patch.object(core, "state_root", return_value=state_dir), \
+                 patch("scripts.installer.state.state_root", return_value=state_dir), \
+                 patch.object(core, "_install_uv", return_value="/tools/uv"), \
+                 patch.object(core, "_ensure_system_tools"), \
+                 patch.object(core, "_detect_backend", return_value=[]), \
+                 patch.object(core, "_detect_audio", return_value=[]), \
+                 patch.object(core, "_package_snapshot", side_effect=lambda *_args: dict(packages)), \
+                 patch.object(core, "_download_verified_wheels", return_value=wheels) as download, \
+                 patch.object(core, "_call") as call, \
+                 patch.object(core.Wizard, "_environment_ready", return_value=True), \
+                 patch.object(core.Wizard, "_project_ready", return_value=True), \
+                 patch("pathlib.Path.home", return_value=root / "home"), \
+                 patch.object(core.Wizard, "_install_launcher") as launcher:
+                wizard = core.Wizard.__new__(core.Wizard)
+                wizard.args, wizard.ui, wizard.system = args, ui, "Linux"
+                wizard.config_path = root / "config.json"
+                wizard.config = {"audio": {"mode": "auto", "direct_source": ""},
+                                 "qwen": {"backend": "auto", "url": "", "model": ""}}
+                wizard.original_config = json.loads(json.dumps(wizard.config))
+                wizard.installed = False
+                wizard.settings = {"runtime_target": "linux_x86_64", "backend": "skip",
+                                   "model": "", "audio": "saved", "skip_models": True,
+                                   "service": False, "auto": True}
+                wizard.state = InstallerState(root)
+                wizard.existing_backends, wizard.existing_audio = [], []
+                def install_command(argv, _ui, label, **_kwargs):
+                    if label == "Installing verified DeepSeek Harness":
+                        packages.update({"deepseek-harness-sdk": core.RUNTIME,
+                                         "deepseek-harness-runtime-bin": core.RUNTIME})
+                    return subprocess.CompletedProcess(argv, 0)
+                call.side_effect = install_command
+                def write_launcher(_python):
+                    path = Path.home() / ".local" / "bin" / "alfred"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("#!/bin/sh\nexec " + str(root / ".venv" / "bin" / "python") +
+                                    " -m alfred --config " + str(root / "config.json") +
+                                    ' "$@"\n', encoding="utf-8")
+                    path.chmod(0o755)
+                launcher.side_effect = write_launcher
+                wizard.install()
+                first_run_commands = call.call_count
+                first_run_downloads = download.call_count
+                wizard.install()
+                self.assertGreater(first_run_commands, 0)
+                self.assertEqual(call.call_count, first_run_commands)
+                self.assertEqual(download.call_count, first_run_downloads)
+                self.assertEqual(first_run_downloads, 1)
+                self.assertEqual(launcher.call_count, 1)
+
+    def test_harness_download_resumes_partial_wheel_and_reuses_verified_sibling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "coordination").mkdir()
+            sdk, runtime = b"pinned sdk bytes", b"pinned runtime bytes for range resume"
+            lock = {"version": core.RUNTIME,
+                    "sdk": {"filename": "sdk.whl", "sha256": hashlib.sha256(sdk).hexdigest(),
+                            "url": "https://example.invalid/sdk.whl"},
+                    "runtime": {"linux_x86_64": {
+                        "filename": "runtime.whl", "sha256": hashlib.sha256(runtime).hexdigest(),
+                        "url": "https://example.invalid/runtime.whl"}}}
+            (root / "coordination" / "deepseek-harness-lock.json").write_text(json.dumps(lock))
+            cache = root / "cache"
+            cache.mkdir()
+            (cache / "sdk.whl").write_bytes(sdk)
+            partial = cache / "runtime.whl.part"
+            partial.write_bytes(runtime[:5])
+
+            class Response(io.BytesIO):
+                def __init__(self, data, start, *, fail_after=None):
+                    super().__init__(data)
+                    self.status = 206
+                    self.headers = {"Content-Range": f"bytes {start}-{start + len(data) - 1}/{len(runtime)}",
+                                    "Content-Length": str(len(data))}
+                    self.fail_after = fail_after
+                    self.read_count = 0
+                def getcode(self):
+                    return self.status
+                def read(self, size=-1):
+                    self.read_count += 1
+                    if self.fail_after and self.read_count > self.fail_after:
+                        raise urllib.error.URLError("connection reset")
+                    return super().read(size)
+
+            from urllib.request import Request
+            seen_ranges = []
+            def open_range(request, timeout):
+                offset = int(request.get_header("Range").split("=")[1].split("-")[0])
+                seen_ranges.append(offset)
+                if len(seen_ranges) == 1:
+                    return Response(runtime[offset:offset + 8], offset, fail_after=1)
+                return Response(runtime[offset:], offset)
+
+            ui = SimpleNamespace(ok=Mock(), info=Mock(), warn=Mock(),
+                                 download_progress=Mock(), finish_download=Mock())
+            with patch.object(core, "ROOT", root), \
+                 patch("urllib.request.urlopen", side_effect=open_range), \
+                 patch.object(core.time, "sleep"):
+                wheels = core._download_verified_wheels(cache, "linux_x86_64", ui)
+            self.assertEqual(seen_ranges, [5, 13])
+            self.assertEqual(wheels[0].read_bytes(), sdk)
+            self.assertEqual(wheels[1].read_bytes(), runtime)
+            self.assertFalse(partial.exists())
+            self.assertTrue(any("verified" in call.args[0].lower()
+                                for call in ui.ok.call_args_list))
+
+    def test_systemd_service_quotes_paths_and_includes_selected_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            service_root = home / "Alfred project"
+            config = service_root / "config file.json"
+            ui = SimpleNamespace(ok=Mock(), warn=Mock())
+            calls = []
+            def systemctl(argv, **_kwargs):
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0)
+            with patch.object(core.platform, "system", return_value="Linux"), \
+                 patch.object(core, "_has", return_value=True), \
+                 patch("scripts.installer.core.Path.home", return_value=home), \
+                 patch.object(core.subprocess, "run", side_effect=systemctl):
+                self.assertTrue(core._service(ui, Path("/venvs/my python"), service_root, config))
+            unit = (home / ".config" / "systemd" / "user" / "alfred.service").read_text()
+            self.assertIn('WorkingDirectory="' + str(service_root) + '"', unit)
+            self.assertIn('ExecStart="/venvs/my python" "-m" "alfred" "--config" "' +
+                          str(config) + '"', unit)
+            self.assertEqual(len(calls), 3)
 
     def test_auto_requires_a_backend_when_config_is_still_auto(self):
         with tempfile.TemporaryDirectory() as tmp:

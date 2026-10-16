@@ -45,7 +45,10 @@ Setup review
 
 Use arrow keys and Enter in a compatible terminal, or pass `--plain` for numbered prompts.
 On an existing installation, choose **Quick setup** to reuse saved choices or **Customize**
-to review them again.
+to review them again. Alfred saves completed installation steps in your user state directory
+and rechecks each step before reusing it. A rerun with an unchanged environment reuses the
+verified Harness wheels and installed packages. If the virtual environment is damaged, use
+`--repair` to move it to `.venv.recovery/` before Alfred builds a replacement.
 
 The installer uses Python's standard library for its terminal interface. It guides first-time
 setup, checks the selected platform, and verifies the pinned Harness wheels before installation.
@@ -65,6 +68,7 @@ readiness until `alfred --doctor` verifies a live microphone stream.
 | `--wheelhouse PATH` | Require local Harness wheels (verified; no network fallback) |
 | `--plain` | Use numbered line prompts |
 | `--customize` | Reopen setup choices on an existing install |
+| `--repair` | Preserve and rebuild a damaged `.venv` |
 
 :::{note}
 `config.json` is optional — Alfred runs on built-in defaults without it. The wizard creates or safely updates it when you choose a microphone or inference backend.
