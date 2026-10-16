@@ -1,0 +1,518 @@
+[
+  {
+    "id": "dev_gpu_status",
+    "partition": "development",
+    "intention": "Check GPU status",
+    "entry_point": "needle",
+    "capability_snapshot": {
+      "owner": "local",
+      "mode": "assistant",
+      "qwen_enabled": false,
+      "harness_enabled": false,
+      "needle_loop_enabled": false,
+      "allowed_services": [],
+      "named_tasks": [],
+      "native_model": "stub",
+      "system2_model": "disabled"
+    },
+    "mandatory_procedure_ids": [
+      "p6.status-read.v1"
+    ],
+    "allowed_tool_set": [
+      "get_gpu_status"
+    ],
+    "preconditions": [
+      {
+        "id": "user_intent_authorized",
+        "verdict": "pass"
+      }
+    ],
+    "expected_effects": [
+      {
+        "tool": "get_gpu_status",
+        "kind": "read"
+      }
+    ],
+    "verifiable_postconditions": [
+      {
+        "id": "gpu_result_available",
+        "verdict": "pass"
+      }
+    ],
+    "phase5_stub_response": {
+      "function_calls": [
+        {
+          "name": "get_gpu_status",
+          "arguments": {}
+        }
+      ],
+      "confidence": 0.98
+    },
+    "baseline_expected": {
+      "route": "direct",
+      "outcome": "completed",
+      "reason": "executed",
+      "observations": [
+        [
+          "get_gpu_status",
+          "returned"
+        ]
+      ],
+      "executed_reads": [
+        "get_gpu_status"
+      ],
+      "consequential_effects": []
+    },
+    "expected_phase6": {
+      "evidence": "unknown",
+      "procedure": "unknown",
+      "goal": "pass"
+    }
+  },
+  {
+    "id": "dev_system_status",
+    "partition": "development",
+    "intention": "Show system status",
+    "entry_point": "needle",
+    "capability_snapshot": {
+      "owner": "local",
+      "mode": "assistant",
+      "qwen_enabled": false,
+      "harness_enabled": false,
+      "needle_loop_enabled": false,
+      "allowed_services": [],
+      "named_tasks": [],
+      "native_model": "stub",
+      "system2_model": "disabled"
+    },
+    "mandatory_procedure_ids": [
+      "p6.status-read.v1"
+    ],
+    "allowed_tool_set": [
+      "get_system_status"
+    ],
+    "preconditions": [
+      {
+        "id": "user_intent_authorized",
+        "verdict": "pass"
+      }
+    ],
+    "expected_effects": [
+      {
+        "tool": "get_system_status",
+        "kind": "read"
+      }
+    ],
+    "verifiable_postconditions": [
+      {
+        "id": "system_result_available",
+        "verdict": "pass"
+      }
+    ],
+    "phase5_stub_response": {
+      "function_calls": [
+        {
+          "name": "get_system_status",
+          "arguments": {}
+        }
+      ],
+      "confidence": 0.98
+    },
+    "baseline_expected": {
+      "route": "direct",
+      "outcome": "completed",
+      "reason": "executed",
+      "observations": [
+        [
+          "get_system_status",
+          "returned"
+        ]
+      ],
+      "executed_reads": [
+        "get_system_status"
+      ],
+      "consequential_effects": []
+    },
+    "expected_phase6": {
+      "evidence": "unknown",
+      "procedure": "unknown",
+      "goal": "pass"
+    }
+  },
+  {
+    "id": "dev_services",
+    "partition": "development",
+    "intention": "List services",
+    "entry_point": "needle",
+    "capability_snapshot": {
+      "owner": "local",
+      "mode": "assistant",
+      "qwen_enabled": false,
+      "harness_enabled": false,
+      "needle_loop_enabled": false,
+      "allowed_services": [],
+      "named_tasks": [],
+      "native_model": "stub",
+      "system2_model": "disabled"
+    },
+    "mandatory_procedure_ids": [
+      "p6.status-read.v1"
+    ],
+    "allowed_tool_set": [
+      "list_services"
+    ],
+    "preconditions": [
+      {
+        "id": "user_intent_authorized",
+        "verdict": "pass"
+      }
+    ],
+    "expected_effects": [
+      {
+        "tool": "list_services",
+        "kind": "read"
+      }
+    ],
+    "verifiable_postconditions": [
+      {
+        "id": "service_list_observed",
+        "verdict": "pass"
+      }
+    ],
+    "phase5_stub_response": {
+      "function_calls": [
+        {
+          "name": "list_services",
+          "arguments": {}
+        }
+      ],
+      "confidence": 0.97
+    },
+    "baseline_expected": {
+      "route": "direct",
+      "outcome": "completed",
+      "reason": "executed",
+      "observations": [
+        [
+          "list_services",
+          "returned"
+        ]
+      ],
+      "executed_reads": [
+        "list_services"
+      ],
+      "consequential_effects": []
+    },
+    "expected_phase6": {
+      "evidence": "unknown",
+      "procedure": "unknown",
+      "goal": "pass"
+    }
+  },
+  {
+    "id": "dev_low_confidence",
+    "partition": "development",
+    "intention": "Check GPU status",
+    "entry_point": "needle",
+    "capability_snapshot": {
+      "owner": "local",
+      "mode": "assistant",
+      "qwen_enabled": false,
+      "harness_enabled": false,
+      "needle_loop_enabled": false,
+      "allowed_services": [],
+      "named_tasks": [],
+      "native_model": "stub",
+      "system2_model": "disabled"
+    },
+    "mandatory_procedure_ids": [
+      "p6.clarify.v1"
+    ],
+    "allowed_tool_set": [
+      "get_gpu_status"
+    ],
+    "preconditions": [
+      {
+        "id": "user_intent_authorized",
+        "verdict": "pass"
+      }
+    ],
+    "expected_effects": [],
+    "verifiable_postconditions": [
+      {
+        "id": "no_unauthorized_effect",
+        "verdict": "unknown"
+      }
+    ],
+    "phase5_stub_response": {
+      "function_calls": [
+        {
+          "name": "get_gpu_status",
+          "arguments": {}
+        }
+      ],
+      "confidence": 0.25
+    },
+    "baseline_expected": {
+      "route": "uncertain",
+      "outcome": "rejected",
+      "reason": "low_confidence",
+      "observations": [],
+      "executed_reads": [],
+      "consequential_effects": []
+    },
+    "expected_phase6": {
+      "evidence": "unknown",
+      "procedure": "unknown",
+      "goal": "unknown"
+    }
+  },
+  {
+    "id": "dev_bad_args",
+    "partition": "development",
+    "intention": "Show system status",
+    "entry_point": "needle",
+    "capability_snapshot": {
+      "owner": "local",
+      "mode": "assistant",
+      "qwen_enabled": false,
+      "harness_enabled": false,
+      "needle_loop_enabled": false,
+      "allowed_services": [],
+      "named_tasks": [],
+      "native_model": "stub",
+      "system2_model": "disabled"
+    },
+    "mandatory_procedure_ids": [
+      "p6.reject-malformed.v1"
+    ],
+    "allowed_tool_set": [],
+    "preconditions": [
+      {
+        "id": "user_intent_authorized",
+        "verdict": "pass"
+      }
+    ],
+    "expected_effects": [],
+    "verifiable_postconditions": [
+      {
+        "id": "no_unauthorized_effect",
+        "verdict": "unknown"
+      }
+    ],
+    "phase5_stub_response": {
+      "function_calls": [
+        {
+          "name": "get_system_status",
+          "arguments": []
+        }
+      ],
+      "confidence": 0.99
+    },
+    "baseline_expected": {
+      "route": "rejected",
+      "outcome": "rejected",
+      "reason": "unsafe_route",
+      "observations": [],
+      "executed_reads": [],
+      "consequential_effects": []
+    },
+    "expected_phase6": {
+      "evidence": "unknown",
+      "procedure": "unknown",
+      "goal": "unknown"
+    }
+  },
+  {
+    "id": "dev_suppressed",
+    "partition": "development",
+    "intention": "Show system status",
+    "entry_point": "needle",
+    "capability_snapshot": {
+      "owner": "local",
+      "mode": "assistant",
+      "qwen_enabled": false,
+      "harness_enabled": false,
+      "needle_loop_enabled": false,
+      "allowed_services": [],
+      "named_tasks": [],
+      "native_model": "stub",
+      "system2_model": "disabled"
+    },
+    "mandatory_procedure_ids": [
+      "p6.reject-untrusted-proposal.v1"
+    ],
+    "allowed_tool_set": [],
+    "preconditions": [
+      {
+        "id": "user_intent_authorized",
+        "verdict": "pass"
+      }
+    ],
+    "expected_effects": [],
+    "verifiable_postconditions": [
+      {
+        "id": "no_unauthorized_effect",
+        "verdict": "unknown"
+      }
+    ],
+    "phase5_stub_response": {
+      "function_calls": [
+        {
+          "name": "get_system_status",
+          "arguments": {}
+        }
+      ],
+      "confidence": 0.99,
+      "suppressed_calls": [
+        {
+          "name": "control_service",
+          "arguments": {
+            "name": "other.service",
+            "action": "stop"
+          }
+        }
+      ]
+    },
+    "baseline_expected": {
+      "route": "rejected",
+      "outcome": "rejected",
+      "reason": "unsafe_route",
+      "observations": [],
+      "executed_reads": [],
+      "consequential_effects": []
+    },
+    "expected_phase6": {
+      "evidence": "unknown",
+      "procedure": "unknown",
+      "goal": "unknown"
+    }
+  },
+  {
+    "id": "dev_service_denied",
+    "partition": "development",
+    "intention": "Stop unknown service",
+    "entry_point": "needle",
+    "capability_snapshot": {
+      "owner": "local",
+      "mode": "assistant",
+      "qwen_enabled": false,
+      "harness_enabled": false,
+      "needle_loop_enabled": false,
+      "allowed_services": [],
+      "named_tasks": [],
+      "native_model": "stub",
+      "system2_model": "disabled"
+    },
+    "mandatory_procedure_ids": [
+      "p6.service-control.v1"
+    ],
+    "allowed_tool_set": [],
+    "preconditions": [
+      {
+        "id": "user_intent_authorized",
+        "verdict": "fail"
+      }
+    ],
+    "expected_effects": [],
+    "verifiable_postconditions": [
+      {
+        "id": "no_unauthorized_effect",
+        "verdict": "unknown"
+      }
+    ],
+    "phase5_stub_response": {
+      "function_calls": [
+        {
+          "name": "control_service",
+          "arguments": {
+            "name": "other.service",
+            "action": "stop"
+          }
+        }
+      ],
+      "confidence": 0.99
+    },
+    "baseline_expected": {
+      "route": "direct",
+      "outcome": "failed",
+      "reason": "exception",
+      "observations": [],
+      "executed_reads": [],
+      "consequential_effects": []
+    },
+    "expected_phase6": {
+      "evidence": "unknown",
+      "procedure": "unknown",
+      "goal": "unknown"
+    }
+  },
+  {
+    "id": "dev_service_staged",
+    "partition": "development",
+    "intention": "Stop approved demo service",
+    "entry_point": "needle",
+    "capability_snapshot": {
+      "owner": "local",
+      "mode": "assistant",
+      "qwen_enabled": false,
+      "harness_enabled": false,
+      "needle_loop_enabled": false,
+      "allowed_services": [
+        "demo.service"
+      ],
+      "named_tasks": [],
+      "native_model": "stub",
+      "system2_model": "disabled"
+    },
+    "mandatory_procedure_ids": [
+      "p6.service-control.v1"
+    ],
+    "allowed_tool_set": [
+      "control_service"
+    ],
+    "preconditions": [
+      {
+        "id": "user_intent_authorized",
+        "verdict": "unknown"
+      }
+    ],
+    "expected_effects": [],
+    "verifiable_postconditions": [
+      {
+        "id": "no_unauthorized_effect",
+        "verdict": "unknown"
+      }
+    ],
+    "phase5_stub_response": {
+      "function_calls": [
+        {
+          "name": "control_service",
+          "arguments": {
+            "name": "demo.service",
+            "action": "stop"
+          }
+        }
+      ],
+      "confidence": 0.99
+    },
+    "baseline_expected": {
+      "route": "direct",
+      "outcome": "pending_approval",
+      "reason": "needs_approval",
+      "observations": [
+        [
+          "control_service",
+          "staged"
+        ]
+      ],
+      "executed_reads": [],
+      "consequential_effects": []
+    },
+    "expected_phase6": {
+      "evidence": "unknown",
+      "procedure": "unknown",
+      "goal": "unknown"
+    }
+  }
+]

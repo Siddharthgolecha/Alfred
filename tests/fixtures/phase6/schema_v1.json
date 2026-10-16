@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Alfred Phase 6 Golden Task v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "partition",
+    "intention",
+    "entry_point",
+    "capability_snapshot",
+    "mandatory_procedure_ids",
+    "allowed_tool_set",
+    "preconditions",
+    "expected_effects",
+    "verifiable_postconditions",
+    "phase5_stub_response",
+    "baseline_expected",
+    "expected_phase6"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{3,63}$"
+    },
+    "partition": {
+      "enum": [
+        "development",
+        "heldout"
+      ]
+    },
+    "intention": {
+      "type": "string",
+      "maxLength": 160
+    },
+    "entry_point": {
+      "enum": [
+        "needle",
+        "qwen",
+        "harness",
+        "workflow",
+        "scheduler",
+        "skill"
+      ]
+    },
+    "capability_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "owner",
+        "mode",
+        "qwen_enabled",
+        "harness_enabled",
+        "needle_loop_enabled",
+        "allowed_services",
+        "named_tasks",
+        "native_model",
+        "system2_model"
+      ],
+      "properties": {
+        "owner": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "assistant",
+            "meeting"
+          ]
+        },
+        "qwen_enabled": {
+          "type": "boolean"
+        },
+        "harness_enabled": {
+          "type": "boolean"
+        },
+        "needle_loop_enabled": {
+          "type": "boolean"
+        },
+        "allowed_services": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "named_tasks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "native_model": {
+          "enum": [
+            "stub",
+            "native"
+          ]
+        },
+        "system2_model": {
+          "enum": [
+            "disabled",
+            "stub",
+            "native"
+          ]
+        }
+      }
+    },
+    "mandatory_procedure_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string"
+      }
+    },
+    "allowed_tool_set": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string"
+      }
+    },
+    "preconditions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/check"
+      }
+    },
+    "expected_effects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tool",
+          "kind"
+        ],
+        "properties": {
+          "tool": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "read",
+              "write"
+            ]
+          }
+        }
+      }
+    },
+    "verifiable_postconditions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/check"
+      }
+    },
+    "phase5_stub_response": {
+      "type": "object"
+    },
+    "baseline_expected": {
+      "$ref": "#/$defs/baseline"
+    },
+    "expected_phase6": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence",
+        "procedure",
+        "goal"
+      ],
+      "properties": {
+        "evidence": {
+          "$ref": "#/$defs/verdict"
+        },
+        "procedure": {
+          "$ref": "#/$defs/verdict"
+        },
+        "goal": {
+          "$ref": "#/$defs/verdict"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "verdict": {
+      "enum": [
+        "pass",
+        "fail",
+        "unknown"
+      ]
+    },
+    "check": {
+      "type": "object",
+      "required": [
+        "id",
+        "verdict"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "verdict": {
+          "$ref": "#/$defs/verdict"
+        }
+      }
+    },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "route",
+        "outcome",
+        "reason",
+        "observations",
+        "executed_reads",
+        "consequential_effects"
+      ],
+      "properties": {
+        "route": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "observations": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "executed_reads": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "consequential_effects": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
