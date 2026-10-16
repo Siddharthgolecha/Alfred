@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from dataclasses import dataclass
+from typing import Any
 
-from .constants import Truncation, TTL
+from .constants import Limits, Patterns, Truncation, TTL
 
 from .models import QwenPlanResponseError
 from .runtime import TOOL_SCHEMAS, validate_plan
@@ -33,11 +33,18 @@ APPROVAL_REQUIRED_TOOLS = frozenset({
 })
 
 
-def needs_approval(steps, save_as=None):
+def needs_approval(
+    steps: list[dict[str, Any]],
+    save_as: str | None = None,
+) -> bool:
     return bool(save_as) or any(step["tool"] not in VOICE_EXECUTABLE_TOOLS for step in steps)
 
 
-def preflight(steps, tools, max_steps=5):
+def preflight(
+    steps: list[dict[str, Any]],
+    tools: Any,
+    max_steps: int = 5,
+) -> list[dict[str, Any]]:
     """Validate the full plan and concrete allowlists BEFORE any step executes."""
     validated = validate_plan(steps, max_steps, allow_cancellations=True)
     for step in validated:
@@ -49,7 +56,7 @@ def preflight(steps, tools, max_steps=5):
     return validated
 
 
-def concise_plan(steps):
+def concise_plan(steps: list[dict[str, Any]]) -> str:
     """Summarize actions without leaking full user content into speech/logs."""
     return ", ".join(step["tool"] for step in steps) or "(no actions)"
 
@@ -72,7 +79,7 @@ class Approvals:
                 )
             """)
 
-    def propose(self, steps: list, save_as: str | None = None) -> dict:
+    def propose(self, steps: list[dict[str, Any]], save_as: str | None = None) -> dict[str, Any]:
         """Stage an approval record for *steps* and return the proposal metadata."""
         if not isinstance(steps, list) or (not steps and not save_as):
             raise ValueError("Nothing to approve")
@@ -85,7 +92,7 @@ class Approvals:
             return {"approval_id":cur.lastrowid, "expires_at":now+self.ttl,
                     "actions":concise_plan(steps), "save_as":save_as}
 
-    def pending(self) -> list:
+    def pending(self) -> list[dict[str, Any]]:
         """Return all unexpired pending approval records."""
         now=int(time.time())
         with self.store.lock:
@@ -97,7 +104,7 @@ class Approvals:
                  "actions":concise_plan(json.loads(r["steps_json"])),"save_as":r["save_as"]}
                 for r in rows]
 
-    def claim(self, approval_id: int) -> dict:
+    def claim(self, approval_id: int) -> dict[str, Any]:
         """Atomically claim ownership of *approval_id* for execution."""
         now=int(time.time())
         with self.store.lock, self.store.db:
@@ -113,7 +120,7 @@ class Approvals:
             return {"id":row["id"],"steps":json.loads(row["steps_json"]),
                     "save_as":row["save_as"]}
 
-    def finish(self, approval_id, result=None, error=None):
+    def finish(self, approval_id: int, result: Any = None, error: Any = None) -> None:
         status="failed" if error else "complete"
         outcome={"error":str(error)[:Truncation.APPROVAL_ERROR]} if error else {"result":result}
         with self.store.lock, self.store.db:
@@ -121,7 +128,7 @@ class Approvals:
                 "UPDATE approvals SET status=?,result_json=? WHERE id=? AND status='running'",
                 (status,json.dumps(outcome,default=str)[:Truncation.APPROVAL_RESULT_JSON],approval_id))
 
-    def reject(self, approval_id):
+    def reject(self, approval_id: int) -> bool:
         with self.store.lock, self.store.db:
             cur=self.store.db.execute(
                 "UPDATE approvals SET status='rejected' WHERE id=? AND status='pending'",
@@ -129,20 +136,25 @@ class Approvals:
             return bool(cur.rowcount)
 
 
-def parse_plan(plan, text, tools, max_steps):
+def parse_plan(
+    plan: dict[str, Any],
+    text: str,
+    tools: Any,
+    max_steps: int,
+) -> tuple[str, list[dict[str, Any]], str | None]:
     if not isinstance(plan,dict) or not isinstance(plan.get("steps"),list):
         raise ValueError("Reasoner response is not a valid plan")
     if any(k not in ("message","steps","save_as") for k in plan):
         raise ValueError("Unrecognized plan field")
     message=plan.get("message","")
-    if not isinstance(message,str) or len(message)>1000:
+    if not isinstance(message,str) or len(message)>Limits.QWEN_MESSAGE_MAX:
         raise ValueError("Invalid reasoner message")
     steps=preflight(plan["steps"],tools,max_steps)
     save_as=plan.get("save_as") or None
     if save_as is not None:
-        if not isinstance(save_as,str) or not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{1,40}",save_as):
+        if not isinstance(save_as,str) or not Patterns.WORKFLOW_NAME.fullmatch(save_as):
             raise ValueError("Invalid workflow name")
-        if not re.search(r"\b(save|create|remember|store)\b.*\bworkflow\b",text,re.I):
+        if not Patterns.WORKFLOW_SAVE_REQUEST.search(text):
             raise ValueError("Saving a workflow requires an explicit request")
         if not steps:
             raise ValueError("Cannot save empty workflow")
@@ -359,9 +371,7 @@ class System2:
         outcome = self.execute_or_stage(steps,message,save_as,allow_actions)
         # Only a completed, read-only plan may generate a second explanation.
         # No output from this second inference is interpreted as a tool call.
-        wants_explanation=bool(re.search(
-            r"\b(why|explain|how|compare|interpret|mean|meaning)\b",
-            utterance,flags=re.IGNORECASE))
+        wants_explanation = bool(Patterns.WANTS_EXPLANATION.search(utterance))
         if (wants_explanation and outcome.get("results") and
                 all(step["tool"] in VOICE_EXECUTABLE_TOOLS and
                     step["tool"]!="create_reminder" for step in steps)):
