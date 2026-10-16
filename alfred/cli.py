@@ -68,6 +68,19 @@ def _diagnose_harness(cfg, supervisor: LlamaSupervisor, backend: dict) -> bool:
     harness_ready = False
     harness = None
     runtime = cfg["runtime"]
+    if not cfg["qwen"]["enabled"]:
+        print("Harness NOT READY: inference backend is disabled")
+        return False
+    if backend.get("health") != "ready":
+        print("Harness NOT READY: inference backend is not responding at " + supervisor.url)
+        return False
+    if not backend.get("model"):
+        try:
+            supervisor.model_id()
+        except (RuntimeError, OSError, ValueError) as exc:
+            print("Model readiness:", str(exc))
+        print("Harness NOT READY: configured Qwen model is not served by the backend")
+        return False
     # --doctor launches a real Cordis child when the model is READY.
     # Apply the very same memory/swap/CPU/capture admission as interactive
     # startup; diagnostics must never bypass the deployment pressure gate.
@@ -88,14 +101,10 @@ def _diagnose_harness(cfg, supervisor: LlamaSupervisor, backend: dict) -> bool:
         status = harness.audit_installation()
         print("Official DeepSeek Harness plugin audit:", json.dumps(status))
         print("Cordis tool bridge: NOT YET WIRED (Issue #58; zero model-facing tools)")
-        if not (cfg["qwen"]["enabled"] and backend["health"] == "ready"
-                and backend["model"]):
-            print("Harness NOT READY: Qwen model/endpoint not available")
-        else:
-            harness.configure_model(backend["model"])
-            harness.require_ready()  # Actual SDK child, not merely a YAML audit.
-            harness_ready = True
-            print("Official Cordis SDK subprocess: READY (restricted/tool-free)")
+        harness.configure_model(backend["model"])
+        harness.require_ready()  # Actual SDK child, not merely a YAML audit.
+        harness_ready = True
+        print("Official Cordis SDK subprocess: READY (restricted/tool-free)")
     except (HarnessUnavailable, AdmissionRejected, OSError, ValueError) as exc:
         print("Harness NOT READY:", str(exc))
     finally:

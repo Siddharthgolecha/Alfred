@@ -87,7 +87,7 @@ should be `ready`. Check that `qwen.enabled` is true, because the Harness needs 
 
 The pinned DeepSeek Harness packages are missing, the wrong version (`0.1.5rc1` is required), or
 the effective plugin set differs from the manifest. Reinstall with
-`scripts/install_harness.py`. See [Installation](../getting-started/installation.md#offline-or-checksum-verified-harness-install).
+`scripts/install_harness.py`. See the [Installation guide](../getting-started/installation.md).
 There is no fallback to another planner.
 
 ### The model is not found

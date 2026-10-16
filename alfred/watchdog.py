@@ -55,19 +55,26 @@ class WatchdogManager:
         self._thread.start()
 
     def _run_loop(self) -> None:
-        """Background monitoring loop for Qwen supervisor."""
+        """Monitor backend health without competing with foreground inference.
+
+        Starting or loading a model is deliberately left to the request path,
+        which already holds the shared inference admission slot. A periodic
+        watchdog must not take that slot: doing so can make an actual user
+        request fail while the watchdog is merely checking status.
+        """
         while not self._stop_event.is_set():
             try:
-                if self.admission.enabled:
-                    if not self.admission.capture_active:
-                        with self.admission.claim("qwen"):
-                            self.supervisor.ensure_running()
-                        LOG.info("Qwen available: %s", self.supervisor.status())
+                status = self.supervisor.status()
+                if status.get("health") == "ready":
+                    LOG.info("System2 available: %s", status)
                 else:
-                    self.supervisor.ensure_running()
-                    LOG.info("Qwen available: %s", self.supervisor.status())
+                    LOG.info(
+                        "System2 is not ready (health=%s); it will be started "
+                        "by the next request",
+                        status.get("health", "unknown"),
+                    )
             except Exception as exc:
-                LOG.warning("Qwen unavailable; will retry: %s", exc)
+                LOG.warning("System2 health check failed; will retry: %s", exc)
             self._stop_event.wait(self.poll_interval)
 
     def stop(self) -> None:

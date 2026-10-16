@@ -44,7 +44,8 @@ and an existing cache is reused. To run strictly offline, use `model_path` inste
 
 `qwen.binary` may be an executable, a name on `PATH`, or a llama.cpp directory. For a directory
 Alfred searches `build/bin/` and the directory itself. Symlinks into the Hugging Face cache work
-for `model_path`.
+for `model_path`. A running llama.cpp server already has its model loaded; Alfred verifies that the
+configured model is the one it serves and never replaces an adopted server.
 
 ### Ollama
 
@@ -53,7 +54,9 @@ for `model_path`.
 ```
 
 The model must already be installed (`ollama pull qwen3.5:4b`). Alfred never downloads an Ollama
-model or substitutes another one.
+model or substitutes another one. On startup it checks `/api/ps` and sends an empty chat request
+for the configured model if it is not resident. This loads the model without generating a reply;
+Ollama's normal idle timeout can later unload it, and Ollama loads it again on the next inference.
 
 ### LM Studio
 
@@ -87,11 +90,14 @@ How each backend is started:
 | `llama_cpp` | `llama serve --model <file>` or `-hf <repo:quant>`, `--host 127.0.0.1`, `--port`, `--ctx-size`, `-ngl`, and one parallel slot |
 | `llama_server` | The same arguments on the `llama-server` executable |
 | `ollama` | `ollama serve` with `OLLAMA_HOST=127.0.0.1:<port>` |
-| `lm_studio` | `lms server start --port <port> --bind 127.0.0.1`, then `lms load <model> --yes` |
+| `lm_studio` | Start the local server if needed, then load the configured model with `lms load <model> --yes` if it is not already resident. |
 
 The context size and GPU layers come from `qwen.ctx_size` and `qwen.gpu_layers`. They apply to
 the llama.cpp backends only. Ollama and LM Studio manage their own runtime settings, and Alfred
-never changes the memory settings or loaded models of a server it adopts.
+never stops or reconfigures an adopted server. For a local LM Studio endpoint, Alfred loads the
+explicitly configured model when it is installed but not resident, and leaves other loaded models
+alone. It does not use a local `lms` CLI to control a remote endpoint. The Ollama preload is also
+limited to the configured local endpoint; later idle unloading remains controlled by Ollama.
 
 ### Model selection
 

@@ -257,11 +257,14 @@ class ContinuationTests(unittest.TestCase):
 
     def test_unavailable_model_remains_incomplete_and_keeps_prior_read(self):
         self.qwen.complete.side_effect=OSError("server down secret-token")
-        result=self.sys.continue_handoff(self.h())
+        with self.assertLogs("alfred.system2",level="WARNING") as captured:
+            result=self.sys.continue_handoff(self.h())
         self.assertEqual(result["status"],"incomplete")
         self.assertTrue(result["partial"])
         self.assertEqual(result["results"][0]["metrics"]["gpu_temp_c"],65.0)
         self.assertNotIn("secret-token",str(result))
+        self.assertIn("OSError",captured.output[0])
+        self.assertNotIn("secret-token",captured.output[0])
         self.assertEqual(self.sys.approvals.pending(),[])
 
     def test_runtime_sdk_failure_does_not_fallback_or_execute(self):

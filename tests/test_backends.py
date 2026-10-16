@@ -104,36 +104,132 @@ class BackendSupervisorTests(unittest.TestCase):
         self.assertEqual(sup._start_command("/usr/bin/ollama"), ["/usr/bin/ollama", "serve"])
         proc = MagicMock(pid=3)
         proc.poll.return_value = None
+        ollama_requests = [
+            {"models": []},
+            {"done": True, "done_reason": "load"},
+            {"models": [{"name": "qwen3.5:4b", "model": "qwen3.5:4b"}]},
+        ]
         with patch.object(sup, "health", side_effect=["down", "ready"]), \
              patch.object(sup, "port_open", return_value=False), \
              patch.object(sup, "verify_model", return_value="qwen3.5:4b"), \
              patch("alfred.backends.shutil.which", return_value="/usr/bin/ollama"), \
-             patch("alfred.backends.subprocess.Popen", return_value=proc) as spawn:
+             patch("alfred.backends.subprocess.Popen", return_value=proc) as spawn, \
+             patch("alfred.models.request_json", side_effect=ollama_requests) as request:
             self.assertTrue(sup.ensure_running())
         self.assertEqual(spawn.call_args.kwargs["env"]["OLLAMA_HOST"], "127.0.0.1:8080")
+        self.assertEqual(request.call_args_list[1].args[0], sup.url + "/api/chat")
+        self.assertEqual(request.call_args_list[1].args[1], {
+            "model": "qwen3.5:4b", "messages": [], "stream": False
+        })
 
     def test_lm_studio_cli_load_is_noninteractive(self):
         sup = self.supervisor("lm_studio", model="qwen-4b")
+        calls = [MagicMock(), MagicMock(), MagicMock(returncode=0, stdout=json.dumps([
+            {"identifier": "qwen-4b", "modelKey": "qwen-4b"}
+        ]), stderr="")]
         with patch.object(sup, "health", side_effect=["down", "ready"]), \
              patch.object(sup, "port_open", return_value=False), \
              patch.object(sup, "verify_model", return_value="qwen-4b"), \
              patch("alfred.backends.shutil.which", return_value="/usr/bin/lms"), \
-             patch("alfred.backends.subprocess.run") as run:
+             patch("alfred.backends.subprocess.run", side_effect=calls) as run:
             self.assertTrue(sup.ensure_running())
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_count, 3)
         self.assertEqual(run.call_args_list[0].args[0][:3],
                          ["/usr/bin/lms", "server", "start"])
         self.assertEqual(run.call_args_list[1].args[0],
                          ["/usr/bin/lms", "load", "qwen-4b", "--yes"])
+        self.assertEqual(run.call_args_list[2].args[0],
+                         ["/usr/bin/lms", "ps", "--json"])
         self.assertIsNone(sup.process)
 
     def test_adoption_does_not_spawn(self):
         sup = self.supervisor("ollama")
         with patch.object(sup, "health", return_value="ready"), \
              patch.object(sup, "verify_model", return_value="qwen3.5:4b"), \
-             patch("alfred.backends.subprocess.Popen") as spawn:
+             patch("alfred.backends.subprocess.Popen") as spawn, \
+             patch("alfred.models.request_json", return_value={"models": [
+                 {"name": "qwen3.5:4b", "model": "qwen3.5:4b"}
+             ]}):
             self.assertTrue(sup.ensure_running())
         spawn.assert_not_called()
+
+    def test_adopted_ollama_preloads_configured_model_and_reuses_it(self):
+        sup = self.supervisor("ollama", model="qwen3.5:4b")
+        with patch.object(sup, "health", return_value="ready"), \
+             patch.object(sup, "verify_model", return_value="qwen3.5:4b"), \
+             patch("alfred.models.request_json", side_effect=[
+                 {"models": []},
+                 {"done": True, "done_reason": "load"},
+                 {"models": [{"name": "qwen3.5:4b", "model": "qwen3.5:4b"}]},
+                 {"models": [{"name": "qwen3.5:4b", "model": "qwen3.5:4b"}]},
+             ]) as request:
+            self.assertTrue(sup.ensure_running())
+            self.assertTrue(sup.ensure_running())
+        self.assertEqual(request.call_args_list[1].args[0], sup.url + "/api/chat")
+        self.assertEqual(request.call_args_list[2].args[0], sup.url + "/api/ps")
+        self.assertEqual(request.call_count, 4)
+
+    def test_remote_ollama_endpoint_is_not_preloaded_by_local_supervisor(self):
+        sup = self.supervisor("ollama", model="qwen3.5:4b",
+                              url="http://192.168.1.50:11434")
+        with patch("alfred.backends.ModelSupervisor._ollama_loaded_ids") as inspect, \
+             patch("alfred.models.request_json") as request:
+            sup._ensure_ollama_model_loaded()
+        inspect.assert_not_called()
+        request.assert_not_called()
+
+    def test_adopted_llama_server_verifies_model_without_restarting(self):
+        sup = self.supervisor("llama_server", model="qwen.gguf")
+        with patch.object(sup, "health", return_value="ready"), \
+             patch.object(sup, "verify_model", return_value="qwen.gguf"), \
+             patch.object(sup, "_start_process") as start, \
+             patch.object(sup, "_ensure_configured_model_loaded") as load:
+            self.assertTrue(sup.ensure_running())
+        start.assert_not_called()
+        load.assert_called_once_with()
+
+    def test_adopted_lm_studio_loads_configured_model_when_not_resident(self):
+        model = "openai/gpt-oss-20b"
+        sup = self.supervisor("lm_studio", model=model)
+        ps_empty = MagicMock(returncode=0, stdout="[]", stderr="")
+        load_ok = MagicMock(returncode=0, stdout="Loaded", stderr="")
+        ps_loaded = MagicMock(returncode=0, stdout=json.dumps([
+            {"identifier": model, "modelKey": model}
+        ]), stderr="")
+        with patch.object(sup, "health", return_value="ready"), \
+             patch.object(sup, "verify_model", return_value=model), \
+             patch("alfred.backends.shutil.which", return_value="/usr/bin/lms"), \
+             patch("alfred.backends.subprocess.run",
+                   side_effect=[ps_empty, load_ok, ps_loaded]) as run:
+            self.assertTrue(sup.ensure_running())
+        self.assertEqual(run.call_args_list[0].args[0],
+                         ["/usr/bin/lms", "ps", "--json"])
+        self.assertEqual(run.call_args_list[1].args[0],
+                         ["/usr/bin/lms", "load", model, "--yes"])
+        self.assertEqual(run.call_args_list[2].args[0],
+                         ["/usr/bin/lms", "ps", "--json"])
+
+    def test_adopted_lm_studio_keeps_matching_resident_model(self):
+        model = "openai/gpt-oss-20b"
+        sup = self.supervisor("lm_studio", model=model)
+        ps_loaded = MagicMock(returncode=0, stdout=json.dumps([
+            {"identifier": model, "modelKey": model}
+        ]), stderr="")
+        with patch.object(sup, "health", return_value="ready"), \
+             patch.object(sup, "verify_model", return_value=model), \
+             patch("alfred.backends.shutil.which", return_value="/usr/bin/lms"), \
+             patch("alfred.backends.subprocess.run", return_value=ps_loaded) as run:
+            self.assertTrue(sup.ensure_running())
+        run.assert_called_once_with(["/usr/bin/lms", "ps", "--json"],
+                                    capture_output=True, text=True,
+                                    timeout=10, check=False)
+
+    def test_remote_lm_studio_endpoint_is_not_controlled_by_local_cli(self):
+        sup = self.supervisor("lm_studio", model="openai/gpt-oss-20b",
+                              url="http://192.168.1.50:1234")
+        with patch.object(sup, "_resolve_binary") as resolve:
+            sup._ensure_lm_studio_model_loaded()
+        resolve.assert_not_called()
 
     def test_unhealthy_occupied_port_not_replaced(self):
         sup = self.supervisor("lm_studio")

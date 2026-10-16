@@ -38,32 +38,27 @@ def tool_names() -> set[str]:
 
 
 def config_keys() -> set[str]:
-    """Extract ``section.key`` names without evaluating config values.
+    """Return ``section.key`` for every entry of ``config.DEFAULT``.
 
-    Platform-dependent defaults can contain calls such as ``Path(...)`` and
-    ``_default_state_dir()``, which ``ast.literal_eval`` cannot parse.
-    Only the dictionary *keys* are relevant for documentation checks.
+    Inspect dictionary keys directly so platform-specific path defaults such as
+    ``Path(...)`` don't make the static documentation check execute Python code.
     """
     tree = ast.parse((ROOT / "alfred" / "config.py").read_text(encoding="utf-8"))
     for node in tree.body:
-        if not (isinstance(node, ast.Assign)
-                and any(isinstance(t, ast.Name) and t.id == "DEFAULT" for t in node.targets)):
-            continue
-        if not isinstance(node.value, ast.Dict):
-            raise ValueError("config.DEFAULT must be a dictionary literal")
-        result = set()
-        for section_node, body_node in zip(node.value.keys, node.value.values):
-            if not (isinstance(section_node, ast.Constant)
-                    and isinstance(section_node.value, str)
-                    and isinstance(body_node, ast.Dict)):
-                raise ValueError("config.DEFAULT sections must have static string keys")
-            section = section_node.value
-            for key_node in body_node.keys:
-                if not (isinstance(key_node, ast.Constant)
-                        and isinstance(key_node.value, str)):
-                    raise ValueError("config.DEFAULT keys must be static strings")
-                result.add(f"{section}.{key_node.value}")
-        return result
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "DEFAULT" for t in node.targets):
+            if not isinstance(node.value, ast.Dict):
+                break
+            result = set()
+            for section_node, body_node in zip(node.value.keys, node.value.values):
+                if not (isinstance(section_node, ast.Constant)
+                        and isinstance(section_node.value, str)
+                        and isinstance(body_node, ast.Dict)):
+                    continue
+                for key_node in body_node.keys:
+                    if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str):
+                        result.add(f"{section_node.value}.{key_node.value}")
+            return result
     raise SystemExit("DEFAULT not found in alfred/config.py")
 
 
