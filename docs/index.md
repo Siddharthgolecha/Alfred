@@ -44,3 +44,10 @@ reference/index
 
 development/index
 ```
+
+```{toctree}
+:maxdepth: 1
+:caption: Jetson-specific
+
+INTRINSIC_JETSON
+```
