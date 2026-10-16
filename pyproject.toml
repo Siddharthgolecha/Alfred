@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest>=8"]
 wakeword = ["openwakeword>=0.6", "numpy>=1.24"]
+jetson = ["reportlab>=4.0", "qrcode[pil]>=7.4", "tzdata>=2024.1"]
 # macOS audio: install sox via Homebrew (`brew install sox`) or ffmpeg (`brew install ffmpeg`).
 # Linux audio: install pulseaudio-utils for pactl/parec (`apt install pulseaudio-utils`).
 # macOS TTS: built-in `say` command is used automatically; no extra package needed.
@@ -30,6 +31,7 @@ docs = [
 
 [project.scripts]
 alfred = "alfred.app:main"
+alfred-jetson = "alfred.jetson.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["alfred*"]
