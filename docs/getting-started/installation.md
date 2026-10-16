@@ -140,7 +140,7 @@ Without `--active`, uv uses the project's `.venv` and warns that the other
 refer to the environment you intended. For Python 3.10/3.11, the `pip` command
 in the optional-extras table remains available.
 
-#### Offline or checksum-verified Harness install
+### Offline or checksum-verified Harness install
 
 `pip install` cannot verify the Harness wheels against the published hashes after the fact.
 To verify first, download the pinned wheels into a directory and use the installer. The expected
