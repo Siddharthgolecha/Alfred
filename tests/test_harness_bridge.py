@@ -57,10 +57,11 @@ class HarnessBoundaryTests(unittest.TestCase):
     def test_canonical_projection_and_enum_validation(self):
         from alfred.cognitive.contracts import TaskEnvelope, Decision
         from alfred.cognitive.harness_bridge import frame_for_contract
-        task = TaskEnvelope("a" * 32, "b" * 32, "voice", 3, 123)
+        task = TaskEnvelope(session_id="a" * 32, task_id="b" * 32, source="voice",
+                            input_chars=3, started_at=123)
         self.assertEqual(decode_frame(frame_for_contract(task))["event"], "task")
         self.assertEqual(decode_frame(frame_for_contract(Decision(
-            "needle3", "direct", 1, .8)))["event"], "decision")
+            engine="needle3", route="direct", call_count=1, confidence=.8)))["event"], "decision")
         with self.assertRaises(HarnessProtocolError):
             frame_for_contract({"tool":"arbitrary-shell", "args":{}})
         for invalid in ({"engine": "evil", "route": "direct", "call_count": 1, "confidence": 0.3},

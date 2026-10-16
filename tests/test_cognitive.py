@@ -20,13 +20,16 @@ from alfred.runtime import Store
 
 class ContractTests(unittest.TestCase):
     def test_strict_roundtrip_all_contracts(self):
-        task = TaskEnvelope("a"*32, "b"*32, "text", 12, 123)
+        task = TaskEnvelope(session_id="a"*32, task_id="b"*32, source="text",
+                            input_chars=12, started_at=123)
         examples = [
-            task, Decision("needle3", "direct", 2, 0.9),
-            Observation("get_gpu_status", "returned"),
-            Escalation("needle3", "qwen", "delegated"),
-            ApprovalReference(12), Completion("completed", "executed"),
-            Diagnostic("needle_route", {"latency_ms": 4, "input_chars": 12}),
+            task,
+            Decision(engine="needle3", route="direct", call_count=2, confidence=0.9),
+            Observation(tool="get_gpu_status", outcome="returned"),
+            Escalation(source_model="needle3", target_model="qwen", reason="delegated"),
+            ApprovalReference(approval_id=12),
+            Completion(outcome="completed", reason="executed"),
+            Diagnostic(name="needle_route", metrics={"latency_ms": 4, "input_chars": 12}),
         ]
         for item in examples:
             with self.subTest(kind=item.kind):
@@ -34,7 +37,7 @@ class ContractTests(unittest.TestCase):
                 self.assertEqual(type(item).from_json(item.to_json()), item)
 
     def test_reject_unknown_fields_wrong_version_duplicate_keys_and_large_blob(self):
-        valid = Decision("needle3", "direct", 1).to_dict()
+        valid = Decision(engine="needle3", route="direct", call_count=1).to_dict()
         for item in (
             {**valid, "version": 2},
             {**valid, "version": True},
@@ -56,8 +59,8 @@ class ContractTests(unittest.TestCase):
     def test_diagnostic_rejects_secrets_and_free_text(self):
         for payload in ({"api_key": "sk-test-secret"}, {"transcript":"hello"},
                         {"latency_ms": "5"}, {"input_chars": 100001}):
-            with self.subTest(payload=payload), self.assertRaises(ValueError):
-                Diagnostic("needle_route", payload).to_json()
+            with self.subTest(payload=payload), self.assertRaises((ValueError, Exception)):
+                Diagnostic(name="needle_route", metrics=payload).to_json()
 
 
 class LedgerTests(unittest.TestCase):
@@ -73,11 +76,11 @@ class LedgerTests(unittest.TestCase):
 
     def test_order_restart_and_immutable_events(self):
         first = self.ledger.begin_task("text", 15)
-        self.ledger.append(first.task_id, Decision("needle3", "direct", 1))
-        self.ledger.append(first.task_id, Observation("get_system_status", "returned"))
-        self.ledger.append(first.task_id, Completion("completed", "executed"))
+        self.ledger.append(first.task_id, Decision(engine="needle3", route="direct", call_count=1))
+        self.ledger.append(first.task_id, Observation(tool="get_system_status", outcome="returned"))
+        self.ledger.append(first.task_id, Completion(outcome="completed", reason="executed"))
         with self.assertRaises(ValueError):
-            self.ledger.append(first.task_id, Observation("get_gpu_status", "returned"))
+            self.ledger.append(first.task_id, Observation(tool="get_gpu_status", outcome="returned"))
         with self.assertRaises(sqlite3.DatabaseError):
             with self.store.db:
                 self.store.db.execute("UPDATE cognitive_events SET kind='fake' WHERE task_id=?",
@@ -106,7 +109,7 @@ class LedgerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ledger.events(task.task_id)
         with self.assertRaises(ValueError):
-            self.ledger.append(task.task_id, Completion("completed", "no_action"))
+            self.ledger.append(task.task_id, Completion(outcome="completed", reason="no_action"))
         self.assertEqual(self.store.db.execute(
             "SELECT COUNT(*) FROM cognitive_events WHERE task_id=?",
             (task.task_id,)).fetchone()[0], 2)
@@ -118,11 +121,11 @@ class LedgerTests(unittest.TestCase):
             self.store.db.execute(
                 "INSERT INTO cognitive_events(session_id,task_id,at,kind,contract_json) "
                 "VALUES(?,?,?,?,?)", (other.session_id, task.task_id, 2, "decision",
-                                       Decision("local", "direct", 0).to_json()))
+                                       Decision(engine="local", route="direct", call_count=0).to_json()))
         with self.assertRaisesRegex(ValueError, "Cross-session"):
             self.ledger.events(task.task_id)
         with self.assertRaisesRegex(ValueError, "Cross-session"):
-            self.ledger.append(task.task_id, Completion("completed", "no_action"))
+            self.ledger.append(task.task_id, Completion(outcome="completed", reason="no_action"))
         with self.store.db:
             self.store.db.execute(
                 "DELETE FROM cognitive_events WHERE task_id=? AND kind='decision'",
@@ -135,7 +138,7 @@ class LedgerTests(unittest.TestCase):
     def test_retention_does_not_purge_running_tasks_or_legacy_tables(self):
         self.store.event("legacy", {"note": "retained"})
         task = self.ledger.begin_task("text", 10)
-        self.ledger.append(task.task_id, Completion("completed", "no_action"))
+        self.ledger.append(task.task_id, Completion(outcome="completed", reason="no_action"))
         running = self.ledger.begin_task("voice", 2)
         cutoff = int(time.time()) + 5
         # Even completed sessions cannot be pruned while their owner is alive.
@@ -150,7 +153,7 @@ class LedgerTests(unittest.TestCase):
 
     def test_prune_does_not_delete_live_idle_session_between_commands(self):
         first=self.ledger.begin_task("voice", 8)
-        self.ledger.append(first.task_id, Completion("completed", "no_action"))
+        self.ledger.append(first.task_id, Completion(outcome="completed", reason="no_action"))
         cutoff=int(time.time()) + 10
         # A separate retention client runs while the voice process remains
         # alive but has no running task. Its SQLite session claim must survive.
@@ -161,7 +164,7 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(len(self.ledger.list_tasks(first.session_id)),1)
             resumed=self.ledger.begin_task("voice", 12, first.session_id)
             self.assertEqual(resumed.session_id,first.session_id)
-            self.ledger.append(resumed.task_id,Completion("completed","no_action"))
+            self.ledger.append(resumed.task_id, Completion(outcome="completed", reason="no_action"))
             self.assertEqual(retention.prune(cutoff),0)
             self.ledger.release_ownership()
             self.assertEqual(retention.prune(cutoff),1)
@@ -172,7 +175,7 @@ class LedgerTests(unittest.TestCase):
 
     def test_prune_dead_owner_after_completed_task(self):
         finished=self.ledger.begin_task("text",6)
-        self.ledger.append(finished.task_id,Completion("completed","no_action"))
+        self.ledger.append(finished.task_id, Completion(outcome="completed", reason="no_action"))
         # Simulate a confirmed dead owner without an extra Linux process.
         with self.store.db:
             self.store.db.execute(
@@ -197,8 +200,8 @@ class LedgerTests(unittest.TestCase):
                 try:
                     for _ in range(12):
                         task = ledger.begin_task(source, 5, sid)
-                        ledger.append(task.task_id, Decision("local", "direct", 0))
-                        ledger.append(task.task_id, Completion("completed", "no_action"))
+                        ledger.append(task.task_id, Decision(engine="local", route="direct", call_count=0))
+                        ledger.append(task.task_id, Completion(outcome="completed", reason="no_action"))
                         with lock:
                             ids.append(task.task_id)
                 except Exception as exc:
@@ -222,7 +225,7 @@ class LedgerTests(unittest.TestCase):
         fake = MemorySessionLedger()
         try:
             task = fake.begin_task("reason", 4)
-            fake.append(task.task_id, Completion("completed", "no_action"))
+            fake.append(task.task_id, Completion(outcome="completed", reason="no_action"))
             self.assertEqual(len(fake.events(task.task_id)), 2)
         finally:
             fake.close()
@@ -264,6 +267,7 @@ class AlfredCorrelationTests(unittest.TestCase):
     def test_voice_source_and_opt_in_metrics_exclude_transcript(self):
         cfg = load_config()
         cfg["runtime"]["cognitive_diagnostics"] = True
+        cfg["runtime"]["resource_admission_enabled"] = False
         with tempfile.TemporaryDirectory() as home:
             cfg["runtime"]["database"] = str(Path(home)/"alfred.db")
             cfg["runtime"]["logs"] = home

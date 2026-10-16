@@ -7,8 +7,11 @@ probed from current dependencies, never inferred from repository branch name.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import re
 import shutil
+
+LOG = logging.getLogger(__name__)
 
 _ID = re.compile(r"^[a-z][a-z0-9_]{2,39}$")
 
@@ -81,52 +84,64 @@ class SkillRegistry:
                                               "qwen_minutes","qr_obex_handoff")),
             evidence_only=(name in ("transcript_retrieval","qwen_minutes")))
 
-    def _health_graph(self):
-        if self._tools is None or not hasattr(self._tools,"workflow_engine"):
-            return False,"Phase 4 workflow engine missing"
+    def _gpu_available(self) -> bool:
+        try:
+            gpu = self._gpu_probe()
+            return gpu if type(gpu) is bool else False
+        except (OSError, RuntimeError, ValueError) as exc:
+            LOG.warning("GPU probe failed: %s", exc)
+            return False
+
+    def _health_ok(self) -> tuple[bool, str]:
+        if self._tools is None or not hasattr(self._tools, "workflow_engine"):
+            return False, "Phase 4 workflow engine missing"
         # Metadata is not approval: report the skill available only when an
         # actual approved, named health graph exists in the live local store.
-        definitions=self._tools.workflow_engine.definitions()
-        if not isinstance(definitions,list):
-            return False,"Workflow inventory unavailable"
-        match=any(isinstance(item,dict) and item.get("name")=="health_graph"
-                  and item.get("state")=="approved" for item in definitions)
+        definitions = self._tools.workflow_engine.definitions()
+        if not isinstance(definitions, list):
+            return False, "Workflow inventory unavailable"
+        match = any(
+            isinstance(item, dict)
+            and item.get("name") == "health_graph"
+            and item.get("state") == "approved"
+            for item in definitions
+        )
         return match, "No approved health_graph workflow"
 
     def _meeting_available(self, operation):
-        m=self._meeting
-        if m is None:
-            return False,"Offline meeting adapter not installed"
-        probe=getattr(m,"available",None)
+        meeting = self._meeting
+        if meeting is None:
+            return False, "Offline meeting adapter not installed"
+        probe = getattr(meeting, "available", None)
         if not callable(probe):
-            return False,"Meeting adapter capability probe missing"
+            return False, "Meeting adapter capability probe missing"
         # An implementation must explicitly attest readiness of this exact
         # capability (microphones/SSD/Qwen/PDF/OBEX as appropriate).
         try:
-            available=probe(operation)
-        except (OSError, RuntimeError, ValueError, TypeError):
-            return False,"Meeting capability probe failed"
+            available = probe(operation)
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            LOG.warning("Meeting capability probe failed for %s: %s", operation, exc)
+            return False, "Meeting capability probe failed"
         if type(available) is not bool:
-            return False,"Invalid meeting capability response"
-        return available,"Required offline meeting capability unavailable"
+            return False, "Invalid meeting capability response"
+        return available, "Required offline meeting capability unavailable"
 
     def list(self):
-        try:
-            gpu=self._gpu_probe()
-            gpu= gpu if type(gpu) is bool else False
-        except (OSError,RuntimeError,ValueError):
-            gpu=False
-        health=self._health_graph()
-        reminders=(self._tools is not None
-                   and hasattr(self._tools,"automations")
-                   and hasattr(self._tools,"store")
-                   and callable(getattr(self._tools.store,"create_reminder",None)))
-        state=[
-            self._status("gpu_status",gpu,"tegrastats or GPU device unavailable"),
-            self._status("health_graph",*health),
-            self._status("reminders",reminders,"Local reminder store unavailable")]
+        gpu = self._gpu_available()
+        health = self._health_ok()
+        reminders = (
+            self._tools is not None
+            and hasattr(self._tools, "automations")
+            and hasattr(self._tools, "store")
+            and callable(getattr(self._tools.store, "create_reminder", None))
+        )
+        state = [
+            self._status("gpu_status", gpu, "tegrastats or GPU device unavailable"),
+            self._status("health_graph", *health),
+            self._status("reminders", reminders, "Local reminder store unavailable"),
+        ]
         for name in self.NAMES[3:]:
-            state.append(self._status(name,*self._meeting_available(name)))
+            state.append(self._status(name, *self._meeting_available(name)))
         return tuple(state)
 
     def get(self, name):

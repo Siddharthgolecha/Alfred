@@ -357,6 +357,7 @@ class AppTraceTests(unittest.TestCase):
         cfg["runtime"]["escalation_enabled"]=True
         cfg["runtime"]["needle_loop_enabled"]=False
         cfg["runtime"]["context_enabled"]=False
+        cfg["runtime"]["resource_admission_enabled"]=False
         self.app=Alfred(cfg,load_models=False)
         self.app.feedback.tell=Mock()
         self.app.cactus=Mock()
@@ -673,6 +674,7 @@ class EscalationContextIntegrationTests(unittest.TestCase):
         cfg["runtime"]["context_enabled"]=True
         cfg["runtime"]["escalation_enabled"]=True
         cfg["runtime"]["needle_loop_enabled"]=False
+        cfg["runtime"]["resource_admission_enabled"]=False
         self.app=Alfred(cfg,load_models=False)
         self.app.cactus=Mock()
         self.app.feedback.tell=Mock()

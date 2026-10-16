@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-import math
 
 from .contracts import valid_id
 from .needle_loop import _feedback_metrics

@@ -1,272 +1,68 @@
-# Alfred — Jetson voice automations
+# Alfred
 
-Offline-first, continuous English voice automation on **NVIDIA Jetson Orin Nano 8GB** (JetPack 7.2.1 / CUDA 13.2).
+Offline-first, continuous English voice automation for the **NVIDIA Jetson Orin Nano 8GB**
+(target: JetPack 7.2.1 / CUDA 13.2, not yet validated).
 
-**Microphone → wake-word activation → Cactus Whistle STT → Cactus Needle 3 tool router → validated Python tools.**
-Needle can delegate complex commands to a **Qwen 3.5 4B Bartowski Q4_K_M GGUF** model using **llama.cpp (`llama serve`)**, **llama-server**, **Ollama**, or **LM Studio**. Alfred adopts a compatible local server or starts the configured backend if absent.
+```text
+Microphone → wake word → Whistle STT → Needle 3 tool router → validated Python tools
+                                              │
+                                              └── complex requests → Qwen 3.5 4B (local) via DeepSeek Harness
+```
 
-## Wake word — "Alfred"
+- **Offline by design.** Speech recognition, routing and planning all run on the device.
+- **Models propose, Python decides.** Needle 3 and Qwen only emit structured calls. Python validates every
+  action and argument before anything runs. There is no arbitrary shell access.
+- **Wake-word gated.** Speech not addressed to "Alfred" never reaches a model or a tool.
+- **Local approval for sensitive actions.** Voice alone cannot approve a privileged action.
 
-Voice commands now require an explicit wake phrase by default. Say **"Alfred, show GPU status"** or **"Hey Alfred"** followed within eight seconds by **"show GPU status"**. Unaddressed background speech is never sent to Needle, Qwen, or tool execution. A standalone wake permits only one follow-up command.
+> **Status:** unit-tested offline, **not yet validated on Jetson hardware** (Bluetooth profiles, native
+> Cactus ARM64 binaries, latency and memory, spoken feedback). See
+> [Testing](docs/development/testing.md) for what CI does and does not prove.
 
-Default `wake_word.mode="transcript"` uses Whistle to recognize the wake phrase without additional dependencies. For lower idle compute, optional `wake_word.mode="openwakeword"` uses a **user-supplied ONNX wake model** to detect the phrase before running Whistle. No pretrained "Alfred" acoustic model is bundled. Both modes are configurable in `config.example.json`; details and setup are in [Wake-word activation](docs/WAKE_WORD.md). CLI `--text` and scheduled tasks continue without a wake phrase.
+## Quick start
 
-## Phase 2 planning and approvals
-
-Alfred includes schema-grounded Qwen planning and local approvals for sensitive commands. The integrated security design and CLI examples are documented in [Phase 2](docs/PHASE2.md). These commands are available without microphone input: `--reason`, `--pending`, `--approve ID`, and `--reject ID`. Voice-only speech cannot approve a privileged action.
-
-**Qwen planner troubleshooting (issue #24):** On llama.cpp, Alfred requests non-thinking JSON output because some Qwen3.5 chat templates produce incomplete or schema-breaking plans when thinking consumes the output budget. A malformed plan gets one generation-only retry. If neither response matches the schema, Alfred reports that no action was taken; it will **not** claim a schedule was saved or run a partially parsed step. Test the local endpoint with `python -m alfred --config config.json --reason "Schedule a GPU status check every 10 minutes"`. If it repeatedly fails, verify the model/chat-template compatibility, inspect local backend logs, and check `qwen.max_tokens`. Sensitive schedules still require `--approve ID`; a vague request such as "create a schedule" needs an action and interval.
-
-## Phase 3 — automations and typing-style speech
-
-Phase 3 adds [persistent absolute/daily reminders and GPU-temperature watches](docs/PHASE3.md), with SQLite notification delivery and a headless `--scheduler-only` service that works without a microphone. Sensitive recurring changes still need local approval. Run `python -m alfred --automations` to inspect jobs.
-
-Whistle now updates **one terminal line like typing** as new speech arrives. Corrections revise only the changed suffix. It does not print a new line for every partial phrase; the final transcript is committed and used for tool execution. Non-TTY logs only print the final transcript.
-
-## Phase 4 — Durable workflow graphs
-
-Phase 4 introduces [approved, persistent workflow DAGs](docs/PHASE4.md), conditional branches, bounded read-only retries, safe cancellation and restart-aware execution. Use `--workflow-draft` and `--workflow-approve` locally to register approved graphs, `--workflow-start` to run them, and `--workflow-status` to inspect results. Read-only graphs can also run on recurring schedules. Voice requests to run these workflows still require Phase 2 local approval. The `intrinsic_jetson` branch remains separate.
-
-## Phase 5 — Maestaris orchestration and DeepSeek Harness roadmap
-
-Phase 5 is organized as [detailed, dependency-linked GitHub Issues](https://github.com/Siddharthgolecha/Alfred/issues/11), with Maestaris Worker A implementing one ready issue at a time and a separate reviewer assessing PR diffs and CI before merging. The workflow follows `AGENTS.md` and `coordination/maestaris.yaml`. See [Phase 5 Maestaris and main-to-Jetson sync](docs/PHASE5_MAESTARIS.md).
-
-Every new `main` commit triggers a **non-destructive tested merge** into `intrinsic_jetson`. Merge conflicts and failing tests create an issue rather than overwriting branch-specific code.
-
-## What is implemented
-
-- Sony **WI-C100** Bluetooth microphone using HFP/HSP (A2DP alone does *not* provide headset mic capture).
-- `auto` / `bluetooth` / `direct` selection; auto prefers the Sony mic and falls back to a direct microphone.
-- BlueZ + PipeWire-Pulse/PulseAudio discovery, profile switching, explicit source capture with `parec`, reconnection attempts if a MAC address is configured.
-- Fail-fast microphone health check: reject unconfirmed Jetson "Built-in Audio" inputs, reject monitor sources and unavailable ports, require actual timed PCM delivery before loading the models.
-- 16 kHz mono PCM capture, tunable RMS VAD, incremental Whistle transcription; **only wake-authorized, finalized utterances** can trigger tools.
-- Default "Alfred" wake phrase, single bounded follow-up, and optional local openWakeWord ONNX pre-transcription detection.
-- Needle 3 structured calls; no direct execution by the model; Python validates each action and its arguments.
-- Strict allowlists for `systemctl --user` services and fixed named script argv; **no arbitrary shell**.
-- System diagnostics, SQLite reminders, recurring read-only status polls, Qwen multi-step plans, saved named workflows.
-- Lightweight optional local speech feedback using `spd-say`.
-- Backend-aware model discovery, local health checks and managed startup for `llama serve`, legacy `llama-server`, Ollama and LM Studio; no duplicate spawn onto an occupied port.
-
-**Not yet hardware-validated:** Bluetooth audio profile support on your particular JetPack image, the native Cactus ARM64 binaries, speed/memory on Jetson, and spoken feedback. Run the checklist below directly on the board.
-
-## Installation on the Jetson
-
-The board should have a working Bluetooth adapter, BlueZ, and an audio server with a PulseAudio-compatible socket (PulseAudio or PipeWire's `pipewire-pulse`).
+Requires Python 3.10+, BlueZ, and a PulseAudio-compatible audio server on the board.
 
 ```bash
-sudo apt update
-sudo apt install -y bluez pulseaudio-utils libasound2-dev python3-venv
 git clone https://github.com/Siddharthgolecha/Alfred.git
 cd Alfred
-# Until the PR merges, use:
-git switch feat/jetson-voice-agent
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e '.[test]'
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e .
 cp config.example.json config.json
-```
 
-**Config:** choose `qwen.backend` = `auto` (default), `llama_cpp`, `llama_server`, `ollama`, or `lm_studio`. In auto mode, Alfred recognizes the configured `qwen.binary` name/path, or the standard Ollama/LM Studio port when no binary is specified. Set `qwen.model` to a Hugging Face `repo:quant` for `llama serve -hf`, or the exact installed model ID for Ollama/LM Studio. For GGUF files use `qwen.model_path`; symlinks into the Hugging Face cache work. `qwen.binary` can be an executable, a PATH name, or a llama.cpp build/source directory. `qwen.url` can be blank for provider defaults, or a loopback HTTP origin (no `/v1`). Blank URLs default to ports 8080 (llama.cpp/llama-server), 11434 (Ollama), or 1234 (LM Studio). All inference is local and Alfred never terminates an existing service. The watchdog polls every `qwen.supervisor_poll_seconds`. Environment overrides: `ALFRED_QWEN_BACKEND`, `ALFRED_QWEN_BINARY`, `ALFRED_QWEN_MODEL`, `ALFRED_QWEN_URL`; legacy `ALFRED_GGUF`, `ALFRED_LLAMA_SERVER`, and `ALFRED_LLAMA_URL` still work.
-
-Provider examples (only the `qwen` keys that differ):
-
-```json
-{ "qwen": { "backend": "llama_cpp", "binary": "llama", "model": "bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M" } }
-```
-
-For `llama serve -hf`, the Hugging Face model is downloaded/cached on first startup; an existing cache is reused. The exact repository/tag should match the published model. Use `model_path` instead if running strictly offline.
-
-```json
-{ "qwen": { "backend": "llama_server", "binary": "/path/to/llama.cpp/build/bin/llama-server", "model_path": "/path/to/model.gguf" } }
-```
-```json
-{ "qwen": { "backend": "ollama", "model": "qwen3.5:4b" } }
-```
-```json
-{ "qwen": { "backend": "lm_studio", "model": "your-loaded-model-id" } }
-```
-
-Ollama models must already be installed (`ollama pull <name>`); Alfred never downloads them or substitutes another model. LM Studio requires its `lms` CLI and a previously downloaded model; when starting a new server Alfred runs `lms server start` and `lms load <model> --yes`. With an existing endpoint, Alfred only adopts a model if the requested ID matches (or the default expected-model filter selects exactly one). If a port is occupied by another service or the model cannot be verified, Alfred fails rather than replacing it. `qwen.expected_model` only filters the automatic model selection when `qwen.model` is omitted.
-
-```bash
-# Populate the native model caches before going offline:
-needle download needle3
-needle download whistle
-
-# Unit tests (no mic, Jetson or GGUF required):
-python -m unittest discover -s tests -v
-
-# Check available audio sources and the llama.cpp endpoint:
-python -m alfred --config config.json --doctor
-# Exit code 2 means no usable mic; source names by themselves are not enough.
-
-# Ensure the selected backend is running (legacy --ensure-llama also works):
-python -m alfred --config config.json --ensure-backend
-
-# Try one command in text mode:
+python -m alfred --config config.json --doctor                  # microphone, backend and Harness health
 python -m alfred --config config.json --text "Show my system status"
-
-# Start listening continuously:
-python -m alfred --config config.json
+python -m alfred --config config.json                           # listen continuously
 ```
 
-If using `llama.cpp` on Orin with CUDA, a typical native build is:
+Full instructions: [Installation](docs/getting-started/installation.md) and
+[Quickstart](docs/getting-started/quickstart.md).
+
+## Documentation
+
+| I want to… | Read |
+|---|---|
+| Install and run Alfred | [Getting started](docs/getting-started/installation.md) |
+| Configure a microphone, backend, wake word or service | [Guides](docs/guides/inference-backends.md) |
+| Understand how it works | [Architecture overview](docs/architecture/overview.md) |
+| Look up a CLI flag, config key or tool | [Reference](docs/reference/cli.md) |
+| Fix a problem | [Troubleshooting](docs/guides/troubleshooting.md) |
+| Contribute | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| See what changed | [CHANGELOG.md](CHANGELOG.md) |
+| Report a vulnerability | [SECURITY.md](SECURITY.md) |
+
+Build the HTML documentation locally:
 
 ```bash
-cmake -S llama.cpp -B llama.cpp/build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=87
-cmake --build llama.cpp/build --config Release -j4
-# Set qwen.binary to the llama.cpp directory (auto-detect) or its build/bin/llama-server
+pip install -e '.[docs]'
+make -C docs html        # output: docs/_build/html
 ```
 
-Start with context 4096, parallelism 1; change `qwen.gpu_layers` downward if 8GB shared RAM becomes constrained. `llama serve` and `llama-server` get these GPU/context settings; Ollama and LM Studio manage their own runtime settings. For an already-running server, Alfred does not change its memory allocation or loaded models.
+## Branches
 
-## Missing microphone / misleading "Built-in Audio" (bug-fix)
+`main` is the integration branch. Every new `main` commit is merged, non-destructively, into
+`intrinsic_jetson` after tests pass. See [Maestaris workflow](docs/development/maestaris.md).
 
-On some Orin Nano installations, PipeWire/PulseAudio lists **Built-in Audio** even though no microphone is connected to the developer kit. The name may describe an onboard audio controller rather than a connected microphone. Alfred **does not treat the label as proof**.
+## License
 
-- \`alfred --doctor\` now reports each advertised recording source as \`[CANDIDATE]\` or \`[REJECTED]\`, including a reason. It attempts a short PCM read from the preferred source and reports \`MICROPHONE INPUT STREAM VERIFIED\` *only if recording bytes arrive*. It exits with status **2** otherwise.
-- Ordinary continuous listening **fails at startup with exit code 2** when no microphone can capture audio. Cactus models and llama-server watchdog are not started in that case. The agent no longer pretends to listen while endlessly logging "No approved microphone".
-- Auto mode prefers Sony WI-C100 HFP/HSP, then an operational USB/direct microphone. If a candidate cannot deliver audio, a subsequent eligible candidate is probed before failure.
-- Generic onboard/SoC audio input is rejected from automatic selection, even if an input port is advertised, because that does not prove a microphone is physically attached. If a genuine microphone is wired to an onboard audio device, explicitly set \`audio.direct_source\` after inspecting \`pactl list sources\`; a live PCM probe is *still mandatory*. Explicitly selected ports known to be unavailable are never accepted.
-- If audio disconnects while listening, Alfred attempts to switch to another operational candidate. If none is available, or repeated capture failures persist, it exits nonzero instead of retrying forever. The provided systemd user-service template uses RestartPreventExitStatus=2, so a missing microphone stops the service rather than causing a restart loop. After connecting a microphone, run `systemctl --user restart alfred`.
-- \`audio.probe_timeout_seconds\` and \`audio.read_timeout_seconds\` default to 5 seconds each. Silence in a working stream is not a failure—PCM availability is only a functional check, not a physical-presence guarantee for every driver.
-
-Useful diagnostics:
-
-\`\`\`bash
-pactl -f json list sources
-pactl -f json list cards
-python -m alfred --config config.json --doctor
-echo $?   # 0: functional microphone / 2: no valid input
-\`\`\`
-
-\`--text\` and \`--ensure-llama\` do not need a microphone and remain available for diagnostics.
-
-## Live Whistle transcripts and GPU status routing
-
-Interactive terminal output is a single progressively typed `Whistle: ` line. Partial changes are shown in-place without creating new lines. Redirected output only includes the final text. Pending hypotheses never trigger tools. See [Phase 3](docs/PHASE3.md) for details. Explicit GPU metrics still route to `get_gpu_status`.
-
-## Pair and select Sony WI-C100
-
-1. Put WI-C100 in pairing mode. It is a Bluetooth neckband headset; its USB-C port is for charging, not a wired microphone.
-2. Pair/trust and connect using BlueZ:
-   ```bash
-   bluetoothctl
-   power on
-   agent on
-   default-agent
-   scan on
-   # After the Sony MAC is visible:
-   pair XX:XX:XX:XX:XX:XX
-   trust XX:XX:XX:XX:XX:XX
-   connect XX:XX:XX:XX:XX:XX
-   quit
-   ```
-3. Put the paired Sony MAC into `audio.bluetooth_address` in your **untracked** `config.json`. This ensures only that headset is preferred and enables periodic reconnection attempts.
-4. Inspect `pactl -f json list cards` and `pactl -f json list sources`. WI-C100 must expose a **headset/handsfree microphone** profile/source. If A2DP playback works but `bluez_input.*` is absent, fix the Bluetooth HFP/HSP support/audio-session configuration first.
-5. Run `python -m alfred --doctor`, then the continuous agent.
-
-`audio.mode`:
-- `auto` (default): WI-C100 HFP/HSP if available; otherwise approved non-Bluetooth source.
-- `bluetooth`: WI-C100 microphone only; no silent fallback.
-- `direct`: explicitly configured `direct_source`, or a detected ALSA/USB microphone through the audio server.
-- `auto_fallback: false`: auto mode also refuses to fall back to direct.
-
-Audio is captured from the **source**, not a sink/monitor. The service uses the system audio server for microphone access, not direct Bluetooth PCM protocols. Switching to HFP/HSP can lower playback fidelity compared to A2DP; this is normal.
-
-For better noise rejection, tune `audio.speech_rms` using local speech and noise recordings. The initial RMS VAD is intentionally simple and configurable.
-
-## Tool safety / behavior
-
-Read-only: `get_system_status`, `get_gpu_status`, `list_services`, `list_reminders`, `list_schedules`, `list_workflows`.
-
-Controlled: `control_service` only for `runtime.allowed_services`, `run_named_task` only for `runtime.named_tasks` (argv list, **no shell**). Services are limited to `systemctl --user` without privilege escalation.
-
-Persistent: `create_reminder`, `cancel_reminder`, `schedule_every` (status checks only), `cancel_schedule`. Scheduled jobs are stored in SQLite WAL and recover across Alfred restarts, but are not an exactly-once distributed delivery system.
-
-System 2: Qwen receives live tool schemas and returns JSON plans. Python validates the whole plan and requires local approval for sensitive actions; nested reasoning and recursive workflows are prohibited. Saving a named workflow requires an explicit "save/create workflow" voice request. Conditions may compare a **top-level field** from an earlier step, e.g. `gpu_temp_c > 80`. **Conditional recurring watches are not implemented**; recurring jobs currently run approved read-only diagnostic tools.
-
-For safety and privacy, raw audio is not saved and the database logs **transcript length**, not content. Do not run Alfred with root privileges. Continuous listening is enabled by user choice; only use in spaces where recording is appropriate.
-
-## Graceful shutdown
-
-An interactive **Ctrl+C** or systemd **SIGTERM** stops the audio capture subprocess,
-in-progress approved named-task/TTS subprocesses, reminder/workflow threads,
-model watchdog, and **only the inference process Alfred started**. Alfred kills its own llama.cpp/llama-server/Ollama process group if a
-graceful stop times out. A pre-existing server discovered at the same endpoint is
-**never terminated**. LM Studio is stopped via `lms server stop` only if Alfred
-started it, not if it was adopted.
-
-After the wake word is authorized, saying **"Alfred, close"** or **"Hey Alfred,
-stop listening"** shuts down the voice agent locally, without asking Needle or
-Qwen to execute a command. Background speech saying "close" alone is ignored
-when wake-word detection is enabled.
-
-To close an already-running Alfred voice instance (and an independently started
-`--scheduler-only` instance) from another terminal, run:
-
-```bash
-alfred --config config.json close
-# Or, with the default config path:
-alfred close
-```
-
-The command uses a **0600 Unix control socket inside a 0700 user-owned directory**
-under `runtime.logs/.control`, not a PID file, port scan, or `pkill`. It waits
-for shutdown and reports an error if cleanup doesn't finish within the timeout.
-A second instance of the same role refuses to start rather than commandeering
-the running instance. Re-running `alfred close` after shutdown is safe.
-
-**Scope:** User-requested `control_service` actions and externally managed local
-inference services are not undone. `--ensure-backend` is an explicit one-shot
-backend prewarm command; its server is intentionally persistent and is not owned
-by a subsequent Alfred listening session. For systemd, prefer
-`systemctl --user stop alfred` if you also want the service manager's state to
-be explicitly marked stopped. `alfred close` exits cleanly and will not trigger
-`Restart=on-failure`.
-
-## Deployment as a service
-
-Use `deployment/alfred.service` as a **user** service template (edit paths to your checkout). The audio daemon and BlueZ session must be available to that user; running `systemd --user` without a graphical/audio session may not be enough.
-
-```bash
-mkdir -p ~/.config/systemd/user
-cp deployment/alfred.service ~/.config/systemd/user/alfred.service
-systemctl --user daemon-reload
-systemctl --user enable --now alfred
-journalctl --user -u alfred -f
-```
-
-## Acceptance checklist on hardware
-
-- [ ] WI-C100 pairs and its microphone source shows up in `pactl` with an HFP/HSP profile.
-- [ ] `--doctor` prints the Bluetooth and direct sources.
-- [ ] Direct mode functions with a USB/analog microphone.
-- [ ] Auto mode switches Sony → direct on disconnect, direct → Sony on reconnect.
-- [ ] `--ensure-backend` adopts or starts the chosen local inference service and verifies the selected model.
-- [ ] `/v1/models` shows the intended Qwen model; `nvidia-smi` is generally not the standard Jetson monitoring method—use `tegrastats`.
-- [ ] Cactus native engine loads Needle and Whistle, and streaming transcription produces words.
-- [ ] Voice actions are routed correctly; nothing executes on pending text.
-- [ ] Reminders and recurring schedules work after service restart.
-- [ ] Continuous capture remains responsive during Qwen inference; measure P50/P95 latency and RAM.
-
-Official references: [Needle/Whistle APIs](https://github.com/cactus-compute/needle/blob/main/llms.txt) · [llama.cpp server API](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
-
-## Development state
-
-This is a first hardware-integration-ready implementation with offline unit fixtures, **not a claim of on-device testing**. See the feature PR for follow-up fixes/Jetson acceptance.
-
-### DeepSeek Harness required-runtime foundation (#58)
-
-Fresh Alfred installs require the pinned official DeepSeek Harness SDK and
-runtime for Qwen planning. Install with `pip install -e .`; for x86_64/Jetson
-aarch64 use `scripts/install_harness.py` with checksum-verified offline
-wheelhouse files. The interactive CLI rejects SDK/plugin audit failure, Qwen
-unavailability and SDK startup failure rather than falling back to an
-independent model planner. `--doctor` reports these conditions separately
-from microphone health.
-
-**Release blocker:** Cordis currently has zero model-facing tools and native
-Needle still runs its bounded feedback in Python. This PR is the first
-foundation of #58, not an assertion of shared Cordis lifecycle or Jetson
-hardware validation; follow-up PRs are required.
+Not yet chosen.

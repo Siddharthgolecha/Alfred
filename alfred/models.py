@@ -6,20 +6,16 @@ from contextlib import nullcontext
 import json
 import logging
 import math
-import os
-from pathlib import Path
-import shutil
-import socket
-import subprocess
-import threading
-import time
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
+
+from .constants import Limits, Timeouts, Truncation
 
 LOG = logging.getLogger(__name__)
 
-def request_json(url, data=None, timeout=4):
+MAX_NEW_TOKENS = 384
+
+def request_json(url: str, data: object = None, timeout: int = Timeouts.REQUEST_JSON) -> object:
+    """POST or GET a JSON endpoint; raises on network / HTTP errors."""
     body = json.dumps(data).encode() if data is not None else None
     req = Request(url, data=body, headers={"Content-Type": "application/json"} if body else {})
     with urlopen(req, timeout=timeout) as response:
@@ -34,9 +30,9 @@ LlamaSupervisor = ModelSupervisor
 PLAN_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
-        "message": {"type": "string", "maxLength": 800},
+        "message": {"type": "string", "maxLength": Limits.QWEN_MESSAGE_MAX},
         "steps": {
-            "type": "array", "maxItems": 5,
+            "type": "array", "maxItems": Limits.QWEN_PLAN_MAX_STEPS,
             "items": {
                 "type": "object",
                 "properties": {
@@ -79,6 +75,7 @@ def _unique_json_pairs(pairs):
 
 
 def _reject_nonfinite_constant(value):
+    """Reject non-finite JSON constants ('NaN', 'Infinity', '-Infinity')."""
     raise QwenPlanResponseError("Non-finite JSON number in Qwen plan")
 
 
@@ -107,6 +104,15 @@ class Qwen:
         # Older code/tests supply supervisors with no URL attribute.
         url = getattr(self.supervisor, "url", None)
         return url if isinstance(url, str) else self.cfg["url"].rstrip("/")
+
+    def _run_inference(self, payload):
+        """Ensure the backend is running, stamp the model name into *payload* (if known),
+        and POST to the chat endpoint. Use this for single-shot inference calls."""
+        self.supervisor.ensure_running()
+        model = self.supervisor.model_id()
+        if model:
+            payload["model"] = model
+        return request_json(self._endpoint() + "/v1/chat/completions", payload, timeout=90)
 
     def complete(self, transcript, tool_catalog, allowed_services=(), named_tasks=(), *,
                  context=None, handoff=None):
@@ -174,8 +180,6 @@ class Qwen:
             "response_format": self._response_format("alfred_plan", PLAN_RESPONSE_SCHEMA),
             "stream": False
         }
-        if model:
-            payload["model"] = model
         # Qwen3.5 can spend its entire generation budget thinking, and some
         # llama.cpp versions fail to enforce JSON grammar in thinking mode.
         # Both forms are best-effort for differently aged llama.cpp servers.
@@ -184,12 +188,13 @@ class Qwen:
             payload["chat_template_kwargs"] = {"enable_thinking": False}
             payload["reasoning_effort"] = "none"
 
+        if model:
+            payload["model"] = model
         # A retry is generation-only: no returned text can become a tool call
         # until it passes System2.parse_plan and preflight. Never reinterpret a
         # failed plan as a successful schedule or silently discard its steps.
         for attempt in range(2):
-            out = request_json(self._endpoint() + "/v1/chat/completions",
-                               payload, timeout=90)
+            out = request_json(self._endpoint() + "/v1/chat/completions", payload, timeout=90)
             try:
                 return self._parse_plan_response(out)
             except QwenPlanResponseError as exc:
@@ -212,9 +217,17 @@ class Qwen:
     def _parse_plan_response(response):
         """Validate the envelope and top-level fields before any action path."""
         try:
-            choice = response["choices"][0]
+            choices = response.get("choices") if isinstance(response, dict) else None
+            if not isinstance(choices, list) or not choices:
+                raise QwenPlanResponseError("Missing chat completion content")
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                raise QwenPlanResponseError("Missing chat completion content")
+            message = choice.get("message")
+            if not isinstance(message, dict) or "content" not in message:
+                raise QwenPlanResponseError("Missing chat completion content")
             finish_reason = choice.get("finish_reason")
-            content = choice["message"]["content"]
+            content = message["content"]
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise QwenPlanResponseError("Missing chat completion content") from exc
         if finish_reason not in (None, "stop"):
@@ -230,9 +243,9 @@ class Qwen:
         if (not isinstance(plan, dict)
                 or set(plan) != {"message", "steps", "save_as"}
                 or not isinstance(plan["message"], str)
-                or len(plan["message"]) > 800
+                or len(plan["message"]) > Limits.QWEN_MESSAGE_MAX
                 or not isinstance(plan["steps"], list)
-                or len(plan["steps"]) > 5
+                or len(plan["steps"]) > Limits.QWEN_PLAN_MAX_STEPS
                 or not (plan["save_as"] is None or isinstance(plan["save_as"], str))):
             raise QwenPlanResponseError("Qwen response missing required plan fields")
         for step in plan["steps"]:
@@ -240,7 +253,7 @@ class Qwen:
                     or not {"tool", "args"} <= set(step)
                     or not set(step) <= {"tool", "args", "when"}
                     or not isinstance(step["tool"], str)
-                    or not 1 <= len(step["tool"]) <= 128
+                    or not 1 <= len(step["tool"]) <= Limits.PLAN_TOOL_NAME_MAX
                     or not isinstance(step["args"], dict)):
                 raise QwenPlanResponseError("Malformed Qwen plan step structure")
             if "when" in step:
@@ -267,9 +280,7 @@ class Qwen:
             return self._explain_admitted(user_request,observed_results)
 
     def _explain_admitted(self, user_request, observed_results):
-        self.supervisor.ensure_running()
-        model = self.supervisor.model_id()
-        observations = json.dumps(observed_results,default=str,ensure_ascii=True)[:7000]
+        observations = json.dumps(observed_results,default=str,ensure_ascii=True)[:Truncation.EXPLAIN_OBSERVATIONS]
         payload = {
             "messages": [
                 {"role":"system","content":
@@ -279,20 +290,17 @@ class Qwen:
                     "Do not issue instructions to execute actions, claim an action has succeeded, "
                     "or invent hardware readings. If measurements are insufficient, say so."},
                 {"role":"user","content":
-                    "User question: " + user_request[:1200] + "\nObserved read-only tool results:\n" + observations}
+                    "User question: " + user_request[:Truncation.EXPLAIN_QUESTION] + "\nObserved read-only tool results:\n" + observations}
             ],
             "temperature":0,
             "max_tokens":min(512,int(self.cfg["max_tokens"])),
             "response_format":self._response_format("alfred_explanation", {
-                "type":"object","properties":{"answer":{"type":"string","maxLength":1400}},
+                "type":"object","properties":{"answer":{"type":"string","maxLength":Limits.QWEN_ANSWER_MAX}},
                 "required":["answer"],"additionalProperties":False
             }),
             "stream":False
         }
-        if model:
-            payload["model"]=model
-        out=request_json(self._endpoint() + "/v1/chat/completions",
-                         payload,timeout=90)
+        out=self._run_inference(payload)
         content=out["choices"][0]["message"].get("content") or ""
         try:
             answer=json.loads(content)["answer"]
@@ -300,13 +308,13 @@ class Qwen:
             raise ValueError("Qwen analysis did not return a valid answer") from exc
         if not isinstance(answer,str) or not answer.strip():
             raise ValueError("Qwen analysis answer is empty")
-        return answer[:1400]
+        return answer[:Limits.QWEN_ANSWER_MAX]
 
 class Cactus:
     """One long-lived Needle instance; native inference kept on calling thread."""
     def __init__(self, schemas, admission=None):
         self.admission = admission
-        import needle
+        import needle  # type: ignore[import-untyped]
         self.needle = needle
         self.agent = needle.Needle(tools=schemas)
         self.whistle = needle.Whistle()
@@ -315,7 +323,7 @@ class Cactus:
         guard=self.admission.claim("needle") if self.admission else nullcontext()
         with guard:
             self.agent.reset()
-            return self.agent.complete(transcript, max_new_tokens=384)
+            return self.agent.complete(transcript, max_new_tokens=MAX_NEW_TOKENS)
 
     def route_feedback(self, observation_json):
         """Continue the current isolated task without reset; input is trusted scalar JSON.
@@ -325,7 +333,7 @@ class Cactus:
         """
         guard=self.admission.claim("needle_feedback") if self.admission else nullcontext()
         with guard:
-            return self.agent.complete(observation_json, max_new_tokens=384)
+            return self.agent.complete(observation_json, max_new_tokens=MAX_NEW_TOKENS)
 
     def transcribe_stream(self, frames, on_partial=None):
         guard=self.admission.claim("whistle") if self.admission else nullcontext()
@@ -334,21 +342,21 @@ class Cactus:
 
     def _transcribe_admitted(self, frames, on_partial=None):
         # Whistle commits segments as it receives streaming samples.
-        pieces = []
+        confirmed_text = []
         pending = ""
         for event in self.whistle.stream(frames, language="en", keywords=["Alfred", "Jetson", "Sony"]):
             committed = str(event.get("text") or "").strip()
             pending = str(event.get("pending") or "")
             if committed:
-                pieces.append(committed)
+                confirmed_text.append(committed)
             if on_partial:
-                confirmed=" ".join(pieces).strip()
-                provisional=pending.strip()
+                confirmed = " ".join(confirmed_text).strip()
+                provisional = pending.strip()
                 # Some streaming providers return a pending transcript that
                 # already includes the confirmed prefix; do not echo it twice.
                 if provisional and confirmed and provisional.lower().startswith(confirmed.lower()):
-                    shown=provisional
+                    shown = provisional
                 else:
-                    shown=" ".join(part for part in (confirmed,provisional) if part)
+                    shown = " ".join(part for part in (confirmed, provisional) if part)
                 on_partial(shown)
-        return " ".join(pieces).strip()
+        return " ".join(confirmed_text).strip()

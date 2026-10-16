@@ -312,8 +312,9 @@ class MeetingPolicyTests(unittest.TestCase):
             with self.subTest(kw=kw),self.assertRaises(PermissionError):
                 self.grant(**kw)
         p=self.grant()
-        copied=MeetingPermit(SID,TASK,"local",MEETING,True,True,
-                             p.granted_at,p.expires_at)
+        copied=MeetingPermit(session_id=SID,task_id=TASK,owner="local",meeting_id=MEETING,
+                             consent=True,allow_retention=True,
+                             granted_at=p.granted_at,expires_at=p.expires_at)
         with self.assertRaises(PermissionError):
             self.adapter.evidence(copied)
         foreign=self.grant(task=TASK2)
@@ -513,8 +514,9 @@ class MeetingPolicyTests(unittest.TestCase):
     def test_forged_or_stale_permit_cannot_revoke_another_task(self):
         self.start(retention=True)
         p=self.grant()
-        forged=MeetingPermit(SID,TASK,"local",MEETING,True,True,
-                             p.granted_at,p.expires_at)
+        forged=MeetingPermit(session_id=SID,task_id=TASK,owner="local",meeting_id=MEETING,
+                             consent=True,allow_retention=True,
+                             granted_at=p.granted_at,expires_at=p.expires_at)
         with self.assertRaises(PermissionError):
             self.adapter.revoke(forged)
         self.assertEqual(self.adapter.status(p)["state"],"recording")
@@ -683,6 +685,7 @@ class CombinedHandoffSkillBoundaryTests(unittest.TestCase):
             cfg["runtime"]["escalation_enabled"]=True
             cfg["runtime"]["harness_enabled"]=False
             cfg["runtime"]["needle_loop_enabled"]=False
+            cfg["runtime"]["resource_admission_enabled"]=False
             cfg["qwen"]["enabled"]=True
             device=FakeMeetingDevice()
             adapter=OfflineMeetingAdapter(device)

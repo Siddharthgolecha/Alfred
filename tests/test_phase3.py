@@ -215,9 +215,9 @@ class Phase3Tests(unittest.TestCase):
         self.assertEqual(len(self.store.list_reminders()),1)
 
     def test_no_mic_required_for_headless_scheduler_cli(self):
-        from alfred.app import main
-        with patch("alfred.app.AudioManager.ensure_input") as check,\
-             patch("alfred.app.Alfred") as app:
+        from alfred.cli import main
+        with patch("alfred.cli.AudioManager.ensure_input") as check,\
+             patch("alfred.cli.Alfred") as app:
             result=main(["--automations","--config","/does/not/exist.json"])
         self.assertEqual(result,0)
         check.assert_not_called()

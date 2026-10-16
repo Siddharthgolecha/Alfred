@@ -28,6 +28,7 @@ class HarnessRequiredTests(unittest.TestCase):
             cfg=load_config()
             cfg["runtime"]["database"]=str(Path(tmp)/"data.db")
             cfg["runtime"]["logs"]=tmp
+            cfg["runtime"]["resource_admission_enabled"]=False
             app=Alfred(cfg,load_models=False)
             app.supervisor.ensure_running=Mock()
             app.system2.reason=Mock(side_effect=AssertionError("legacy call"))

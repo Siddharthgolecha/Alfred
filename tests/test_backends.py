@@ -89,10 +89,10 @@ class BackendSupervisorTests(unittest.TestCase):
         target.write_text("#!/bin/sh\nexit 0\n")
         target.chmod(0o755)
         sup = self.supervisor("llama_cpp", binary=str(base))
-        self.assertEqual(sup._binary(), str(target))
+        self.assertEqual(sup._resolve_binary(), str(target))
 
     def test_old_llama_server_uses_local_gguf(self):
-        gguf = Path(self.temp.name) / "model.gguf"
+        gguf = Path(self.temp.name).resolve() / "model.gguf"
         gguf.write_bytes(b"gguf")
         sup = self.supervisor("llama_server", binary="llama-server", model_path=str(gguf))
         cmd = sup._start_command("/usr/local/bin/llama-server")
@@ -171,6 +171,54 @@ class BackendSupervisorTests(unittest.TestCase):
                               expected_model="Qwen3.5-4B")
         with patch.object(sup, "_models", return_value=["Qwen3.5-4B-Q4_K_M.gguf"]):
             self.assertEqual(sup.model_id(), "Qwen3.5-4B-Q4_K_M.gguf")
+
+    def test_check_health_ready_verifies_model_and_returns_true(self):
+        sup = self.supervisor("ollama")
+        with patch.object(sup, "health", return_value="ready"), \
+             patch.object(sup, "verify_model", return_value="qwen3.5:4b") as verify:
+            self.assertTrue(sup._check_health())
+            verify.assert_called_once()
+
+    def test_check_health_loading_waits_for_ready(self):
+        sup = self.supervisor("ollama")
+        with patch.object(sup, "health", return_value="loading"), \
+             patch.object(sup, "port_open", return_value=True), \
+             patch.object(sup, "_wait_ready", return_value=True) as wait:
+            self.assertTrue(sup._check_health())
+            wait.assert_called_once()
+
+    def test_check_health_unhealthy_occupied_port_raises_error(self):
+        sup = self.supervisor("ollama")
+        with patch.object(sup, "health", return_value="down"), \
+             patch.object(sup, "port_open", return_value=True):
+            with self.assertRaises(RuntimeError):
+                sup._check_health()
+
+    def test_check_health_port_closed_returns_false(self):
+        sup = self.supervisor("ollama")
+        with patch.object(sup, "health", return_value="down"), \
+             patch.object(sup, "port_open", return_value=False):
+            self.assertFalse(sup._check_health())
+
+    def test_resolve_binary_from_path(self):
+        sup = self.supervisor("ollama", binary="ollama")
+        with patch("alfred.backends.shutil.which", return_value="/usr/local/bin/ollama"):
+            self.assertEqual(sup._resolve_binary(), "/usr/local/bin/ollama")
+
+    def test_resolve_binary_missing_raises_file_not_found(self):
+        sup = self.supervisor("ollama", binary="nonexistent_binary_xyz")
+        with patch("alfred.backends.shutil.which", return_value=None):
+            with self.assertRaises(FileNotFoundError):
+                sup._resolve_binary()
+
+    def test_start_process_launches_background_service(self):
+        sup = self.supervisor("ollama")
+        proc = MagicMock(pid=42)
+        with patch("alfred.backends.subprocess.Popen", return_value=proc) as popen:
+            sup._start_process("/usr/bin/ollama")
+            popen.assert_called_once()
+            self.assertEqual(sup.process, proc)
+            self.assertTrue(sup.started_here)
 
 
 class BackendQwenTests(unittest.TestCase):
