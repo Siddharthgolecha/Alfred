@@ -340,6 +340,7 @@ class Tools:
         self.cfg = cfg
         self.store = store
         self.processes = processes
+        self.trace = None
         self.services: set[str] = set(cfg.get("allowed_services", []))
         self.tasks: dict[str, Any] = cfg.get("named_tasks", {})
         from .automations import Automations
@@ -464,11 +465,38 @@ class Tools:
                               allow_cancellations=allow_cancellations)
         results = []
         for step in steps:
+            started = time.monotonic()
+            name = step["tool"]
             if step.get("when") and not check_condition(step["when"], results):
                 results.append({"skipped": True})
+                if self.trace is not None:
+                    try:
+                        self.trace.record("Tool · " + name, "skipped", "Condition not met")
+                    except Exception:
+                        pass
                 continue
-            result = self.execute(step["tool"], step.get("args", {}), from_plan=True)
-            results.append(result if isinstance(result, dict) else {"items": result})
+            if self.trace is not None:
+                try:
+                    self.trace.record("Tool · " + name, "running")
+                except Exception:
+                    pass
+            try:
+                result = self.execute(name, step.get("args", {}), from_plan=True)
+                results.append(result if isinstance(result, dict) else {"items": result})
+                if self.trace is not None:
+                    try:
+                        self.trace.record("Tool · " + name, "complete", "Returned",
+                                          max(0, int((time.monotonic() - started) * 1000)))
+                    except Exception:
+                        pass
+            except Exception:
+                if self.trace is not None:
+                    try:
+                        self.trace.record("Tool · " + name, "failed", "Execution failed",
+                                          max(0, int((time.monotonic() - started) * 1000)))
+                    except Exception:
+                        pass
+                raise
         return results
 
 

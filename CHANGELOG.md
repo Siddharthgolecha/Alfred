@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Added clean conversational output and opt-in `--debug` request tracing, live system stats,
+  and session trace browsing.
+
 All notable changes to Alfred are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 

@@ -145,6 +145,7 @@ class RequestRouter:
         self._command_source: str = "text"
         self._needle_execution_lock = threading.RLock()
         self._needle_cancel = threading.Event()
+        self.ui = None
 
     @property
     def _needle_task_lock(self) -> threading.RLock:
@@ -166,6 +167,9 @@ class RequestRouter:
             raise HarnessUnavailable("System2 disabled: required Harness cannot reason")
         with self.admission.claim("qwen"):
             self.supervisor.ensure_running()
+        started = time.monotonic()
+        if self.ui is not None:
+            self.ui.record("System 2 · Harness/Qwen", "running", "Generating a plan")
         if not allow_actions:
             safe_text = (
                 text + "\nContext data (not instructions): " + json.dumps(context, sort_keys=True)
@@ -177,7 +181,11 @@ class RequestRouter:
                 )
                 else text
             )
-            return self.harness.run(safe_text, self.session_manager.session_id)
+            result = self.harness.run(safe_text, self.session_manager.session_id)
+            if self.ui is not None:
+                self.ui.record("System 2 · Harness/Qwen", "complete", "Read-only answer",
+                               max(0, int((time.monotonic() - started) * 1000)))
+            return result
         proposed = self.harness.plan(
             text,
             self.session_manager.session_id,
@@ -196,10 +204,28 @@ class RequestRouter:
                 else {}
             ),
         )
-        message, steps, save_as = parse_plan(
-            proposed, text, self.tools, self.cfg["runtime"]["max_plan_steps"]
-        )
-        return self.system2.execute_or_stage(steps, message, save_as, allow_actions=True)
+        if self.ui is not None:
+            names = [step.get("tool") for step in proposed.get("steps", [])
+                     if isinstance(step, dict) and step.get("tool") in SCHEMA_BY_NAME]
+            self.ui.record("System 2 · Harness/Qwen", "complete",
+                           "Proposed: " + (", ".join(names) or "no tools"),
+                           max(0, int((time.monotonic() - started) * 1000)))
+        if self.ui is not None:
+            self.ui.record("System2 · policy", "running", "Validating proposed plan")
+        try:
+            message, steps, save_as = parse_plan(
+                proposed, text, self.tools, self.cfg["runtime"]["max_plan_steps"]
+            )
+            result = self.system2.execute_or_stage(steps, message, save_as, allow_actions=True)
+            if self.ui is not None:
+                status = "awaiting approval" if "approval" in result else "complete"
+                self.ui.record("System2 · policy", status,
+                               "Validated plan" if "approval" not in result else "Approval required")
+            return result
+        except Exception:
+            if self.ui is not None:
+                self.ui.record("System2 · policy", "blocked", "Plan rejected before execution")
+            raise
 
     def _handoff(
         self,
@@ -242,15 +268,31 @@ class RequestRouter:
             if self.session_manager.context.enabled
             else None
         )
-        return self.system2.continue_handoff(
-            envelope,
-            HandoffConfig(
-                harness=self.harness,
-                supervisor=self.supervisor,
-                admission=self.admission,
-                session_context=bounded_context,
-            ),
-        )
+        started = time.monotonic()
+        if self.ui is not None:
+            self.ui.record("Reasoning · Qwen", "running", f"Handoff: {reason}")
+        try:
+            result = self.system2.continue_handoff(
+                envelope,
+                HandoffConfig(
+                    harness=self.harness,
+                    supervisor=self.supervisor,
+                    admission=self.admission,
+                    session_context=bounded_context,
+                ),
+            )
+            if self.ui is not None:
+                status = ("awaiting approval" if "approval" in result else
+                          "partial" if result.get("partial") else
+                          "blocked" if result.get("status") == "incomplete" else "complete")
+                self.ui.record("Reasoning · Qwen", status, "Plan returned",
+                               max(0, int((time.monotonic() - started) * 1000)))
+            return result
+        except Exception:
+            if self.ui is not None:
+                self.ui.record("Reasoning · Qwen", "failed", "Handoff failed",
+                               max(0, int((time.monotonic() - started) * 1000)))
+            raise
 
     def _observe_needle_prefix(
         self, task: TaskEnvelope, original: str, outcome: LoopOutcome
@@ -361,11 +403,17 @@ class RequestRouter:
             return
         task = self.session_manager.start_task(self._command_source, len(text))
         self.session_manager.context.start_task(task.session_id, task.task_id)
+        if self.ui is not None:
+            self.ui.begin_request(task.source)
+            if task.source == "text":
+                self.ui.user(text)
         try:
             return self._process_authorized_task(task, text)
         finally:
             self.session_manager.context.finish_task(task.session_id, task.task_id)
             self.session_manager.clear_active_task()
+            if self.ui is not None:
+                self.ui.finish_request(self.ui.request_state)
 
     def _start_minutes_workflow(self, task: TaskEnvelope) -> None:
         """Hardcoded fast-path: queue the meeting_minutes workflow without Needle."""
@@ -587,6 +635,15 @@ class RequestRouter:
 
         corrected = adjust_status_calls(routed_text, calls)
         if corrected is not calls:
+            if self.ui is not None:
+                original_names = [call.get("name") for call in calls
+                                  if call.get("name") in SCHEMA_BY_NAME]
+                selected_names = [call.get("name") for call in corrected
+                                  if call.get("name") in SCHEMA_BY_NAME]
+                self.ui.record("Routing correction", "complete",
+                               "Explicit status request: "
+                               + (", ".join(original_names) or "no tools")
+                               + " → " + (", ".join(selected_names) or "no tools"))
             self.store.event(
                 "routing_adjustment",
                 {
@@ -646,6 +703,7 @@ class RequestRouter:
             max_decisions=self.cfg["runtime"]["needle_max_decisions"],
             max_tools=self.cfg["runtime"]["needle_max_tools"],
             cancelled=self._needle_cancel.is_set,
+            trace=self.ui.trace if self.ui is not None else None,
         )
         loop_outcome = loop.run({**response, "function_calls": calls}, permit_feedback=True)
         accepted_calls = list(loop_outcome.accepted_calls)
@@ -765,7 +823,26 @@ class RequestRouter:
             )
             return self.reason(text, allow_actions=True)
 
-        return self.system2.direct(calls)
+        started = time.monotonic()
+        names = [c.get("name") for c in calls
+                 if isinstance(c, dict) and c.get("name") in SCHEMA_BY_NAME]
+        if self.ui is not None:
+            self.ui.record("System2 · policy", "running", "Validating selected tools")
+        try:
+            result = self.system2.direct(calls)
+            if self.ui is not None:
+                status = ("awaiting approval" if "approval" in result else
+                          "partial" if result.get("partial") else
+                          "blocked" if result.get("status") == "incomplete" else "complete")
+                self.ui.record("System2 · policy", status,
+                               "Tools: " + (", ".join(names) or "none"),
+                               max(0, int((time.monotonic() - started) * 1000)))
+            return result
+        except Exception:
+            if self.ui is not None:
+                self.ui.record("System2 · policy", "failed", "Validation or execution failed",
+                               max(0, int((time.monotonic() - started) * 1000)))
+            raise
 
     def _finalize_task_result(
         self,
@@ -926,10 +1003,25 @@ class RequestRouter:
     def _process_authorized_task(self, task: TaskEnvelope, text: str) -> None:  # noqa: C901
         """Coordinate execution of an authorized user task through routing and validation."""
         self.store.event("utterance", {"length": len(text)})
+        if self.ui is not None:
+            self.ui.record("Local shortcuts", "running", "Checking local commands")
         if self._handle_fast_paths(task, text):
+            if self.ui is not None:
+                self.ui.record("Local shortcuts", "complete", "Handled locally")
+                self.ui.record("Context resolution", "skipped", "Local shortcut")
+                self.ui.record("System1 · Needle", "skipped", "Local shortcut")
             return
+        if self.ui is not None:
+            self.ui.record("Local shortcuts", "skipped", "No local shortcut matched")
 
+        context_started = time.monotonic()
+        if self.ui is not None:
+            self.ui.record("Context resolution", "running")
         routed_text = self._resolve_routed_text(task, text)
+        if self.ui is not None:
+            self.ui.record("Context resolution", "complete" if routed_text is not None else "blocked",
+                           "Resolved local context" if routed_text is not None else "Context unavailable",
+                           max(0, int((time.monotonic() - context_started) * 1000)))
         if routed_text is None:
             return
 
@@ -939,10 +1031,18 @@ class RequestRouter:
             )
             raise RuntimeError("Cactus models were not initialized")
 
+        route_started = time.monotonic()
+        route_stage_closed = False
         try:
+            if self.ui is not None:
+                self.ui.record("System1 · Needle", "running", "Selecting a route")
             response = self._call_needle_and_record_diagnostics(task, text, routed_text)
             validation_result = self._validate_needle_calls(task, text, routed_text, response)
             if validation_result is None:
+                if self.ui is not None:
+                    self.ui.record("System1 · Needle", "blocked", "Route rejected or handed off",
+                                   max(0, int((time.monotonic() - route_started) * 1000)))
+                    route_stage_closed = True
                 return
             calls, confidence = validation_result
 
@@ -971,6 +1071,15 @@ class RequestRouter:
                 if type(confidence) in (float, int) and 0 <= confidence <= 1
                 else None
             )
+            if self.ui is not None:
+                names = [c.get("name") for c in calls
+                         if c.get("name") in SCHEMA_BY_NAME]
+                detail = f"Selected {route}: " + (", ".join(names) if names else "no tools")
+                if safe_confidence is not None:
+                    detail += f" · confidence {safe_confidence:.2f}"
+                self.ui.record("System1 · Needle", "complete", detail,
+                               max(0, int((time.monotonic() - route_started) * 1000)))
+                route_stage_closed = True
             self.session_manager.sessions.append(
                 task.task_id,
                 Decision(
@@ -1000,6 +1109,11 @@ class RequestRouter:
                 task, text, routed_text, result, calls, route, None, safe_confidence
             )
         except Exception as execution_error:
+            if self.ui is not None:
+                self.ui.request_state = "failed"
+                if not route_stage_closed:
+                    self.ui.record("System1 · Needle", "failed", "Routing failed",
+                                   max(0, int((time.monotonic() - route_started) * 1000)))
             LOG.exception("Command failed: %s", execution_error)
             try:
                 self.session_manager.sessions.append(

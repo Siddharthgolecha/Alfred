@@ -32,8 +32,8 @@ class FirstRunHintTests(unittest.TestCase):
             finally:
                 os.chdir(cwd)
 
-    def test_hint_printed_when_default_config_missing(self):
-        self.assertIn(HINT, self._run(["close"]))
+    def test_startup_hint_is_hidden_in_regular_mode(self):
+        self.assertNotIn(HINT, self._run(["close"]))
 
     def test_no_hint_when_default_config_exists(self):
         self.assertNotIn(HINT, self._run(["close"], create_config=True))
