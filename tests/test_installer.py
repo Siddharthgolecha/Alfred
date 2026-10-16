@@ -20,6 +20,39 @@ from alfred.platform_utils import IS_WINDOWS
 
 
 class InstallerUITests(unittest.TestCase):
+    def test_lm_studio_setup_starts_local_server_on_configured_port(self):
+        wizard = core.Wizard.__new__(core.Wizard)
+        wizard.system = "Darwin"
+        wizard.settings = {"backend": "lmstudio"}
+        wizard.config = {"qwen": {"url": "http://127.0.0.1:12345", "model": "qwen-local"}}
+        wizard.ui = SimpleNamespace(ok=Mock(), info=Mock(), warn=Mock())
+        with patch.object(core, "_endpoint_ready", side_effect=[False, True]), \
+             patch.object(core, "_find_lms", return_value="/fake/lms"), \
+             patch.object(core, "_query_model_ids", return_value=["qwen-local"]), \
+             patch.object(core, "_call") as call, \
+             patch.object(core.time, "sleep"):
+            status = wizard._backend("uv", Path("python"), {}, Path("installer.log"))
+        self.assertEqual(status, {"server_ready": True})
+        self.assertEqual(call.call_args.args[0],
+                         ["/fake/lms", "server", "start", "--port", "12345", "--bind", "127.0.0.1"])
+
+    def test_lm_studio_does_not_start_remote_backend(self):
+        wizard = core.Wizard.__new__(core.Wizard)
+        wizard.system = "Darwin"
+        wizard.settings = {"backend": "lmstudio"}
+        wizard.config = {"qwen": {"url": "https://models.example.test:1234"}}
+        wizard.ui = SimpleNamespace(ok=Mock(), info=Mock(), warn=Mock())
+        with patch.object(core, "_call") as call:
+            wizard._backend("uv", Path("python"), {}, Path("installer.log"))
+        call.assert_not_called()
+        wizard.ui.info.assert_called_once()
+
+    def test_lm_studio_loopback_detection_preserves_ipv6_binding(self):
+        self.assertTrue(core._loopback_url("http://[::1]:1234"))
+        self.assertTrue(core._loopback_url("http://localhost:1234"))
+        self.assertFalse(core._loopback_url("https://models.example.test:1234"))
+        self.assertEqual(core._loopback_bind("http://[::1]:1234"), "::1")
+
     def test_numbered_prompt_uses_default_and_stable_value(self):
         out = io.StringIO()
         ui = Terminal(stream=out, input_stream=io.StringIO("\n"), plain=True)

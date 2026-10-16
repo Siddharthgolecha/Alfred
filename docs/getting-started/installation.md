@@ -52,6 +52,9 @@ verified Harness wheels and installed packages. If the virtual environment is da
 
 The installer uses Python's standard library for its terminal interface. It guides first-time
 setup, checks the selected platform, and verifies the pinned Harness wheels before installation.
+When LM Studio is selected with a loopback URL, the installer starts its local API server on the
+configured port if it is not already running. It does not download or load a model implicitly;
+the setup summary reports when the configured model is not available from that server.
 Windows voice capture requires FFmpeg with DirectShow; Alfred offers `winget` setup when it is
 available. Allow microphone access in Windows Privacy settings. Installers do not claim voice
 readiness until `alfred --doctor` verifies a live microphone stream.

@@ -5,6 +5,7 @@ import argparse
 import contextlib
 import hashlib
 import http.client
+import ipaddress
 import json
 import copy
 import os
@@ -17,6 +18,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+from urllib.parse import urlsplit
 import urllib.request
 
 from .ui import Terminal
@@ -211,6 +213,51 @@ def _query_model_ids(base_url):
         return [str(row["id"]) for row in rows if isinstance(row, dict) and row.get("id")]
     except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError):
         return []
+
+
+def _loopback_url(url):
+    """Whether a backend URL is safe for the installer to start locally."""
+    try:
+        host = urlsplit(url).hostname
+        if not host:
+            return False
+        if host.lower() == "localhost":
+            return True
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _loopback_bind(url):
+    """Return a loopback bind address compatible with a backend URL."""
+    host = urlsplit(url).hostname or ""
+    try:
+        return "::1" if ipaddress.ip_address(host).version == 6 else "127.0.0.1"
+    except ValueError:
+        return "127.0.0.1"
+
+
+def _endpoint_ready(url):
+    """Probe the OpenAI-compatible model endpoint without loading a model."""
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/v1/models", timeout=2) as response:
+            return response.status == 200
+    except (OSError, urllib.error.URLError, TimeoutError, ValueError):
+        return False
+
+
+def _find_lms():
+    """Find LM Studio's CLI even when its installer directory is not on PATH."""
+    found = shutil.which("lms")
+    if found:
+        return found
+    names = ("lms.exe", "lms") if os.name == "nt" else ("lms",)
+    roots = [Path.home() / ".lmstudio" / "bin"]
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        roots.append(Path(local_app_data) / "Programs" / "LM Studio" / "bin")
+    return next((str(root / name) for root in roots for name in names
+                 if (root / name).is_file() and os.access(root / name, os.X_OK)), None)
 
 
 def _query_ollama_models():
@@ -987,13 +1034,23 @@ class Wizard:
         backend_inputs = {"backend": self.settings["backend"],
                           "url": self.config.get("qwen", {}).get("url", ""),
                           "system": self.system}
-        def backend_ready(_output):
-            if self.settings["backend"] in ("skip", "lmstudio", "llamacpp"):
+        def backend_ready(output):
+            if self.settings["backend"] in ("skip", "llamacpp"):
                 return True
+            if self.settings["backend"] == "lmstudio":
+                url = self.config.get("qwen", {}).get("url", "")
+                if not _loopback_url(url):
+                    return True  # Remote services are owned by the user.
+                return (_endpoint_ready(url) or
+                        (isinstance(output, dict) and output.get("deferred")
+                         and _find_lms() is None))
             return _has("ollama") or "Ollama server" in _detect_backend(self.ui)
 
-        self._step("backend", backend_inputs, backend_ready,
-                   lambda: (self._backend(uv, python, env, log), {"backend": self.settings["backend"]})[1])
+        def configure_backend():
+            status = self._backend(uv, python, env, log) or {}
+            return {"backend": self.settings["backend"], **status}
+
+        self._step("backend", backend_inputs, backend_ready, configure_backend)
 
         if not self.settings["skip_models"]:
             self._models(python, log, env)
@@ -1039,8 +1096,40 @@ class Wizard:
 
     def _backend(self, uv, python, env, log):
         backend = self.settings["backend"]
-        if backend in ("skip", "lmstudio", "llamacpp"):
+        if backend == "skip" or backend == "llamacpp":
             return
+        if backend == "lmstudio":
+            url = self.config.get("qwen", {}).get("url", "http://127.0.0.1:1234")
+            if not _loopback_url(url):
+                self.ui.info("LM Studio URL is remote; Alfred will use it without starting a local server")
+                return
+            if _endpoint_ready(url):
+                self.ui.ok("LM Studio API server is already running")
+                return
+            binary = _find_lms()
+            if not binary:
+                self.ui.warn("LM Studio CLI (`lms`) was not found; start its local server before using Alfred")
+                return {"deferred": True}
+            port = urlsplit(url).port
+            if not port:
+                raise RuntimeError(f"LM Studio URL has no explicit port: {url}")
+            _call([binary, "server", "start", "--port", str(port), "--bind",
+                   _loopback_bind(url)],
+                  self.ui, "Starting LM Studio local server", log=log)
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                if _endpoint_ready(url):
+                    self.ui.ok("LM Studio API server is ready on localhost")
+                    configured_model = self.config.get("qwen", {}).get("model", "")
+                    available = _query_model_ids(url)
+                    if configured_model and configured_model not in available:
+                        self.ui.warn("Configured model is not served by LM Studio: " + configured_model)
+                        if available:
+                            self.ui.info("Available model IDs: " + ", ".join(available))
+                        self.ui.info("Load an available model in LM Studio or select its exact ID in installer Customize")
+                    return {"server_ready": True}
+                time.sleep(0.25)
+            raise RuntimeError(f"LM Studio did not become ready at {url}; see {log_path()}")
         if self.system == "Windows":
             if "Ollama server" in self.existing_backends:
                 return
