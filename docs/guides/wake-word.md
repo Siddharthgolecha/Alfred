@@ -52,9 +52,21 @@ Whistle only runs on speech that triggered the detector. This lowers idle comput
 - On the Jetson, make sure the openWakeWord and ONNX Runtime builds match your Python and
   JetPack versions.
 
+On Linux, install the optional extra with **uv project sync** so the project's ONNX-only
+dependency exclusion is applied (including on Python 3.12+):
+
 ```bash
-pip install -e '.[wakeword]'
+uv sync --extra wakeword
+# If you have activated a venv outside .venv:
+uv sync --active --extra wakeword
 ```
+
+`pip install -e '.[wakeword]'` can be used on Python 3.10/3.11, but on Linux
+Python 3.12+ it can fail because upstream `openwakeword` declares
+`tflite-runtime` despite Alfred using ONNX exclusively. Do not treat a
+`pip` install as equivalent to `uv sync` in this case. See
+[Installation](../getting-started/installation.md#acoustic-wake-word-dependency-on-linux-python-312).
+
 
 ```json
 {

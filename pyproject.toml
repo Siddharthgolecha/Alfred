@@ -39,3 +39,9 @@ include = ["alfred*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv]
+# openwakeword declares a Linux TFLite dependency even when used in ONNX mode.
+# Alfred uses only inference_framework="onnx"; tflite-runtime has no CPython 3.12+
+# wheels. This is a uv project-resolution exclusion (not a pip setting).
+exclude-dependencies = ["tflite-runtime"]

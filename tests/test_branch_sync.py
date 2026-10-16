@@ -127,6 +127,22 @@ class GitBranchSyncTests(unittest.TestCase):
         self.assertIn('run: bash "$RUNNER_TEMP/alfred-sync-main-into-jetson.sh"',workflow)
         self.assertNotIn("run: bash scripts/sync_main_into_jetson.sh",workflow)
 
+    def test_both_sync_matrix_runs_install_required_model_and_jetson_test_dependencies(self):
+        """Sync tests must install dependencies for the merged tree before importing."""
+        workflow=(Path(__file__).resolve().parents[1]/
+                  ".github/workflows/sync-main-to-intrinsic-jetson.yml").read_text()
+        dependency_line='python -m pip install "pydantic>=2.12,<3" "pytest>=8" "reportlab>=4" "qrcode[pil]>=7.4"'
+        self.assertEqual(workflow.count(dependency_line),2)
+        for version,next_heading in (
+            ("Test merged tree on Python 3.10","Configure Python 3.12"),
+            ("Test merged tree on Python 3.12","Push only fully tested merge"),
+        ):
+            with self.subTest(version=version):
+                segment=workflow.split("- name: "+version,1)[1].split(
+                    "- name: "+next_heading,1)[0]
+                self.assertLess(segment.index(dependency_line),
+                                segment.index("python -m unittest discover"))
+
     def test_non_main_workflow_dispatch_is_rejected_before_checkout(self):
         """Execute the real inline workflow guard for main and non-main refs."""
         workflow=(Path(__file__).resolve().parents[1]/

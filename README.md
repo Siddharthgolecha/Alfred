@@ -35,6 +35,11 @@ alfred                # start listening — no flags required
 On Windows, run `install.ps1` from PowerShell. Voice capture uses FFmpeg DirectShow; setup
 offers `winget` installation when it is available.
 
+For optional acoustic wake-word detection on Linux Python 3.12+, use
+`uv sync --extra wakeword` rather than `pip install -e '.[wakeword]'` to avoid
+upstream openWakeWord's unused TFLite dependency. If your active virtualenv
+is outside `.venv`, use `uv sync --active --extra wakeword`.
+
 Full instructions: [Installation](docs/getting-started/installation.md) and
 [Quickstart](docs/getting-started/quickstart.md).
 
