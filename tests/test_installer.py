@@ -30,6 +30,21 @@ class InstallerUITests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Input ended"):
             ui.choose("Choose", [("a", "First", "")])
 
+    def test_arrow_navigation_and_back_keep_selection_stable(self):
+        ui = Terminal(stream=io.StringIO(), input_stream=io.StringIO(), plain=True)
+        ui.arrows = True
+        with patch.object(ui, "_key", side_effect=["down", "enter"]):
+            value = ui.choose("Choose", [("a", "First", ""), ("b", "Second", "")])
+        self.assertEqual(value, "b")
+        with patch.object(ui, "_key", return_value="b"):
+            self.assertEqual(ui.choose("Choose", [("a", "First", "")], back=True), "__back__")
+
+    def test_plain_back_and_redirected_output_have_no_terminal_controls(self):
+        out = io.StringIO()
+        ui = Terminal(stream=out, input_stream=io.StringIO("b\n"), plain=True)
+        self.assertEqual(ui.choose("Choose", [("a", "First", "")], back=True), "__back__")
+        self.assertNotIn("\033", out.getvalue())
+
     def test_platform_runtime_map(self):
         self.assertEqual(core.platform_key("Linux", "aarch64"), "linux_aarch64")
         self.assertEqual(core.platform_key("Darwin", "arm64"), "macos_aarch64")
