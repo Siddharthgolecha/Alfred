@@ -60,6 +60,10 @@ groups:
 | Models | `Tools`, `ModelSupervisor` (alias `LlamaSupervisor`), `Qwen`, `System2`, `LocalHarness`, `Cactus` | `runtime.py`, `backends.py`, `models.py`, `system2.py`, `cognitive/harness_sdk.py` |
 | Lifecycle | `SkillRegistry`, `Scheduler`, `RequestRouter`, `WakeWordListener` | `skills.py`, `runtime.py`, `router.py`, `listener.py` |
 
+`System` is the common admission-aware base for `System1` and `System2`. `System1` wraps the
+fast Needle route, while `System2` handles local reasoning, plan validation and approval. The
+`Cactus` facade continues to combine System1 routing with Whistle transcription.
+
 `Cactus` is only created when models are loaded. Administrative CLI commands such as
 `--approve`, `--pending` and `--workflow-*` build `Alfred(config, load_models=False)`, so they
 never load Needle or Whistle.

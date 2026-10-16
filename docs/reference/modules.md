@@ -30,8 +30,10 @@ together, see the [Architecture overview](../architecture/overview.md).
 | [`alfred/router.py`](../../alfred/router.py) | `RequestRouter`: Needle dispatch, confidence checks, Qwen handoff and completion records. |
 | [`alfred/routing.py`](../../alfred/routing.py) | Compatibility shim re-exporting two helpers from `router.py`. |
 | [`alfred/models.py`](../../alfred/models.py) | `Cactus` (Needle and Whistle wrappers), `Qwen` (schema-constrained planner client), `request_json`. Also exports `LlamaSupervisor`, an alias of `ModelSupervisor`. |
+| [`alfred/system.py`](../../alfred/system.py) | `System`: common inference-admission foundation for System1 and System2. |
+| [`alfred/system1.py`](../../alfred/system1.py) | `System1`: Needle 3 fast-path router; retains `Needle3Engine` as a compatibility alias. |
 | [`alfred/backends.py`](../../alfred/backends.py) | `ModelSupervisor`: detects, adopts or starts `llama.cpp`, Ollama or LM Studio. |
-| [`alfred/system2.py`](../../alfred/system2.py) | `System2` and `Approvals`: plan preflight, tiering, approval store and one-shot execution. |
+| [`alfred/system2.py`](../../alfred/system2.py) | `System2` and `Approvals`: local reasoning, plan preflight, approval store and one-shot execution. |
 | [`alfred/inference_admission.py`](../../alfred/inference_admission.py) | `InferenceAdmission`: single-slot gate with memory, swap and CPU pressure checks. |
 
 ## Tools and automation

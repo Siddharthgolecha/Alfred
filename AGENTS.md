@@ -19,7 +19,7 @@ This project follows [Maestaris](https://github.com/Siddharthgolecha/Maestaris):
    worker: A
    claimed_at: YYYY-MM-DDTHH:MM:SSZ
    ```
-4. Create/reuse `maestaris/<issue>-<slug>` **from latest main**. Work on that one issue, with focused tests and documentation. No unrelated branch merges; do not touch `intrinsic_jetson` directly for generic Phase 5 changes.
+4. Create/reuse `maestaris/<issue>-<slug>` **from latest main**. Work on that one issue, with focused tests and documentation. Update `CHANGELOG.md` with user-visible changes before marking the PR ready for merge. No unrelated branch merges; do not touch `intrinsic_jetson` directly for generic Phase 5 changes.
 5. Open/update a normal PR targeting `main` with `Resolves #N` and implementation, safety, tests, resource/performance evidence. Do not merge your own PR; the reviewer is separate.
 6. Comment on issue:
    ```

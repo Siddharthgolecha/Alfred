@@ -16,6 +16,7 @@ The comparison baseline is the branches' merge base, `7aeee38`.
 
 #### Added
 
+- A common admission-aware `System` base, with concrete `System1` and `System2` implementations.
 - macOS CoreAudio capture, platform-aware process and resource handling, and native Windows x64
   DirectShow microphone capture through FFmpeg, with optional Windows speech output.
 - A standard-library terminal setup wizard with first-run and repeat-run flows, review before
@@ -26,6 +27,9 @@ The comparison baseline is the branches' merge base, `7aeee38`.
 
 #### Changed
 
+- Kept the watchdog's backend checks read-only so background health polling cannot take the
+  inference slot from an active System2 request. Runtime messages now identify System2 and show
+  safe, actionable admission refusals while suppressing raw backend exception text.
 - Reorganized Alfred's routing, tools, STT, prompts, watchdog, runtime and error handling into
   smaller modules with explicit protocols and typed domain results.
 - Updated installation and platform documentation for the guided setup, Windows audio

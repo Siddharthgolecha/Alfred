@@ -9,10 +9,17 @@ from unittest.mock import Mock, patch
 from alfred.config import load_config
 from alfred.models import Qwen, QwenPlanResponseError
 from alfred.runtime import Store, Tools, TOOL_SCHEMAS
+from alfred.system import System
+from alfred.system1 import Needle3Engine, System1
 from alfred.system2 import Approvals, System2, parse_plan, preflight
 
 
 class System2Tests(unittest.TestCase):
+    def test_system1_and_system2_share_system_base(self):
+        self.assertTrue(issubclass(System1, System))
+        self.assertTrue(issubclass(System2, System))
+        self.assertIs(Needle3Engine, System1)
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
         self.store=Store(Path(self.tmp.name)/"alfred.db")

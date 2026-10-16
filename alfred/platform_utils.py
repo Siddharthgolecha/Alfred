@@ -160,9 +160,14 @@ def sample_resources() -> dict:
             return _NA
     elif IS_MACOS:
         try:
-            # vm_stat outputs page counts; page size is typically 4096 B.
+            # vm_stat reports the page size in its header. Apple Silicon uses
+            # 16 KiB pages, so a fixed 4096-byte assumption undercounts memory.
             out = subprocess.check_output(["vm_stat"], text=True, timeout=3)
-            page_size = 4096
+            import re
+            page_match = re.search(r"page size of\s+(\d+)\s+bytes", out)
+            if not page_match:
+                raise ValueError("vm_stat did not report its page size")
+            page_size = int(page_match.group(1))
             pages: dict[str, int] = {}
             for line in out.splitlines():
                 for key in ("Pages free", "Pages inactive", "Pages wired down",
@@ -177,7 +182,6 @@ def sample_resources() -> dict:
             swap = subprocess.check_output(
                 ["sysctl", "-n", "vm.swapusage"], text=True, timeout=3
             )
-            import re
             match = re.search(r"used\s*=\s*([0-9.]+)M", swap)
             if match:
                 swap_used_mib = float(match.group(1))

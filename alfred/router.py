@@ -163,7 +163,7 @@ class RequestRouter:
         if self.session_manager.session_id is None:
             raise HarnessUnavailable("No authorized Harness session for reasoning")
         if not self.cfg["qwen"]["enabled"]:
-            raise HarnessUnavailable("Qwen disabled: required Harness cannot reason")
+            raise HarnessUnavailable("System2 disabled: required Harness cannot reason")
         with self.admission.claim("qwen"):
             self.supervisor.ensure_running()
         if not allow_actions:
@@ -742,7 +742,7 @@ class RequestRouter:
         text: str,
         calls: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
-        """Execute single-turn direct tool calls or delegate to System 2 reasoner."""
+        """Execute single-turn direct tool calls or delegate to System2."""
         if not calls:
             if self.cfg["runtime"]["escalation_enabled"]:
                 outcome = self._handoff(task, text, "unsupported", allow_actions=False)

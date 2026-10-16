@@ -38,13 +38,27 @@ def tool_names() -> set[str]:
 
 
 def config_keys() -> set[str]:
-    """Return ``section.key`` for every entry of ``config.DEFAULT``."""
+    """Return ``section.key`` for every entry of ``config.DEFAULT``.
+
+    Inspect dictionary keys directly so platform-specific path defaults such as
+    ``Path(...)`` don't make the static documentation check execute Python code.
+    """
     tree = ast.parse((ROOT / "alfred" / "config.py").read_text(encoding="utf-8"))
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
                 isinstance(t, ast.Name) and t.id == "DEFAULT" for t in node.targets):
-            default = ast.literal_eval(node.value)
-            return {f"{section}.{key}" for section, body in default.items() for key in body}
+            if not isinstance(node.value, ast.Dict):
+                break
+            result = set()
+            for section_node, body_node in zip(node.value.keys, node.value.values):
+                if not (isinstance(section_node, ast.Constant)
+                        and isinstance(section_node.value, str)
+                        and isinstance(body_node, ast.Dict)):
+                    continue
+                for key_node in body_node.keys:
+                    if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str):
+                        result.add(f"{section_node.value}.{key_node.value}")
+            return result
     raise SystemExit("DEFAULT not found in alfred/config.py")
 
 

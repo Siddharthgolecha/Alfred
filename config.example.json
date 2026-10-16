@@ -25,7 +25,7 @@
     "backend": "auto",
     "url": "",
     "binary": "",
-    "model": "bartowski/Qwen_Qwen3.5-4B-GGUF:Q4_K_M",
+    "model": "",
     "model_path": "",
     "expected_model": "Qwen3.5-4B",
     "ctx_size": 4096,

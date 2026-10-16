@@ -5,7 +5,7 @@ $IsAuto = ($args -contains '--auto') -or ($env:ALFRED_AUTO -match '^(1|true|yes|
 
 if (($args -contains '--help') -or ($args -contains '-h')) {
     @'
-Usage: .\install.ps1 [--auto] [--plain] [--customize] [--service]
+Usage: .\install.ps1 [--auto] [--plain] [--customize] [--service] [--repair]
                      [--backend ollama|lmstudio|llamacpp|skip]
                      [--wheelhouse PATH] [--skip-models]
 '@
