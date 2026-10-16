@@ -87,11 +87,13 @@ How each backend is started:
 | `llama_cpp` | `llama serve --model <file>` or `-hf <repo:quant>`, `--host 127.0.0.1`, `--port`, `--ctx-size`, `-ngl`, and one parallel slot |
 | `llama_server` | The same arguments on the `llama-server` executable |
 | `ollama` | `ollama serve` with `OLLAMA_HOST=127.0.0.1:<port>` |
-| `lm_studio` | `lms server start --port <port> --bind 127.0.0.1`, then `lms load <model> --yes` |
+| `lm_studio` | Start the local server if needed, then load the configured model with `lms load <model> --yes` if it is not already resident. |
 
 The context size and GPU layers come from `qwen.ctx_size` and `qwen.gpu_layers`. They apply to
 the llama.cpp backends only. Ollama and LM Studio manage their own runtime settings, and Alfred
-never changes the memory settings or loaded models of a server it adopts.
+never stops or reconfigures an adopted server. For a local LM Studio endpoint, Alfred loads the
+explicitly configured model when it is installed but not resident, and leaves other loaded models
+alone. It does not use a local `lms` CLI to control a remote endpoint.
 
 ### Model selection
 

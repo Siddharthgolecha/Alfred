@@ -135,6 +135,49 @@ class BackendSupervisorTests(unittest.TestCase):
             self.assertTrue(sup.ensure_running())
         spawn.assert_not_called()
 
+    def test_adopted_lm_studio_loads_configured_model_when_not_resident(self):
+        model = "openai/gpt-oss-20b"
+        sup = self.supervisor("lm_studio", model=model)
+        ps_empty = MagicMock(returncode=0, stdout="[]", stderr="")
+        load_ok = MagicMock(returncode=0, stdout="Loaded", stderr="")
+        ps_loaded = MagicMock(returncode=0, stdout=json.dumps([
+            {"identifier": model, "modelKey": model}
+        ]), stderr="")
+        with patch.object(sup, "health", return_value="ready"), \
+             patch.object(sup, "verify_model", return_value=model), \
+             patch("alfred.backends.shutil.which", return_value="/usr/bin/lms"), \
+             patch("alfred.backends.subprocess.run",
+                   side_effect=[ps_empty, load_ok, ps_loaded]) as run:
+            self.assertTrue(sup.ensure_running())
+        self.assertEqual(run.call_args_list[0].args[0],
+                         ["/usr/bin/lms", "ps", "--json"])
+        self.assertEqual(run.call_args_list[1].args[0],
+                         ["/usr/bin/lms", "load", model, "--yes"])
+        self.assertEqual(run.call_args_list[2].args[0],
+                         ["/usr/bin/lms", "ps", "--json"])
+
+    def test_adopted_lm_studio_keeps_matching_resident_model(self):
+        model = "openai/gpt-oss-20b"
+        sup = self.supervisor("lm_studio", model=model)
+        ps_loaded = MagicMock(returncode=0, stdout=json.dumps([
+            {"identifier": model, "modelKey": model}
+        ]), stderr="")
+        with patch.object(sup, "health", return_value="ready"), \
+             patch.object(sup, "verify_model", return_value=model), \
+             patch("alfred.backends.shutil.which", return_value="/usr/bin/lms"), \
+             patch("alfred.backends.subprocess.run", return_value=ps_loaded) as run:
+            self.assertTrue(sup.ensure_running())
+        run.assert_called_once_with(["/usr/bin/lms", "ps", "--json"],
+                                    capture_output=True, text=True,
+                                    timeout=10, check=False)
+
+    def test_remote_lm_studio_endpoint_is_not_controlled_by_local_cli(self):
+        sup = self.supervisor("lm_studio", model="openai/gpt-oss-20b",
+                              url="http://192.168.1.50:1234")
+        with patch.object(sup, "_resolve_binary") as resolve:
+            sup._ensure_lm_studio_model_loaded()
+        resolve.assert_not_called()
+
     def test_unhealthy_occupied_port_not_replaced(self):
         sup = self.supervisor("lm_studio")
         with patch.object(sup, "health", return_value="down"), \

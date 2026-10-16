@@ -5,6 +5,8 @@ or replace external services; only start a missing, known executable via argv.
 """
 from __future__ import annotations
 
+import ipaddress
+import json
 import logging
 import os
 import signal
@@ -230,6 +232,69 @@ class ModelSupervisor:
             raise RuntimeError(f"{self.url} is occupied by another/unhealthy service; not replacing it")
         return False
 
+    def _is_loopback_endpoint(self) -> bool:
+        host = urlsplit(self.url).hostname
+        if not host:
+            return False
+        if host.casefold() == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(host.split("%", 1)[0]).is_loopback
+        except ValueError:
+            return False
+
+    def _lm_studio_loaded_ids(self, binary: str) -> set[str]:
+        result = subprocess.run([binary, "ps", "--json"], capture_output=True,
+                                text=True, timeout=10, check=False)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "unknown CLI error").strip()
+            raise RuntimeError("Could not inspect loaded LM Studio models: " + detail)
+        try:
+            rows = json.loads(result.stdout)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("LM Studio returned invalid JSON for loaded models") from exc
+        if not isinstance(rows, list):
+            raise RuntimeError("LM Studio returned an unexpected loaded-model list")
+        identifiers = set()
+        for row in rows:
+            if isinstance(row, dict):
+                for key in ("identifier", "modelKey", "model_key", "path",
+                            "modelPath", "model_path"):
+                    value = row.get(key)
+                    if isinstance(value, str) and value.strip():
+                        identifiers.add(value.strip().casefold())
+        return identifiers
+
+    def _ensure_lm_studio_model_loaded(self) -> None:
+        """Load the explicitly configured model on an adopted local LM server.
+
+        LM Studio's OpenAI model listing includes installed models that are not
+        resident, so ``verify_model`` alone cannot prove that inference can run.
+        Never use a local ``lms`` CLI to control a remote endpoint.
+        """
+        requested = str(self.config.get("model") or "").strip()
+        if (self.backend != "lm_studio" or not requested
+                or not self._is_loopback_endpoint()):
+            return
+        binary = self._resolve_binary()
+        if requested.casefold() in self._lm_studio_loaded_ids(binary):
+            return
+        LOG.info("Loading configured LM Studio model %s", requested)
+        result = subprocess.run([binary, "load", requested, "--yes"],
+                                stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True,
+                                timeout=int(self.config["startup_timeout_seconds"]),
+                                check=False)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "unknown CLI error").strip()
+            raise RuntimeError(f"Could not load configured LM Studio model '{requested}': "
+                               + detail)
+        loaded = self._lm_studio_loaded_ids(binary)
+        if requested.casefold() not in loaded:
+            raise RuntimeError(f"LM Studio load command completed, but '{requested}' "
+                               "is not listed as loaded")
+        LOG.info("Configured LM Studio model is loaded: %s", requested)
+
     def _start_lm_studio_daemon(self, command: list[str], binary: str, log_file: Path) -> None:
         """Launch the LM Studio daemon and optionally load the requested model."""
         startup_timeout = int(self.config["startup_timeout_seconds"])
@@ -294,6 +359,7 @@ class ModelSupervisor:
             if self._stopping.is_set():
                 raise RuntimeError("Alfred inference backend is shutting down")
             if self._check_health():
+                self._ensure_lm_studio_model_loaded()
                 return True
             binary = self._resolve_binary()
             self._start_process(binary)
