@@ -61,7 +61,7 @@ Wave 4 (depends on Wave 3)
 
 ## Sub-Task 1 — `install.sh` core scaffold
 
-**Status:** [ ] pending
+**Status:** [x] done
 
 ### Intent
 Create the master `install.sh` at the repo root. This is the single file users clone and run.
@@ -98,7 +98,7 @@ this file should know about `--auto` or `--service` — they read the exported v
 
 ## Sub-Task 2 — System packages block
 
-**Status:** [ ] pending  
+**Status:** [x] done
 **Wave:** 1 (independent)
 
 ### Intent
@@ -128,7 +128,7 @@ translate it into `apt` or `brew` commands.
 
 ## Sub-Task 3 — Python venv + pip + Harness verification block
 
-**Status:** [ ] pending  
+**Status:** [x] done
 **Wave:** 2 (after Sub-task 1)
 
 ### Intent
@@ -164,7 +164,7 @@ DeepSeek Harness wheels before installing them. Integrates the existing `scripts
 
 ## Sub-Task 4 — Optional configuration generation block
 
-**Status:** [ ] pending
+**Status:** [x] done
 **Wave:** 2 (after Sub-task 1, parallel with Sub-task 3)
 
 ### Intent
@@ -203,7 +203,7 @@ backend choice), not as a hard prerequisite. The script must communicate this fr
 
 ## Sub-Task 5 — Inference backend setup block
 
-**Status:** [ ] pending  
+**Status:** [x] done
 **Wave:** 3 (after Sub-tasks 3 and 4)
 
 ### Intent
@@ -238,7 +238,7 @@ llama.cpp with CUDA is the advanced/Jetson path.
 
 ## Sub-Task 6 — Model cache download block
 
-**Status:** [ ] pending  
+**Status:** [x] done
 **Wave:** 3 (after Sub-task 3, parallel with Sub-task 5)
 
 ### Intent
@@ -267,7 +267,7 @@ downloading at launch time.
 
 ## Sub-Task 7 — Systemd service template and installation block
 
-**Status:** [ ] pending  
+**Status:** [x] done
 **Wave:** 1 (independent)
 
 ### Intent
@@ -298,7 +298,7 @@ the template file itself and the script block that instantiates and enables it.
 
 ## Sub-Task 8 — Self-update mechanism
 
-**Status:** [ ] pending  
+**Status:** [x] done
 **Wave:** 4 (after all implementation sub-tasks are done)
 
 ### Intent
@@ -335,7 +335,7 @@ or auto-applies the update in `--auto` mode.
 
 ## Sub-Task 9 — Update README and installation docs
 
-**Status:** [ ] pending
+**Status:** [x] done
 **Wave:** 4 (after all implementation sub-tasks are done, parallel with Sub-task 8)
 
 ### Intent
@@ -387,7 +387,7 @@ fallback for power users.
 
 ## Sub-Task 10 — First-run hint in CLI
 
-**Status:** [ ] pending
+**Status:** [x] done
 **Wave:** 4 (after Sub-task 1, parallel with Sub-tasks 8 and 9)
 
 ### Intent

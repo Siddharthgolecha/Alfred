@@ -1,12 +1,12 @@
 # Quickstart
 
-A first run in five steps, from checking the setup to speaking a command. It assumes you
-completed [Installation](installation.md) and have a `config.json`.
+A first run in five steps, from checking the setup to speaking a command. It assumes you ran
+`./install.sh` or completed [Installation](installation.md). No `config.json` is required.
 
 ## 1. Check the setup
 
 ```bash
-alfred --config config.json --doctor
+alfred --doctor
 ```
 
 `--doctor` reports audio sources, the Bluetooth card profile, the inference backend and the
@@ -24,7 +24,7 @@ Exit status 2 means no usable microphone or a failed audio or Harness check.
 ## 2. Start the inference backend
 
 ```bash
-alfred --config config.json --ensure-backend
+alfred --ensure-backend
 ```
 
 This adopts a compatible server already running on the configured loopback port, or starts the
@@ -36,7 +36,7 @@ running. See [Inference backends](../guides/inference-backends.md).
 Text mode needs no microphone and no wake word:
 
 ```bash
-alfred --config config.json --text "show GPU status"
+alfred --text "show GPU status"
 ```
 
 Needle routes the request, Python validates it, and the tool runs. Read-only tools run
@@ -47,9 +47,9 @@ immediately.
 Ask the Qwen planner without loading any speech model:
 
 ```bash
-alfred --config config.json --reason "Schedule a GPU status check every 10 minutes"
-alfred --config config.json --pending
-alfred --config config.json --approve 1
+alfred --reason "Schedule a GPU status check every 10 minutes"
+alfred --pending
+alfred --approve 1
 ```
 
 A sensitive plan is **staged**, not executed. Review it with `--pending` and run it once with
@@ -59,7 +59,7 @@ A sensitive plan is **staged**, not executed. Review it with `--pending` and run
 ## 5. Listen
 
 ```bash
-alfred --config config.json
+alfred
 ```
 
 Say **"Alfred, show GPU status"**. Speech without the wake word is ignored. To stop, say

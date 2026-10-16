@@ -21,18 +21,15 @@ Microphone → wake word → Whistle STT → Needle 3 tool router → validated 
 
 ## Quick start
 
-Requires Python 3.10+, BlueZ, and a PulseAudio-compatible audio server on the board.
+Requires Python 3.10+. Run `./install.sh` to set up all dependencies automatically.
 
 ```bash
 git clone https://github.com/Siddharthgolecha/Alfred.git
 cd Alfred
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e .
-cp config.example.json config.json
-
-python -m alfred --config config.json --doctor                  # microphone, backend and Harness health
-python -m alfred --config config.json --text "Show my system status"
-python -m alfred --config config.json                           # listen continuously
+./install.sh          # guided interactive setup
+# or: ./install.sh --auto       for CI / headless
+# or: ./install.sh --service    to also register a systemd auto-start service
+alfred                # start listening — no flags required
 ```
 
 Full instructions: [Installation](docs/getting-started/installation.md) and

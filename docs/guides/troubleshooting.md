@@ -7,7 +7,7 @@ Symptoms, causes and fixes. Messages quoted here come from the source. For setup
 Start with:
 
 ```bash
-alfred --config config.json --doctor
+alfred --doctor
 echo $?
 ```
 
@@ -101,7 +101,7 @@ Alfred asks llama backends for non-thinking output and retries a malformed plan 
 only. Then it reports that no action was taken. It never claims a schedule was saved.
 
 ```bash
-alfred --config config.json --reason "Schedule a GPU status check every 10 minutes"
+alfred --reason "Schedule a GPU status check every 10 minutes"
 ```
 
 If it fails repeatedly, check the chat template, the backend logs and `qwen.max_tokens`. A vague

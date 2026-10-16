@@ -8,6 +8,29 @@ below as the intended procedure and verify each one on your board. See the
 [hardware checklist](hardware-setup.md#hardware-acceptance-checklist).
 :::
 
+## Scripted installation
+
+```bash
+git clone https://github.com/Siddharthgolecha/Alfred.git
+cd Alfred
+./install.sh
+```
+
+| Flag | Purpose |
+|---|---|
+| *(none)* | Guided interactive setup |
+| `--auto` | Non-interactive / CI / headless |
+| `--service` | Also register a systemd auto-start service |
+| `--backend ollama` | Use Ollama (default) |
+| `--backend llamacpp` | Build and use llama.cpp with CUDA |
+| `--skip-models` | Skip model cache download (air-gapped) |
+| `--no-update-check` | Skip the install.sh self-update check |
+| `--wheelhouse PATH` | Use local Harness wheels (offline verified install) |
+
+:::{note}
+`config.json` is optional — Alfred runs on built-in defaults without it. The script offers to create one for customisation (Bluetooth device, inference backend).
+:::
+
 ## Requirements
 
 | Requirement | Detail |
@@ -18,14 +41,18 @@ below as the intended procedure and verify each one on your board. See the
 | Inference backend | One of llama.cpp, Ollama or LM Studio, serving a Qwen 3.5 model on loopback. See [Inference backends](../guides/inference-backends.md). |
 | Operating system user | A normal user. Never run Alfred as root. |
 
-## 1. System packages
+## Manual installation
+
+Use these steps if you prefer to set up Alfred without the install script, or to understand what the script does.
+
+### 1. System packages
 
 ```bash
 sudo apt update
 sudo apt install -y bluez pulseaudio-utils libasound2-dev python3-venv
 ```
 
-## 2. Python environment
+### 2. Python environment
 
 ```bash
 git clone https://github.com/Siddharthgolecha/Alfred.git
@@ -47,7 +74,7 @@ Optional extras:
 | `test` | `pip install -e '.[test]'` | `pytest`, an optional runner. CI and these docs use `python -m unittest`. |
 | `docs` | `pip install -e '.[docs]'` | Sphinx toolchain, to [build these docs](../development/documentation.md). |
 
-### Offline or checksum-verified Harness install
+#### Offline or checksum-verified Harness install
 
 `pip install` cannot verify the Harness wheels against the published hashes after the fact.
 To verify first, download the pinned wheels into a directory and use the installer. The expected
@@ -66,7 +93,7 @@ Pass `--platform linux_x86_64` or `--platform linux_aarch64` to choose the runti
 default it is detected from the machine. `--install` refuses a wheel for another platform. The
 script exits with status 2 and prints `Harness wheelhouse verification failed` on any error.
 
-## 3. Configuration
+### 3. Configuration
 
 ```bash
 cp config.example.json config.json
@@ -80,7 +107,7 @@ key is optional; see the [configuration reference](../reference/configuration.md
 Qwen model and a larger `max_tokens`. Read it before relying on it.
 :::
 
-## 4. Model caches
+### 4. Model caches
 
 Populate the Cactus caches while you still have network access:
 
@@ -93,7 +120,7 @@ The Qwen model comes from your inference backend. For llama.cpp's `-hf` form, th
 downloads and caches it. To run strictly offline, set `qwen.model_path` to a local GGUF file
 instead.
 
-## 5. Build llama.cpp (optional)
+### 5. Build llama.cpp (optional)
 
 If you use llama.cpp on the Orin with CUDA, a typical native build is:
 
@@ -107,11 +134,11 @@ context of 4096 and parallelism 1, and lower `qwen.gpu_layers` if the shared 8 G
 becomes constrained. Alfred does not change the memory settings of a server that is already
 running.
 
-## 6. Verify
+### 6. Verify
 
 ```bash
 python -m unittest discover -s tests -v    # no hardware needed
-alfred --config config.json --doctor
+alfred --doctor
 ```
 
 `--doctor` exits with status 2 if there is no usable microphone or if the Harness audit fails.

@@ -180,6 +180,12 @@ def _main(argv=None) -> int:
     args = parser.parse_args(argv)
     path = Path(args.config)
     config = load_config(path if path.exists() else None)
+    if not path.exists() and args.config == "config.json":
+        print(
+            "[alfred] No config.json found — using built-in defaults. "
+            "Run ./install.sh to customise.",
+            flush=True,
+        )
     logs = Path(config["runtime"]["logs"]).expanduser()
     logs.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
