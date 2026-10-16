@@ -133,7 +133,7 @@ claims a schedule was saved and never runs a partly parsed step.
 Test the endpoint:
 
 ```bash
-alfred --config config.json --reason "Schedule a GPU status check every 10 minutes"
+alfred --reason "Schedule a GPU status check every 10 minutes"
 ```
 
 If it fails repeatedly:

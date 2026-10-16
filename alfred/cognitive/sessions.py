@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import sqlite3
+import sys
 import threading
 import time
 
@@ -19,16 +20,30 @@ MAX_TASK_EVENTS = 64
 
 
 def _process_start(pid):
-    """Best-effort Linux process birth marker to distinguish a reused PID.
+    """Best-effort process birth marker to distinguish a reused PID.
 
-    On platforms without /proc, liveness is conservative: an existing PID
-    blocks recovery, even if it has been recycled.
+    On Linux, reads /proc/<pid>/stat (field 22 = start time ticks).
+    On macOS, reads kern.proc.pid via sysctl for the process start time.
+    On other platforms liveness is conservative: an existing PID blocks
+    recovery even if the PID has been recycled.
     """
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
-        return stat.rsplit(") ", 1)[1].split()[19]  # Linux stat field 22
-    except (OSError, IndexError, ValueError):
-        return None
+    if sys.platform.startswith("linux"):
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+            return stat.rsplit(") ", 1)[1].split()[19]  # Linux stat field 22
+        except (OSError, IndexError, ValueError):
+            return None
+    if sys.platform == "darwin":
+        import subprocess
+        try:
+            out = subprocess.check_output(
+                ["ps", "-p", str(pid), "-o", "lstart="],
+                text=True, timeout=3, stderr=subprocess.DEVNULL,
+            )
+            return out.strip() or None
+        except (OSError, subprocess.SubprocessError):
+            return None
+    return None
 
 
 def _is_live_owner(pid, started):

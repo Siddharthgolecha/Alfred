@@ -10,6 +10,39 @@ Numbers such as `#27` refer to GitHub pull requests and issues.
 
 ## [Unreleased]
 
+### Changes on `feature/cross-platform-support` compared with `main`
+
+The comparison baseline is the branches' merge base, `7aeee38`.
+
+#### Added
+
+- macOS CoreAudio capture, platform-aware process and resource handling, and native Windows x64
+  DirectShow microphone capture through FFmpeg, with optional Windows speech output.
+- A standard-library terminal setup wizard with first-run and repeat-run flows, review before
+  installation, truthful progress, safe configuration backups, verified Harness wheels, and
+  POSIX and PowerShell launchers.
+- Pinned Harness runtime hashes for macOS x64/ARM64 and Windows x64, plus Python 3.10/3.12 CI
+  coverage on Linux, macOS and Windows.
+
+#### Changed
+
+- Reorganized Alfred's routing, tools, STT, prompts, watchdog, runtime and error handling into
+  smaller modules with explicit protocols and typed domain results.
+- Updated installation and platform documentation for the guided setup, Windows audio
+  requirements, supported runtime artifacts and recovery steps.
+- Replaced the original shell-based installation flow with the shared Python installer.
+
+#### Removed
+
+- Superseded `clean-code-refactoring-plan.md` and `installation-simplification-plan.md` after
+  incorporating their work into the code and user-facing documentation.
+
+#### Validation limits
+
+- Cross-platform CI is configured, but real microphone acceptance on Windows, Linux, macOS and
+  Jetson Orin Nano still requires those platforms and devices. The original Jetson Nano and
+  Windows ARM64 remain outside this iteration.
+
 ### Added
 
 - Hardcoded `minutes` voice command in `alfred/router.py`: saying "Alfred minutes",

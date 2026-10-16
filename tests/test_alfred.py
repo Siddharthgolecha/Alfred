@@ -11,6 +11,7 @@ from alfred.audio import AudioManager, UtteranceStream, rms
 from alfred.config import load_config
 from alfred.models import LlamaSupervisor, Qwen
 from alfred.runtime import Store, Tools, validate, validate_plan, Scheduler
+from alfred.platform_utils import IS_LINUX
 
 class ConfigTests(unittest.TestCase):
     def test_allowlisted_named_tasks_support_custom_names(self):
@@ -97,6 +98,7 @@ class RuntimeTests(unittest.TestCase):
         result=self.tools.execute("run_workflow",{"name":"health"})
         self.assertIn("memory_mib",result[0])
 
+@unittest.skipUnless(IS_LINUX, "Linux PulseAudio/PipeWire audio tests (skipped on non-Linux)")
 class AudioTests(unittest.TestCase):
     def setUp(self):
         self.cfg=load_config()["audio"]

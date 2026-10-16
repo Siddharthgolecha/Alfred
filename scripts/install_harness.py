@@ -1,4 +1,4 @@
-"""Verify official pinned DeepSeek Harness wheels for offline Linux setup."""
+"""Verify pinned DeepSeek Harness wheels for supported offline setup targets."""
 from __future__ import annotations
 
 import argparse
@@ -17,11 +17,14 @@ def verified_wheels(wheelhouse, target=None):
     if lock["version"] != "0.1.5rc1":
         raise ValueError("Unsupported Harness lock revision")
     machine = platform.machine().lower()
-    target = target or ("linux_aarch64" if machine in ("aarch64", "arm64")
-                        else "linux_x86_64" if machine in ("x86_64", "amd64")
-                        else "")
+    system = platform.system().lower()
+    prefix = {"linux": "linux", "darwin": "macos", "windows": "windows"}.get(system, "")
+    arch = {"aarch64": "aarch64", "arm64": "aarch64",
+            "x86_64": "x86_64", "amd64": "x86_64"}.get(machine, "")
+    local = f"{prefix}_{arch}" if prefix and arch else ""
+    target = target or local
     if target not in lock["runtime"]:
-        raise ValueError("Select linux_x86_64 or linux_aarch64")
+        raise ValueError("Select one of the pinned Linux, macOS or Windows runtime targets")
     wheels = []
     for row in (lock["sdk"], lock["runtime"][target]):
         name = row["filename"]
@@ -44,17 +47,21 @@ def verified_wheels(wheelhouse, target=None):
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wheelhouse",required=True,type=Path)
-    parser.add_argument("--platform",choices=("linux_x86_64","linux_aarch64"))
+    parser.add_argument("--platform",choices=("linux_x86_64","linux_aarch64",
+                                               "macos_x86_64","macos_aarch64",
+                                               "windows_x86_64"))
     action=parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--verify",action="store_true")
     action.add_argument("--install",action="store_true")
     args=parser.parse_args(argv)
     try:
+        system=platform.system().lower()
         machine=platform.machine().lower()
-        local="linux_aarch64" if machine in ("aarch64","arm64") else (
-              "linux_x86_64" if machine in ("x86_64","amd64") else "")
-        if args.install and (platform.system()!="Linux"
-                             or (args.platform and args.platform!=local)):
+        prefix={"linux":"linux","darwin":"macos","windows":"windows"}.get(system,"")
+        arch={"aarch64":"aarch64","arm64":"aarch64",
+              "x86_64":"x86_64","amd64":"x86_64"}.get(machine,"")
+        local=f"{prefix}_{arch}" if prefix and arch else ""
+        if args.install and (not local or (args.platform and args.platform!=local)):
             raise ValueError("Cannot install a wheel for another platform")
         wheels=verified_wheels(args.wheelhouse,args.platform)
         for wheel in wheels:
