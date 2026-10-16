@@ -958,15 +958,18 @@ class Wizard:
         self.existing_audio = _detect_audio(self.system)
 
         if self.args.repair and env_root.exists():
-            backup_root = ROOT / ".venv.recovery"
-            backup_root.mkdir(exist_ok=True)
-            backup = backup_root / ("venv-" + str(time.time_ns()))
-            os.replace(env_root, backup)
-            self.ui.warn("Preserved the previous Alfred environment at " + str(backup))
-            self.state.forget("environment")
-            self.state.forget("project")
-            self.state.forget("dependencies")
-            self.state.forget("harness")
+            if self._environment_ready(python):
+                self.ui.info("Alfred's Python environment is healthy; reusing verified components")
+            else:
+                backup_root = ROOT / ".venv.recovery"
+                backup_root.mkdir(exist_ok=True)
+                backup = backup_root / ("venv-" + str(time.time_ns()))
+                os.replace(env_root, backup)
+                self.ui.warn("Preserved the damaged Alfred environment at " + str(backup))
+                self.state.forget("environment")
+                self.state.forget("project")
+                self.state.forget("dependencies")
+                self.state.forget("harness")
 
         if env_root.exists() and not self._environment_ready(python):
             raise RuntimeError("The existing .venv is damaged or uses another Python version. "

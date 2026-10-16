@@ -346,12 +346,18 @@ class ConfigPersistenceTests(unittest.TestCase):
                 wizard.install()
                 first_run_commands = call.call_count
                 first_run_downloads = download.call_count
+                # --repair should recover a damaged environment, but it must
+                # not discard receipts when the existing environment verifies.
+                (root / ".venv").mkdir()
+                args.repair = True
                 wizard.install()
                 self.assertGreater(first_run_commands, 0)
                 self.assertEqual(call.call_count, first_run_commands)
                 self.assertEqual(download.call_count, first_run_downloads)
                 self.assertEqual(first_run_downloads, 1)
                 self.assertEqual(launcher.call_count, 1)
+                self.assertTrue((root / ".venv").is_dir())
+                self.assertTrue(ui.info.called)
 
     def test_harness_download_resumes_partial_wheel_and_reuses_verified_sibling(self):
         with tempfile.TemporaryDirectory() as tmp:
