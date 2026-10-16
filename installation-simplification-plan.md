@@ -15,6 +15,22 @@ README, two doc pages, and an ad-hoc `scripts/` helper.
 - Self-updates: on every run the script fetches its own SHA from `main` and prompts the user to
   pull if a newer version exists; in `--auto` mode it auto-applies the update and re-execs itself.
 
+### Config-file clarification
+
+`alfred/config.py` `load_config(path=None)` already accepts `None` and falls back to built-in
+`DEFAULT`. `alfred/cli.py` already passes `None` when `config.json` does not exist. This means
+**`alfred` with no flags already works today** — `--config config.json` is never required.
+
+The problems to fix are:
+1. **Misleading documentation** — README and every doc page show `alfred --config config.json`
+   on every command, incorrectly implying the flag is mandatory.
+2. **No first-run hint** — when Alfred starts and detects no `config.json`, it should print a
+   one-line hint: "No config.json found — running with built-in defaults. Run ./install.sh to
+   customise." so users know customisation is available without being blocked.
+3. **`install.sh` config step** — the script should still generate `config.json` for users who
+   want to customise (Bluetooth, backend choice, etc.), but it must be framed as optional
+   personalisation, not a prerequisite to running Alfred.
+
 ---
 
 ## Parallelisation Map
@@ -146,35 +162,41 @@ DeepSeek Harness wheels before installing them. Integrates the existing `scripts
 
 ---
 
-## Sub-Task 4 — Configuration generation block
+## Sub-Task 4 — Optional configuration generation block
 
-**Status:** [ ] pending  
+**Status:** [ ] pending
 **Wave:** 2 (after Sub-task 1, parallel with Sub-task 3)
 
 ### Intent
-Replace the manual `cp config.example.json config.json` step with a guided copy that patches
-the most common values (Bluetooth device name, chosen backend) so the first `--doctor` run is
-likely to pass without extra editing.
+`alfred` already works with zero configuration — `alfred/cli.py` passes `None` to
+`load_config` when `config.json` is absent and the built-in `DEFAULT` kicks in. This step
+therefore creates `config.json` as **optional personalisation** (Bluetooth device name,
+backend choice), not as a hard prerequisite. The script must communicate this framing clearly.
 
 ### Expected Outcomes
 - If `config.json` already exists, prints a `[SKIP]` notice and continues.
-- Otherwise, copies `config.example.json` → `config.json`.
-- In interactive mode, prompts for:
-  - Bluetooth device name (optional; left as example default if skipped).
-  - Backend choice (Ollama / llama.cpp / skip) — exports `ALFRED_BACKEND` for Sub-task 5.
+- In interactive mode, asks: "Create a config.json to customise Alfred? (Bluetooth, backend)"
+  - If the user says no, the step is skipped and `ALFRED_BACKEND` defaults to `"ollama"`.
+  - If yes: copies `config.example.json` → `config.json`, then prompts for:
+    - Bluetooth device name (optional; left as example default if skipped).
+    - Backend choice (Ollama / llama.cpp / skip) — exports `ALFRED_BACKEND` for Sub-task 5.
+- In `--auto` mode, creates `config.json` silently (needed to patch backend/Bluetooth choices
+  made by flags).
 - Patches values into `config.json` using `python -c` + stdlib `json` — no `jq` dependency.
 - Prints a reminder that `config.json` must not be committed.
+- Prints: "Alfred will run without config.json too — just run: alfred"
 
 ### Todo List
-1. Write `generate_config()`: exists-guard, copy template.
+1. Write `generate_config()`: exists-guard, optional-creation prompt, copy template.
 2. Add interactive prompts for Bluetooth name and backend choice; respect `ALFRED_AUTO`.
 3. Write `patch_config()` helper: `python -c` snippet that loads, mutates, and writes JSON.
-4. Export `ALFRED_BACKEND` for Sub-task 5.
+4. Export `ALFRED_BACKEND` for Sub-task 5 (default `"ollama"` if config step is skipped).
 5. Call `generate_config` from the Sub-task 1 stub site.
 
 ### Relevant Context
 - `config.example.json` — template file.
-- `alfred/config.py` — valid config keys and their defaults.
+- `alfred/config.py` — `load_config(path=None)` and built-in `DEFAULT` dict (lines 16–55, 151–156).
+- `alfred/cli.py` line 182 — already does `load_config(path if path.exists() else None)`.
 - `docs/getting-started/installation.md` lines 69–81.
 
 ---
@@ -313,13 +335,15 @@ or auto-applies the update in `--auto` mode.
 
 ## Sub-Task 9 — Update README and installation docs
 
-**Status:** [ ] pending  
+**Status:** [ ] pending
 **Wave:** 4 (after all implementation sub-tasks are done, parallel with Sub-task 8)
 
 ### Intent
-Replace the multi-step Quick Start in `README.md` with the new one-liner and restructure
-`docs/getting-started/installation.md` so the scripted path comes first; the existing 6-step
-procedure becomes a collapsible "Manual installation" fallback for power users.
+Replace the multi-step Quick Start in `README.md` with the new one-liner and audit every
+occurrence of `--config config.json` across docs — since the flag is never required, all
+examples should drop it. `docs/getting-started/installation.md` is restructured so the
+scripted path comes first; the existing 6-step procedure becomes a "Manual installation"
+fallback for power users.
 
 ### Expected Outcomes
 - `README.md` Quick Start block (lines 26–36) becomes:
@@ -329,18 +353,62 @@ procedure becomes a collapsible "Manual installation" fallback for power users.
   ./install.sh          # guided interactive setup
   # or: ./install.sh --auto        for CI / headless
   # or: ./install.sh --service     to also register a systemd auto-start service
+  alfred                # start listening — no flags required
   ```
-- The old 5-command manual block is removed from README.
+- Every `alfred --config config.json <command>` in `README.md` and all `docs/` files is
+  simplified to `alfred <command>`. (The `--config` flag is documented as an override, not a
+  default invocation.)
 - `docs/getting-started/installation.md` is restructured:
   - New "Scripted installation" section at the top with the one-liner.
   - A table of `install.sh` flags (`--auto`, `--service`, `--backend`, `--no-update-check`, etc.).
+  - Note that `config.json` is optional — Alfred runs on built-in defaults without it.
   - Existing sections 1–6 moved under a "Manual installation" heading.
-- `docs/getting-started/quickstart.md` preamble (line 4) updated to reference `install.sh`
-  instead of manual install steps.
+- `docs/getting-started/quickstart.md` preamble updated; all `alfred --config config.json`
+  examples simplified to `alfred`.
+- `docs/reference/cli.md` updated to clarify `--config` is optional (defaults to built-in
+  defaults when the file is absent).
 
 ### Todo List
-1. Edit `README.md` lines 26–36: replace Quick Start block with new one-liner + flag table.
+1. Edit `README.md` lines 26–36: replace Quick Start with new one-liner; strip `--config config.json` from every example.
 2. Edit `docs/getting-started/installation.md`: insert "Scripted installation" section at top,
-   demote existing sections under "Manual installation".
-3. Edit `docs/getting-started/quickstart.md` line 4: update preamble reference.
-4. Check `docs/getting-started/index.md` for any links that need updating.
+   add "config.json is optional" note, demote existing sections under "Manual installation".
+3. Edit `docs/getting-started/quickstart.md`: update preamble; replace all `alfred --config config.json` with `alfred`.
+4. Grep all `docs/` files for `--config config.json` and strip the flag from every example.
+5. Edit `docs/reference/cli.md`: document `--config` as an optional override, not a requirement.
+6. Check `docs/getting-started/index.md` for any links that need updating.
+
+### Relevant Context
+- `alfred/cli.py` line 118: `--config` defaults to `"config.json"`, line 182: silently uses
+  `None` when the file is absent — meaning `alfred` with no flags is fully valid.
+- `alfred/config.py` `load_config(path=None)` and built-in `DEFAULT` — the entire config is
+  optional.
+
+---
+
+## Sub-Task 10 — First-run hint in CLI
+
+**Status:** [ ] pending
+**Wave:** 4 (after Sub-task 1, parallel with Sub-tasks 8 and 9)
+
+### Intent
+When Alfred starts and no `config.json` is found, print a one-line informational hint so users
+discover that customisation exists without being blocked. This is a tiny, surgical change to
+`alfred/cli.py`.
+
+### Expected Outcomes
+- When `path` (`args.config`) does not exist, `alfred/cli.py` prints to stdout:
+  `[alfred] No config.json found — using built-in defaults. Run ./install.sh to customise.`
+- The hint is printed once, only in the main entry path (not in `--help`), and only when the
+  file genuinely does not exist (not when `--config` was explicitly passed to a missing file).
+- The hint does **not** block startup or change any existing behaviour.
+
+### Todo List
+1. In `alfred/cli.py` after line 182, add a conditional: if `not path.exists()` and `args.config == "config.json"` (i.e. user did not explicitly pass `--config`), print the hint.
+2. Confirm the hint does not appear during `--doctor`, `--text`, or any other mode — it should
+   appear in all modes since it is informational only (consistent, low-noise).
+3. Add a unit test that captures stdout and asserts the hint appears when no config file is
+   present and `args.config` is the default.
+
+### Relevant Context
+- `alfred/cli.py` lines 118, 180–182 — argument parsing and config load path.
+- `alfred/config.py` `load_config(path=None)` — already handles `None` cleanly.
