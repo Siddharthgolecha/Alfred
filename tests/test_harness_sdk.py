@@ -159,6 +159,7 @@ class AlfredSdkIntegrationTests(unittest.TestCase):
         cfg = load_config()
         cfg["runtime"]["database"] = str(Path(home)/"alfred.db")
         cfg["runtime"]["logs"] = home
+        cfg["runtime"]["resource_admission_enabled"] = False
         app = Alfred(cfg, load_models=False)
         app.feedback.tell = Mock()
         app.cactus = Mock()

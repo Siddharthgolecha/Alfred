@@ -9,18 +9,27 @@ import os
 import threading
 from typing import Any
 
-from .audio import AudioManager, UtteranceStream  # noqa: F401 (patch target)
+# UtteranceStream is unused here but must stay importable as `alfred.app.UtteranceStream`:
+# tests/test_wakeword.py and tests/test_voice_routing.py patch it on this module, and
+# WakeWordListener.listen() looks it up via sys.modules["alfred.app"] to honour the patch.
+from .audio import AudioManager, UtteranceStream  # noqa: F401
 from .feedback import Feedback
 from .models import Cactus, LlamaSupervisor, Qwen
 from .inference_admission import AdmissionConfig, InferenceAdmission
 from .lifecycle import ChildProcesses
 from .runtime import TOOL_SCHEMAS, Scheduler, Store, Tools
 from .system2 import System2
-from .wakeword import WakeWordGate, AcousticWakeDetector  # noqa: F401 (patch target)
+# AcousticWakeDetector is unused here but must stay importable as `alfred.app.AcousticWakeDetector`:
+# tests/test_wakeword.py patches it on this module, and WakeWordListener.listen()
+# resolves it via sys.modules["alfred.app"] so the patched class is the one instantiated.
+from .wakeword import WakeWordGate, AcousticWakeDetector  # noqa: F401
 from .skills import SkillRegistry
 from .cognitive import SessionLedger
 from .cognitive.harness_sdk import LocalHarness, HarnessUnavailable
-from .cognitive.needle_loop import SessionSlots, NeedleAgentLoop  # noqa: F401 (patch target)
+# NeedleAgentLoop must stay importable as `alfred.app.NeedleAgentLoop`: tests/test_escalation.py
+# patches "alfred.app.NeedleAgentLoop.run" to simulate a mismatched Needle result.
+# (SessionSlots is used in annotations below.)
+from .cognitive.needle_loop import SessionSlots, NeedleAgentLoop  # noqa: F401
 from .cognitive.context import ContextManager
 from .listener import WakeWordListener
 from .router import RequestRouter
@@ -40,10 +49,16 @@ class Alfred:
         meeting_adapter: Any = None,
     ) -> None:
         self.cfg = cfg
-        runtime = cfg["runtime"]
+        self._build_routing_services()
+        self._build_audio_services()
+        self._build_model_services(load_models)
+        self._build_lifecycle_services(meeting_adapter)
+
+    def _build_routing_services(self) -> None:
+        """Initialise Store, SessionManager, and InferenceAdmission."""
+        runtime = self.cfg["runtime"]
         self.store = Store(runtime["database"])
         self.session_manager = SessionManager(self.store, runtime)
-        self.processes = ChildProcesses()
         self.admission = InferenceAdmission(
             AdmissionConfig(
                 enabled=runtime["resource_admission_enabled"],
@@ -53,20 +68,28 @@ class Alfred:
                 max_wait_ms=runtime["resource_max_wait_ms"],
             )
         )
+
+    def _build_audio_services(self) -> None:
+        """Initialise AudioManager, WakeWordGate, and Feedback."""
+        self.processes = ChildProcesses()
+        self.feedback = Feedback(self.cfg["runtime"]["tts"], processes=self.processes)
+        self.audio = AudioManager(self.cfg["audio"])
+        self.wake_word = WakeWordGate(self.cfg["wake_word"])
+
+    def _build_model_services(self, load_models: bool) -> None:
+        """Initialise Tools, LlamaSupervisor, Qwen, System2, LocalHarness, and Cactus."""
+        config = self.cfg
+        runtime = config["runtime"]
         self.tools = Tools(runtime, self.store, processes=self.processes)
-        self.skills = SkillRegistry(tools=self.tools, meeting=meeting_adapter)
-        self.feedback = Feedback(runtime["tts"], processes=self.processes)
-        self.audio = AudioManager(cfg["audio"])
-        self.wake_word = WakeWordGate(cfg["wake_word"])
-        self.supervisor = LlamaSupervisor(cfg["qwen"], runtime["logs"])
+        self.supervisor = LlamaSupervisor(config["qwen"], runtime["logs"])
         self.qwen = (
-            Qwen(cfg["qwen"], self.supervisor, admission=self.admission)
+            Qwen(config["qwen"], self.supervisor, admission=self.admission)
             if self.admission.enabled
-            else Qwen(cfg["qwen"], self.supervisor)
+            else Qwen(config["qwen"], self.supervisor)
         )
         self.system2 = System2(self.qwen, self.tools, self.store, runtime)
 
-        model = cfg["qwen"]["model"] or cfg["qwen"]["expected_model"]
+        model = config["qwen"]["model"] or config["qwen"]["expected_model"]
         self.harness = LocalHarness(
             self.supervisor.url,
             model,
@@ -83,13 +106,17 @@ class Alfred:
             if load_models
             else None
         )
+
+    def _build_lifecycle_services(self, meeting_adapter: Any) -> None:
+        """Initialise SkillRegistry, Scheduler, RequestRouter, WakeWordListener, and watchdog state."""
+        self.skills = SkillRegistry(tools=self.tools, meeting=meeting_adapter)
         self.scheduler = Scheduler(self.store, self.tools, self._remind)
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: threading.Thread | None = None
         self._closed = False
 
         self.router = RequestRouter(
-            cfg=cfg,
+            cfg=self.cfg,
             store=self.store,
             session_manager=self.session_manager,
             system2=self.system2,
@@ -101,7 +128,7 @@ class Alfred:
             cactus=self.cactus,
         )
         self.listener = WakeWordListener(
-            cfg=cfg,
+            cfg=self.cfg,
             audio=self.audio,
             wake_word=self.wake_word,
             session_manager=self.session_manager,
@@ -113,11 +140,14 @@ class Alfred:
         )
 
     # -----------------------------------------------------------------------
-    # Delegated properties for backwards compatibility
+    # Delegated properties — backward-compat aliases onto sub-services
     # -----------------------------------------------------------------------
+
+    # --- Session state aliases (callers use app.session_id / app.sessions / etc.) ---
 
     @property
     def session_id(self) -> str | None:
+        # Backward-compat alias: external callers (cli, tests) access app.session_id.
         return self.session_manager.session_id
 
     @session_id.setter
@@ -125,15 +155,8 @@ class Alfred:
         self.session_manager.session_id = value
 
     @property
-    def _active_task_id(self) -> str | None:
-        return self.session_manager.active_task_id
-
-    @_active_task_id.setter
-    def _active_task_id(self, value: str | None) -> None:
-        self.session_manager.active_task_id = value
-
-    @property
     def sessions(self) -> SessionLedger:
+        # Backward-compat alias: external callers (cli, tests) access app.sessions.
         return self.session_manager.sessions
 
     @sessions.setter
@@ -143,6 +166,7 @@ class Alfred:
 
     @property
     def context(self) -> ContextManager:
+        # Backward-compat alias: external callers (cli, tests) access app.context.
         return self.session_manager.context
 
     @context.setter
@@ -151,6 +175,7 @@ class Alfred:
 
     @property
     def needle_slots(self) -> SessionSlots:
+        # Backward-compat alias: external callers (phase5_qa) access app.needle_slots.
         return self.session_manager.needle_slots
 
     @needle_slots.setter
@@ -159,6 +184,7 @@ class Alfred:
 
     @property
     def _command_source(self) -> str:
+        # Backward-compat alias: tests set app._command_source to simulate voice/text.
         return self.router._command_source
 
     @_command_source.setter
@@ -166,19 +192,15 @@ class Alfred:
         self.router._command_source = value
 
     @property
-    def _needle_execution_lock(self) -> threading.RLock:
-        return self.router._needle_execution_lock
-
-    @property
-    def _needle_task_lock(self) -> threading.RLock:
-        return self.router._needle_execution_lock
-
-    @property
     def _needle_cancel(self) -> threading.Event:
+        # Backward-compat alias: tests call app._needle_cancel.set() to abort needle loops.
         return self.router._needle_cancel
+
+    # --- Write-propagating service properties (assignment keeps sub-services in sync) ---
 
     @property
     def cactus(self) -> Cactus | None:
+        # Write-propagating: assigning app.cactus also updates router and listener.
         return getattr(self, "_cactus", None)
 
     @cactus.setter
@@ -191,6 +213,7 @@ class Alfred:
 
     @property
     def harness(self) -> LocalHarness:
+        # Write-propagating: assigning app.harness also updates router.
         return getattr(self, "_harness", None)
 
     @harness.setter
@@ -201,6 +224,7 @@ class Alfred:
 
     @property
     def system2(self) -> System2:
+        # Write-propagating: assigning app.system2 also updates router.
         return getattr(self, "_system2", None)
 
     @system2.setter
@@ -211,6 +235,7 @@ class Alfred:
 
     @property
     def supervisor(self) -> LlamaSupervisor:
+        # Write-propagating: assigning app.supervisor also updates router.
         return getattr(self, "_supervisor", None)
 
     @supervisor.setter
@@ -221,6 +246,7 @@ class Alfred:
 
     @property
     def feedback(self) -> Feedback:
+        # Write-propagating: assigning app.feedback also updates router and listener.
         return getattr(self, "_feedback", None)
 
     @feedback.setter
@@ -233,6 +259,7 @@ class Alfred:
 
     @property
     def tools(self) -> Tools:
+        # Write-propagating: assigning app.tools also updates router.
         return getattr(self, "_tools", None)
 
     @tools.setter
@@ -243,6 +270,7 @@ class Alfred:
 
     @property
     def store(self) -> Store:
+        # Write-propagating: assigning app.store also updates router and session_manager.
         return getattr(self, "_store", None)
 
     @store.setter
@@ -255,6 +283,7 @@ class Alfred:
 
     @property
     def admission(self) -> InferenceAdmission:
+        # Write-propagating: assigning app.admission also updates router and listener.
         return getattr(self, "_admission", None)
 
     @admission.setter
@@ -265,12 +294,11 @@ class Alfred:
         if hasattr(self, "listener"):
             self.listener.admission = value
 
-    # -----------------------------------------------------------------------
-    # Delegated methods as properties / setters for mockability
-    # -----------------------------------------------------------------------
+    # --- Delegated methods exposed as properties for mockability ---
 
     @property
     def reason(self) -> Any:
+        # Backward-compat alias: cli and tests call/replace app.reason.
         return self.router.reason
 
     @reason.setter
@@ -279,6 +307,7 @@ class Alfred:
 
     @property
     def handle_text(self) -> Any:
+        # Backward-compat alias: cli and tests call/replace app.handle_text.
         return self.router.handle_text
 
     @handle_text.setter
@@ -288,47 +317,8 @@ class Alfred:
             self.listener.handle_text_fn = value
 
     @property
-    def _handle_text_locked(self) -> Any:
-        return self.router._handle_text_locked
-
-    @_handle_text_locked.setter
-    def _handle_text_locked(self, value: Any) -> None:
-        self.router._handle_text_locked = value
-
-    @property
-    def _process_authorized_task(self) -> Any:
-        return self.router._process_authorized_task
-
-    @_process_authorized_task.setter
-    def _process_authorized_task(self, value: Any) -> None:
-        self.router._process_authorized_task = value
-
-    @property
-    def _handoff(self) -> Any:
-        return self.router._handoff
-
-    @_handoff.setter
-    def _handoff(self, value: Any) -> None:
-        self.router._handoff = value
-
-    @property
-    def _observe_needle_prefix(self) -> Any:
-        return self.router._observe_needle_prefix
-
-    @_observe_needle_prefix.setter
-    def _observe_needle_prefix(self, value: Any) -> None:
-        self.router._observe_needle_prefix = value
-
-    @property
-    def _finish_handoff(self) -> Any:
-        return self.router._finish_handoff
-
-    @_finish_handoff.setter
-    def _finish_handoff(self, value: Any) -> None:
-        self.router._finish_handoff = value
-
-    @property
     def _start_task(self) -> Any:
+        # Backward-compat alias: cli and tests call app._start_task to open a task envelope.
         return self.session_manager.start_task
 
     @_start_task.setter
@@ -337,6 +327,7 @@ class Alfred:
 
     @property
     def resume_session(self) -> Any:
+        # Backward-compat alias: cli and tests call app.resume_session(sid).
         return self._resume_session_wrapper
 
     @resume_session.setter

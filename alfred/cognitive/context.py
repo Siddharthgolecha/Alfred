@@ -291,7 +291,7 @@ class ContextManager:
             key=self._read_scope(session_id,task_id)
             slots=self._slots.get(key,{})
             self._prune_slots(slots,float(self.clock()))
-            refs=[k for k in ("gpu_temperature","system_status") if k in slots]
+            refs=[key for key in ("gpu_temperature","system_status") if key in slots]
             # Active workflows never become an authority for action pronouns.
             if len(refs)!=1:
                 raise ContextUnavailable("Reference is stale or ambiguous; please name the metric.")
@@ -407,7 +407,7 @@ class ContextManager:
             slots=self._slots.get(key,{})
             self._prune_slots(slots,now)
             order=("gpu_temperature","system_status","active_workflow")
-            subset={k:slots[k].public(now) for k in order if k in slots}
+            subset={key:slots[key].public(now) for key in order if key in slots}
             observation=[]
             if task_id is not None:
                 valid_id(task_id)
@@ -426,12 +426,12 @@ class ContextManager:
                 while packet["task_observations"] and size()>self.budget_chars:
                     packet["task_observations"].pop(0)
             if size()>self.budget_chars and "user_approved_facts" in packet:
-                for k in sorted(packet["user_approved_facts"],reverse=True):
+                for key in sorted(packet["user_approved_facts"],reverse=True):
                     if size()<=self.budget_chars: break
-                    del packet["user_approved_facts"][k]
-            for k in reversed(order):
+                    del packet["user_approved_facts"][key]
+            for key in reversed(order):
                 if size()>self.budget_chars:
-                    packet["slots"].pop(k,None)
+                    packet["slots"].pop(key,None)
             if size()>self.budget_chars:
                 raise ValueError("Context packet budget below structural minimum")
             return packet

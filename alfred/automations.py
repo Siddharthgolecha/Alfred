@@ -108,14 +108,14 @@ class Automations:
             store.db.execute("CREATE INDEX IF NOT EXISTS idx_auto_jobs ON automation_jobs(status,next_at)")
             store.db.execute("CREATE INDEX IF NOT EXISTS idx_auto_outbox ON automation_outbox(status,retry_at)")
 
-    def _create(self,kind,payload,next_at,interval=None,tz=None,local_time=None):
+    def _create(self,kind,payload,next_at,interval=None,timezone=None,local_time=None):
         with self.store.lock,self.store.db:
             cur=self.store.db.execute(
                 "INSERT INTO automation_jobs(kind,status,payload,next_at,interval_minutes,timezone,local_time,created_at)"
                 " VALUES(?,'active',?,?,?,?,?,?)",
-                (kind,json.dumps(payload,sort_keys=True),next_at,interval,tz,local_time,int(time.time())))
+                (kind,json.dumps(payload,sort_keys=True),next_at,interval,timezone,local_time,int(time.time())))
             return {"id":cur.lastrowid,"kind":kind,"status":"active",
-                    "next_at":next_at,"timezone":tz}
+                    "next_at":next_at,"timezone":timezone}
 
     def remind_at(self,message,when):
         return self._create("reminder_once",{"message":_message(message)},parse_aware_time(when))
@@ -123,7 +123,7 @@ class Automations:
     def remind_daily(self,message,local_time,timezone_name):
         return self._create("reminder_daily",{"message":_message(message)},
                             next_daily_time(local_time,timezone_name),
-                            tz=timezone_name,local_time=local_time)
+                            timezone=timezone_name,local_time=local_time)
 
     def watch_gpu(self,threshold_c,interval_minutes,cooldown_minutes):
         if type(threshold_c) is not int or not MIN_CELSIUS<=threshold_c<=MAX_CELSIUS:
@@ -188,6 +188,23 @@ class Automations:
             "INSERT OR IGNORE INTO automation_outbox(job_id,due_at,message,status,retry_at)"
             " VALUES(?,?,?,'pending',?)",(job_id,due_at,message,now))
 
+    def _advance_job(self,row,next_at):
+        """Atomically advance or complete a job row; returns the UPDATE rowcount.
+
+        Pass next_at=None to mark the job 'completed' (reminder_once semantics).
+        Pass a future timestamp to update next_at (recurring job semantics).
+        Both forms guard on the current next_at to prevent double-firing.
+        """
+        if next_at is None:
+            cur=self.store.db.execute(
+                "UPDATE automation_jobs SET status='completed' WHERE id=? AND status='active'"
+                " AND next_at=?",(row["id"],row["next_at"]))
+        else:
+            cur=self.store.db.execute(
+                "UPDATE automation_jobs SET next_at=? WHERE id=? AND status='active'"
+                " AND next_at=?",(next_at,row["id"],row["next_at"]))
+        return cur.rowcount
+
     def _check_reminder_jobs(self,now):
         """Atomic due-date advancement and reminder enqueueing before expensive measurements."""
         jobs=[]
@@ -198,24 +215,15 @@ class Automations:
             for r in rows:
                 payload=json.loads(r["payload"])
                 if r["kind"]=="reminder_once":
-                    cur=self.store.db.execute(
-                        "UPDATE automation_jobs SET status='completed' WHERE id=? AND status='active'"
-                        " AND next_at=?",(r["id"],r["next_at"]))
-                    if cur.rowcount:
+                    if self._advance_job(r,None):
                         self._enqueue(r["id"],r["next_at"],payload["message"],now)
                 elif r["kind"]=="reminder_daily":
                     next_at=next_daily_time(r["local_time"],r["timezone"],now)
-                    cur=self.store.db.execute(
-                        "UPDATE automation_jobs SET next_at=? WHERE id=? AND status='active'"
-                        " AND next_at=?",(next_at,r["id"],r["next_at"]))
-                    if cur.rowcount:
+                    if self._advance_job(r,next_at):
                         self._enqueue(r["id"],r["next_at"],payload["message"],now)
                 elif r["kind"]=="gpu_temperature_watch":
                     new_due=now+r["interval_minutes"]*60
-                    cur=self.store.db.execute(
-                        "UPDATE automation_jobs SET next_at=? WHERE id=? AND status='active'"
-                        " AND next_at=?",(new_due,r["id"],r["next_at"]))
-                    if cur.rowcount:
+                    if self._advance_job(r,new_due):
                         jobs.append((dict(r),payload))
         return jobs
 

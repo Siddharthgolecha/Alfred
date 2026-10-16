@@ -267,6 +267,7 @@ class AlfredCorrelationTests(unittest.TestCase):
     def test_voice_source_and_opt_in_metrics_exclude_transcript(self):
         cfg = load_config()
         cfg["runtime"]["cognitive_diagnostics"] = True
+        cfg["runtime"]["resource_admission_enabled"] = False
         with tempfile.TemporaryDirectory() as home:
             cfg["runtime"]["database"] = str(Path(home)/"alfred.db")
             cfg["runtime"]["logs"] = home

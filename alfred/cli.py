@@ -39,7 +39,7 @@ def _diagnose_audio(cfg) -> bool:
             healthy = True
         except AudioUnavailableError as exc:
             print(f"MICROPHONE NOT CONNECTED / NOT USABLE: {exc}")
-    except Exception as exc:
+    except (AudioUnavailableError, OSError, RuntimeError) as exc:
         print(f"MICROPHONE NOT CONNECTED / AUDIO SERVER FAILURE: {exc}")
     finally:
         manager.close()
@@ -175,8 +175,8 @@ def _main(argv=None) -> int:
 
     args = parser.parse_args(argv)
     path = Path(args.config)
-    cfg = load_config(path if path.exists() else None)
-    logs = Path(cfg["runtime"]["logs"]).expanduser()
+    config = load_config(path if path.exists() else None)
+    logs = Path(config["runtime"]["logs"]).expanduser()
     logs.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -212,17 +212,17 @@ def _main(argv=None) -> int:
             or args.workflow_trigger_cancel is not None):
         parser.error("--resume-session requires text, reason, or voice mode")
     if args.skills:
-        app = Alfred(cfg, load_models=False)
+        app = Alfred(config, load_models=False)
         try:
             print(json.dumps(app.skills.metadata(), indent=2))
         finally:
             app.close()
         return 0
     if args.memory_set is not None or args.memory_list or args.memory_clear is not None:
-        if not (cfg["runtime"]["context_enabled"]
-                and cfg["runtime"]["context_persistence_enabled"]):
+        if not (config["runtime"]["context_enabled"]
+                and config["runtime"]["context_persistence_enabled"]):
             parser.error("context and context persistence must both be opted into")
-        app = Alfred(cfg, load_models=False)
+        app = Alfred(config, load_models=False)
         try:
             if args.memory_set is not None:
                 if "=" not in args.memory_set:
@@ -230,7 +230,7 @@ def _main(argv=None) -> int:
                 key, value = args.memory_set.split("=", 1)
                 app.context.set_explicit_fact(key, value, local_approval=True)
                 print(json.dumps({"retained": key,
-                                  "scope": cfg["runtime"]["context_mode"]}))
+                                  "scope": config["runtime"]["context_mode"]}))
             elif args.memory_list:
                 print(json.dumps(app.context.list_facts(), indent=2))
             else:
@@ -242,9 +242,9 @@ def _main(argv=None) -> int:
             app.close()
         return 0
     if args.doctor:
-        return 0 if doctor(cfg) else 2
+        return 0 if doctor(config) else 2
     if args.ensure_backend:
-        supervisor = LlamaSupervisor(cfg["qwen"], logs)
+        supervisor = LlamaSupervisor(config["qwen"], logs)
         supervisor.ensure_running()
         print(json.dumps(supervisor.status()))
         return 0
@@ -256,7 +256,7 @@ def _main(argv=None) -> int:
             or args.workflow_trigger_pause is not None
             or args.workflow_trigger_resume is not None
             or args.workflow_trigger_cancel is not None):
-        app = Alfred(cfg, load_models=False)
+        app = Alfred(config, load_models=False)
         try:
             engine = app.tools.workflow_engine
             if args.workflow_draft:
@@ -299,7 +299,7 @@ def _main(argv=None) -> int:
             app.close()
         return 0
     if args.automations or args.automation_tick or args.scheduler_only:
-        app = Alfred(cfg, load_models=False)
+        app = Alfred(config, load_models=False)
         try:
             if args.automations:
                 print(json.dumps(app.tools.automations.list_jobs(all_states=True),
@@ -323,7 +323,7 @@ def _main(argv=None) -> int:
     # Administrative actions are intentionally CLI-only; they never appear in
     # Needle's tool schemas. No model needs loading to approve or reject.
     if args.pending or args.approve is not None or args.reject is not None:
-        app = Alfred(cfg, load_models=False)
+        app = Alfred(config, load_models=False)
         try:
             if args.pending:
                 print(json.dumps(app.system2.approvals.pending(), indent=2))
@@ -337,7 +337,7 @@ def _main(argv=None) -> int:
             app.close()
         return 0
     if args.reason:
-        app = Alfred(cfg, load_models=False)
+        app = Alfred(config, load_models=False)
         try:
             app.require_cognitive_runtime()
             if args.resume_session:
@@ -362,8 +362,8 @@ def _main(argv=None) -> int:
                                                    reason="needs_approval"))
                 else:
                     app.sessions.append(task.task_id, Completion(
-                        outcome="completed" if cfg["qwen"]["enabled"] else "failed",
-                        reason="no_action" if cfg["qwen"]["enabled"] else "disabled",
+                        outcome="completed" if config["qwen"]["enabled"] else "failed",
+                        reason="no_action" if config["qwen"]["enabled"] else "disabled",
                     ))
                 print(json.dumps(result, default=str, indent=2))
             except Exception:
@@ -377,7 +377,7 @@ def _main(argv=None) -> int:
     if not args.text:
         # Fail before loading native Whistle/Needle models or starting services.
         # Merely seeing a Pulse "Built-in Audio" entry is not enough.
-        mic = AudioManager(cfg["audio"])
+        mic = AudioManager(config["audio"])
         try:
             selected = mic.ensure_input()
             LOG.info("Audio preflight passed: %s", selected)
@@ -390,7 +390,7 @@ def _main(argv=None) -> int:
     # One-shot text calls do not take over the voice control socket.
     control = ShutdownSocket(logs, "voice") if not args.text else nullcontext()
     with control:
-        app = Alfred(cfg)
+        app = Alfred(config)
         try:
             app.require_cognitive_runtime()
             if args.resume_session:

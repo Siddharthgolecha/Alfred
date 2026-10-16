@@ -38,14 +38,18 @@ class WakeWordGate:
         instant = time.monotonic() if now is None else now
         return self.enabled and self._armed_until > instant
 
-    def _command_after_prefix(self, text):
+    def _command_after_prefix(self, text) -> str | None:
+        """Return the text after the wake prefix, or None when text has no wake prefix."""
         match = self._prefix.match(text)
         if not match:
             return None
         return text[match.end():].lstrip(" \t\r\n,.:;!?-\u2014").strip()
 
-    def preview(self, text, *, acoustic_activation=False, now=None):
-        """Return a displayable hypothesis only when it could be actionable."""
+    def preview(self, text, *, acoustic_activation=False, now=None) -> str | None:
+        """Return a displayable hypothesis only when it could be actionable.
+
+        None means the text is empty or would be ignored by the gate.
+        """
         text = str(text or "").strip()
         if not text:
             return None
@@ -53,7 +57,7 @@ class WakeWordGate:
             return text
         return text if self._command_after_prefix(text) is not None else None
 
-    def consume(self, text, *, acoustic_activation=False, now=None):
+    def consume(self, text, *, acoustic_activation=False, now=None) -> str | None:
         """Return stripped command, '' for a wake-only event, None if ignored.
 
         Once armed, a single nonempty utterance consumes the window. A lone
@@ -143,8 +147,10 @@ class AcousticWakeDetector:
                         hit = True
         return hit
 
-    def capture_after_wake(self, chunks, frame_ms):
+    def capture_after_wake(self, chunks, frame_ms) -> itertools.chain | None:
         """Consume unaddressed audio without STT; return replay + live tail.
+
+        Returns None when the stream ends without the acoustic detector firing.
 
         A short pre-roll lets Whistle hear the phrase and immediate command
         even when the acoustic detector activates halfway through speech.

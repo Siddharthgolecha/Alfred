@@ -41,7 +41,10 @@ DEFAULT_BINARIES = {
 
 
 def _lookup_backend_by_binary_or_port(binary: str, url: str) -> str | None:
-    """Helper to resolve a well-known backend by its binary name or url port."""
+    """Resolve a well-known backend by its binary name or url port.
+
+    Returns None when neither identifies a known backend; callers fall back to llama_cpp.
+    """
     if binary:
         name = Path(binary).name.lower()
         if "llama-server" in name or "llama_server" in name:
@@ -118,10 +121,6 @@ class ModelSupervisor:
         if path.is_file() and os.access(path, os.X_OK):
             return str(path.resolve())
         raise FileNotFoundError(f"{self.backend} executable not found: {name}")
-
-    def _binary(self) -> str:
-        """Deprecated: use _resolve_binary instead."""
-        return self._resolve_binary()
 
     def _models(self):
         from .models import request_json

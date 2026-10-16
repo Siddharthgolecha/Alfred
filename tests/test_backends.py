@@ -89,7 +89,7 @@ class BackendSupervisorTests(unittest.TestCase):
         target.write_text("#!/bin/sh\nexit 0\n")
         target.chmod(0o755)
         sup = self.supervisor("llama_cpp", binary=str(base))
-        self.assertEqual(sup._binary(), str(target))
+        self.assertEqual(sup._resolve_binary(), str(target))
 
     def test_old_llama_server_uses_local_gguf(self):
         gguf = Path(self.temp.name).resolve() / "model.gguf"

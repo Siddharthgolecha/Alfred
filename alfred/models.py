@@ -105,6 +105,15 @@ class Qwen:
         url = getattr(self.supervisor, "url", None)
         return url if isinstance(url, str) else self.cfg["url"].rstrip("/")
 
+    def _run_inference(self, payload):
+        """Ensure the backend is running, stamp the model name into *payload* (if known),
+        and POST to the chat endpoint. Use this for single-shot inference calls."""
+        self.supervisor.ensure_running()
+        model = self.supervisor.model_id()
+        if model:
+            payload["model"] = model
+        return request_json(self._endpoint() + "/v1/chat/completions", payload, timeout=90)
+
     def complete(self, transcript, tool_catalog, allowed_services=(), named_tasks=(), *,
                  context=None, handoff=None):
         guard = (self.admission.claim("qwen")
@@ -171,8 +180,6 @@ class Qwen:
             "response_format": self._response_format("alfred_plan", PLAN_RESPONSE_SCHEMA),
             "stream": False
         }
-        if model:
-            payload["model"] = model
         # Qwen3.5 can spend its entire generation budget thinking, and some
         # llama.cpp versions fail to enforce JSON grammar in thinking mode.
         # Both forms are best-effort for differently aged llama.cpp servers.
@@ -181,12 +188,13 @@ class Qwen:
             payload["chat_template_kwargs"] = {"enable_thinking": False}
             payload["reasoning_effort"] = "none"
 
+        if model:
+            payload["model"] = model
         # A retry is generation-only: no returned text can become a tool call
         # until it passes System2.parse_plan and preflight. Never reinterpret a
         # failed plan as a successful schedule or silently discard its steps.
         for attempt in range(2):
-            out = request_json(self._endpoint() + "/v1/chat/completions",
-                               payload, timeout=90)
+            out = request_json(self._endpoint() + "/v1/chat/completions", payload, timeout=90)
             try:
                 return self._parse_plan_response(out)
             except QwenPlanResponseError as exc:
@@ -272,8 +280,6 @@ class Qwen:
             return self._explain_admitted(user_request,observed_results)
 
     def _explain_admitted(self, user_request, observed_results):
-        self.supervisor.ensure_running()
-        model = self.supervisor.model_id()
         observations = json.dumps(observed_results,default=str,ensure_ascii=True)[:Truncation.EXPLAIN_OBSERVATIONS]
         payload = {
             "messages": [
@@ -294,10 +300,7 @@ class Qwen:
             }),
             "stream":False
         }
-        if model:
-            payload["model"]=model
-        out=request_json(self._endpoint() + "/v1/chat/completions",
-                         payload,timeout=90)
+        out=self._run_inference(payload)
         content=out["choices"][0]["message"].get("content") or ""
         try:
             answer=json.loads(content)["answer"]

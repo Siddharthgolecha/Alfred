@@ -151,6 +151,31 @@ class InferenceAdmission:
             return True
         return False
 
+    def _queue_is_full(self, kind):
+        # Fixed per-priority admission slots. A burst of simultaneous
+        # Whistle callers must not accumulate unbounded Python threads.
+        # The single background slot is kept separate from two reserved
+        # voice waiters. Every accepted priority class remains FIFO.
+        # Caller must hold self._cond.
+        voice=sum(k=="whistle" for _,k in self._queue)
+        other=len(self._queue)-voice
+        return ((kind=="whistle" and voice>=self.MAX_VOICE_WAITERS)
+                or (kind!="whistle" and other>=self.MAX_OTHER_WAITERS))
+
+    def _is_my_turn(self, ticket, kind):
+        # Whistle wins the next free slot over queued background
+        # turns, but never overtakes an earlier Whistle ticket.
+        # Bounded deadlines prevent indefinite background waits.
+        # Caller must hold self._cond.
+        first_voice=next((t for t,k in self._queue
+                          if k=="whistle"),None)
+        first_other=next((t for t,k in self._queue
+                          if k!="whistle"),None)
+        return (self._owner is None and (
+            first_voice is ticket if kind=="whistle"
+            else (not self._capture and first_voice is None
+                  and first_other is ticket)))
+
     @contextmanager
     def claim(self, kind):
         if kind not in self.KINDS:
@@ -164,14 +189,7 @@ class InferenceAdmission:
         with self._cond:
             if self._closed:
                 raise AdmissionRejected("Inference admission shut down")
-            # Fixed per-priority admission slots. A burst of simultaneous
-            # Whistle callers must not accumulate unbounded Python threads.
-            # The single background slot is kept separate from two reserved
-            # voice waiters. Every accepted priority class remains FIFO.
-            voice=sum(k=="whistle" for _,k in self._queue)
-            other=len(self._queue)-voice
-            if ((kind=="whistle" and voice>=self.MAX_VOICE_WAITERS)
-                or (kind!="whistle" and other>=self.MAX_OTHER_WAITERS)):
+            if self._queue_is_full(kind):
                 self._counts["rejected"]+=1
                 raise AdmissionRejected("Inference priority queue full")
             self._queue.append((ticket,kind))
@@ -182,18 +200,7 @@ class InferenceAdmission:
                 while True:
                     if self._closed:
                         raise AdmissionRejected("Inference admission shut down")
-                    # Whistle wins the next free slot over queued background
-                    # turns, but never overtakes an earlier Whistle ticket.
-                    # Bounded deadlines prevent indefinite background waits.
-                    first_voice=next((t for t,k in self._queue
-                                      if k=="whistle"),None)
-                    first_other=next((t for t,k in self._queue
-                                      if k!="whistle"),None)
-                    eligible=(self._owner is None and (
-                        first_voice is ticket if kind=="whistle"
-                        else (not self._capture and first_voice is None
-                              and first_other is ticket)))
-                    if eligible:
+                    if self._is_my_turn(ticket,kind):
                         try:
                             pressure=self._pressure(kind)
                         except AdmissionRejected:

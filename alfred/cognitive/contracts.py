@@ -42,6 +42,11 @@ def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return obj
 
 
+def _raise_nonfinite_json_error(_constant: str) -> Any:
+    """parse_constant hook that rejects NaN/Infinity/-Infinity JSON constants."""
+    raise ValueError("Nonfinite JSON")
+
+
 class Contract(BaseModel):
     """Strict JSON codec rejecting unknown fields, versions and oversized values.
 
@@ -77,8 +82,7 @@ class Contract(BaseModel):
             raise ValueError("Contract exceeds maximum size")
         try:
             obj = json.loads(raw, object_pairs_hook=_unique_pairs,
-                             parse_constant=lambda _: (_ for _ in ()).throw(  # type: ignore[arg-type]
-                                 ValueError("Nonfinite JSON")))
+                             parse_constant=_raise_nonfinite_json_error)
         except (TypeError, json.JSONDecodeError) as exc:
             raise ValueError("Malformed contract JSON") from exc
         if not isinstance(obj, dict) or type(obj.get("version")) is not int or obj["version"] != VERSION:

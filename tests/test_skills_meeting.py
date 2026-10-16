@@ -685,6 +685,7 @@ class CombinedHandoffSkillBoundaryTests(unittest.TestCase):
             cfg["runtime"]["escalation_enabled"]=True
             cfg["runtime"]["harness_enabled"]=False
             cfg["runtime"]["needle_loop_enabled"]=False
+            cfg["runtime"]["resource_admission_enabled"]=False
             cfg["qwen"]["enabled"]=True
             device=FakeMeetingDevice()
             adapter=OfflineMeetingAdapter(device)

@@ -52,6 +52,13 @@ class WakeWordListener:
         if self.cactus is None:
             raise RuntimeError("Cactus models not loaded")
 
+        # Runtime lookup of the already-imported `alfred.app` module (not a static
+        # import, which would be circular: app imports this listener). Tests such as
+        # tests/test_wakeword.py and tests/test_voice_routing.py patch
+        # `alfred.app.UtteranceStream` / `alfred.app.AcousticWakeDetector`; since this
+        # module bound its own references at import time, it must consult the app
+        # module's current attributes and prefer them when they differ from the
+        # originals in alfred.audio / alfred.wakeword.
         app_module = sys.modules.get("alfred.app")
         utterance_stream_cls = UtteranceStream
         if (

@@ -393,6 +393,7 @@ class AppIntegrationTests(unittest.TestCase):
         cfg["runtime"]["logs"]=self.tmp.name
         cfg["runtime"]["context_enabled"]=True
         cfg["runtime"]["needle_loop_enabled"]=False
+        cfg["runtime"]["resource_admission_enabled"]=False
         self.app=Alfred(cfg,load_models=False)
         self.app.cactus=Mock()
         self.app.feedback.tell=Mock()

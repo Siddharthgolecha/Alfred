@@ -15,6 +15,8 @@ import select
 import subprocess
 import time
 
+from .exceptions import AlfredError
+
 LOG = logging.getLogger(__name__)
 RATE = 16000
 
@@ -26,7 +28,8 @@ _UNAVAILABLE_STATES = ("no", "false", "0")
 _AVAILABLE_STATES = ("yes", "true", "1")
 
 
-class AudioUnavailableError(RuntimeError):
+# RuntimeError is kept as a second base: existing callers catch RuntimeError.
+class AudioUnavailableError(AlfredError, RuntimeError):
     """No acceptable live microphone is accessible through the audio server."""
 
 
@@ -45,6 +48,12 @@ def _format_device_description(item):
         "device.description", "device.alias", "bluez5.address", "api.bluez5.address", "device.string"
     )) + " " + str(item.get("name", ""))
 
+def _direct_source_sort_key(source):
+    """Sort USB microphones first, then alphabetically by source name."""
+    is_usb = ("usb" in _format_device_description(source).lower()
+              or source["name"].startswith("alsa_input.usb_"))
+    return (not is_usb, source["name"])
+
 def _normalise_bt_address(addr: str) -> str:
     """Convert a Bluetooth MAC address to the PulseAudio card-name suffix format."""
     return addr.lower().replace(":", "_")
@@ -57,7 +66,15 @@ def _to_port_list(ports_raw) -> list:
 
 def _is_available(profile):
     a = str(profile.get("available", "")).lower()
-    return a not in ("no", "false", "0")
+    return a not in _UNAVAILABLE_STATES
+
+def _all_ports_unavailable(available: list) -> bool:
+    """Return True when every port availability string is in _UNAVAILABLE_STATES."""
+    return all(x in _UNAVAILABLE_STATES for x in available)
+
+def _any_port_available(available: list) -> bool:
+    """Return True when at least one port availability string is in _AVAILABLE_STATES."""
+    return any(x in _AVAILABLE_STATES for x in available)
 
 def _profiles(card):
     raw = card.get("profiles") or []
@@ -65,11 +82,12 @@ def _profiles(card):
         return [dict(v, name=k) for k,v in raw.items()]
     return raw
 
-def source_status(source):
+def source_status(source, explicitly_selected=False):
     """Classify an advertised source for auto-selection.
 
     SoC "Built-in Audio" without a positively available input port is not
-    auto-selected.
+    auto-selected. Pass explicitly_selected=True to skip the onboard rejection
+    (same behaviour as :func:`source_status_explicit`).
     """
     name=str(source.get("name") or "")
     lower=name.lower()
@@ -77,7 +95,8 @@ def source_status(source):
     description=str(props.get("device.description") or props.get("device.alias") or name)
     monitor=source.get("monitor_of_sink")
     if (not name or ".monitor" in lower
-            or monitor not in (None, "n/a", PULSEAUDIO_NO_SINK_SENTINEL, "4294967295")
+            or monitor not in (None, "n/a", PULSEAUDIO_NO_SINK_SENTINEL,
+                               str(PULSEAUDIO_NO_SINK_SENTINEL))
             or str(props.get("device.class") or "").lower()=="monitor"):
         return False,"playback monitor or non-input source"
     if lower.startswith(("auto_null","null","remap","virtual")):
@@ -85,8 +104,8 @@ def source_status(source):
     if source.get("mute") is True:
         return False,"recording source is muted"
     ports=_to_port_list(source.get("ports") or [])
-    available=[str(p.get("available","unknown")).lower() for p in ports]
-    if ports and all(x in _UNAVAILABLE_STATES for x in available):
+    available=[str(port.get("available","unknown")).lower() for port in ports]
+    if ports and _all_ports_unavailable(available):
         return False,"all input ports are unavailable/disconnected"
     active=source.get("active_port") or {}
     if isinstance(active,dict) and str(active.get("available","unknown")).lower() in _UNAVAILABLE_STATES:
@@ -98,22 +117,24 @@ def source_status(source):
         return True,"USB input; must pass capture probe"
     onboard=("built-in" in description.lower() or "builtin" in description.lower()
              or lower.startswith("alsa_input.platform") or "onboard" in description.lower())
-    if onboard:
+    if onboard and not explicitly_selected:
         return False,(
             "built-in/SoC audio is not auto-trusted as a connected microphone; "
             "set audio.direct_source explicitly for a known wired/I2S capture device"
         )
-    if ports and any(x in _AVAILABLE_STATES for x in available):
+    if ports and _any_port_available(available):
         return True,"input port reports available; must pass capture probe"
+    if explicitly_selected:
+        return True,"explicit direct source; must pass capture probe"
     return False,"physical input not confirmed; configure direct_source explicitly"
 
 def source_status_explicit(source):
     """Classify a source that was explicitly nominated via ``audio.direct_source``.
 
-    Applies all the same rejection rules as :func:`source_status` but treats a
-    surviving source as trusted rather than requiring a confirmed available port.
+    Applies all the same rejection rules as :func:`source_status` but bypasses
+    the onboard/SoC auto-trust rejection and treats a surviving source as trusted.
     """
-    ok, reason = source_status(source)
+    ok, reason = source_status(source, explicitly_selected=True)
     if not ok:
         return ok, reason
     name = str(source.get("name") or "").lower()
@@ -125,7 +146,7 @@ def source_status_explicit(source):
 class AudioManager:
     """Auto mode prefers WI-C100 HFP mic, then an approved direct microphone."""
     def __init__(self, cfg):
-        self.cfg = cfg
+        self.config = cfg
         self.active_source = None
         self.process = None
         self.last_check = 0
@@ -133,7 +154,7 @@ class AudioManager:
         self._prefetched = b""
 
     def _try_reconnect(self):
-        address = self.cfg.get("bluetooth_address", "").strip()
+        address = self.config.get("bluetooth_address", "").strip()
         if not address or time.monotonic() - self.last_reconnect_attempt < 30:
             return
         self.last_reconnect_attempt = time.monotonic()
@@ -152,7 +173,7 @@ class AudioManager:
         except (OSError, ValueError, RuntimeError) as exc:
             LOG.warning("Cannot query audio cards: %s", exc)
             return None
-        address = _normalise_bt_address(self.cfg.get("bluetooth_address", ""))
+        address = _normalise_bt_address(self.config.get("bluetooth_address", ""))
         for card in cards:
             name = str(card.get("name", "")).lower()
             if not name.startswith("bluez_card"):
@@ -161,7 +182,7 @@ class AudioManager:
             if address:
                 if address not in name and address.replace("_", ":") not in desc:
                     continue
-            elif self.cfg.get("sony_name", "WI-C100").lower() not in desc:
+            elif self.config.get("sony_name", "WI-C100").lower() not in desc:
                 continue
             return card
         return None
@@ -192,7 +213,7 @@ class AudioManager:
         return False
 
     def _sources(self):
-        direct = self.cfg.get("direct_source")
+        direct = self.config.get("direct_source")
         data = pactl_json("sources")
         result = []
         for s in data:
@@ -203,7 +224,7 @@ class AudioManager:
 
     def diagnostics(self):
         """All advertised inputs with rejection reasons; no false 'mic connected' claim."""
-        direct = self.cfg.get("direct_source")
+        direct = self.config.get("direct_source")
         entries = []
         for src in pactl_json("sources"):
             classify = source_status_explicit if src.get("name") == direct else source_status
@@ -215,7 +236,7 @@ class AudioManager:
 
     def candidate_sources(self) -> list:
         """Return eligible source names ordered by preference."""
-        mode=self.cfg["mode"]
+        mode=self.config["mode"]
         if mode!="direct":
             if self._headset_card() is None:
                 self._try_reconnect()
@@ -227,26 +248,24 @@ class AudioManager:
                 "Cannot enumerate audio inputs. Verify PipeWire/PulseAudio and "
                 f"access to its session socket: {exc}") from exc
         target_card=self._headset_card() if mode!="direct" else None
-        bt=[]
+        bluetooth_sources=[]
         if target_card:
             suffix=target_card["name"].lower().replace("bluez_card.","")
-            bt=[s for s in sources if s.get("name","").lower().startswith("bluez_input")
+            bluetooth_sources=[s for s in sources if s.get("name","").lower().startswith("bluez_input")
                 and (suffix in s.get("name","").lower()
                      or suffix.replace("_",":") in _format_device_description(s).lower())]
         direct=[s for s in sources if not s.get("name","").lower().startswith("bluez_")]
-        wanted=self.cfg.get("direct_source","")
+        wanted=self.config.get("direct_source","")
         if wanted:
             direct=[s for s in direct if s["name"]==wanted]
         else:
-            direct.sort(key=lambda s: (
-                not ("usb" in _format_device_description(s).lower() or s["name"].startswith("alsa_input.usb_")),
-                s["name"]))
+            direct.sort(key=_direct_source_sort_key)
         if mode=="direct":
             return [s["name"] for s in direct]
         if mode=="bluetooth":
-            return [s["name"] for s in bt]
-        return [s["name"] for s in bt]+(
-            [s["name"] for s in direct] if self.cfg.get("auto_fallback",True) else [])
+            return [s["name"] for s in bluetooth_sources]
+        return [s["name"] for s in bluetooth_sources]+(
+            [s["name"] for s in direct] if self.config.get("auto_fallback",True) else [])
 
     def choose_source(self) -> str | None:
         """Return the highest-priority eligible source, or None."""
@@ -308,7 +327,7 @@ class AudioManager:
             try:
                 self._open(source)
                 self._prefetched=self._read_pcm(
-                    RATE//10*2,self.cfg.get("probe_timeout_seconds",5))
+                    RATE//10*2,self.config.get("probe_timeout_seconds",5))
                 LOG.info("Validated microphone: %s (live PCM received)",source)
                 return source
             except AudioUnavailableError as exc:
@@ -319,29 +338,29 @@ class AudioManager:
             ". Check Bluetooth HFP, the input ports, or permissions.")
 
     def close(self):
-        p, self.process = self.process, None
+        proc, self.process = self.process, None
         self.active_source = None
         self._prefetched = b""
-        if p:
-            if p.poll() is None:
-                p.terminate()
+        if proc:
+            if proc.poll() is None:
+                proc.terminate()
             try:
-                p.wait(timeout=2)
+                proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                p.kill()
-                p.wait(timeout=2)
-            if p.stdout:
-                p.stdout.close()
+                proc.kill()
+                proc.wait(timeout=2)
+            if proc.stdout:
+                proc.stdout.close()
 
     def frames(self):
         """Produce PCM buffers or raise AudioUnavailableError; never retry forever."""
-        samples=RATE*int(self.cfg["frame_ms"])//1000
+        samples=RATE*int(self.config["frame_ms"])//1000
         nbytes=samples*2
         if self.process is None:
             self.ensure_input()
         consecutive_failures=0
         while True:
-            if time.monotonic()-self.last_check>float(self.cfg["poll_seconds"]):
+            if time.monotonic()-self.last_check>float(self.config["poll_seconds"]):
                 current=self.choose_source()
                 self.last_check=time.monotonic()
                 if current!=self.active_source:
@@ -352,7 +371,7 @@ class AudioManager:
                 self._prefetched=b""
                 if len(data)<nbytes:
                     data+=self._read_pcm(nbytes-len(data),
-                                         self.cfg.get("read_timeout_seconds",5))
+                                         self.config.get("read_timeout_seconds",5))
                 if len(data)>nbytes:
                     self._prefetched=data[nbytes:]
                     data=data[:nbytes]
@@ -380,13 +399,13 @@ class UtteranceStream:
     """Frame-level energy-based VAD and bounded incremental Whisper/Whistle stream."""
     def __init__(self, frames, cfg):
         self.frames = iter(frames)
-        self.cfg = cfg
+        self.config = cfg
 
     def utterances(self):
-        threshold = float(self.cfg["speech_rms"])
-        silent_end = int(self.cfg["end_silence_frames"])
-        frame_secs = int(self.cfg["frame_ms"]) / 1000
-        max_frames = max(1, int(float(self.cfg["max_utterance_seconds"]) / frame_secs))
+        threshold = float(self.config["speech_rms"])
+        silent_end = int(self.config["end_silence_frames"])
+        frame_secs = int(self.config["frame_ms"]) / 1000
+        max_frames = max(1, int(float(self.config["max_utterance_seconds"]) / frame_secs))
         history = deque(maxlen=2)
         while True:
             samples = next(self.frames)
