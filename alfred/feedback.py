@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import base64
 import threading
+import json
 from .constants import Truncation
 from .platform_utils import IS_MACOS, IS_WINDOWS
 
@@ -45,16 +46,27 @@ def _tts_argv(message: str) -> list[str] | None:
 class Feedback:
     """Deliver a response message to stdout, and optionally via TTS."""
 
-    def __init__(self, enable_tts: bool = False, processes=None) -> None:
+    def __init__(self, enable_tts: bool = False, processes=None, ui=None) -> None:
         self.tts = enable_tts
         self.processes = processes
+        self.ui = ui
         self.speaking = threading.Event()
 
     def tell(self, message: str) -> None:
-        print(message, flush=True)
+        spoken = str(message)
+        if self.ui is not None:
+            try:
+                spoken = self.ui.present_reply(spoken)
+            except Exception:
+                LOG.debug("Could not format conversational output", exc_info=True)
+                self.ui.reply("I couldn't complete that request. Check --debug for details.")
+        else:
+            print(message, flush=True)
         if not self.tts:
             return
-        argv = _tts_argv(message)
+        if self.ui is not None:
+            self.ui.activity("Speaking…")
+        argv = _tts_argv(spoken)
         if argv is None:
             return
         self.speaking.set()

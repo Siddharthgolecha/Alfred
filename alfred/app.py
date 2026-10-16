@@ -47,8 +47,10 @@ class Alfred:
         load_models: bool = True,
         *,
         meeting_adapter: Any = None,
+        ui: Any = None,
     ) -> None:
         self.cfg = cfg
+        self.ui = ui
         self._build_routing_services()
         self._build_audio_services()
         self._build_model_services(load_models)
@@ -72,7 +74,8 @@ class Alfred:
     def _build_audio_services(self) -> None:
         """Initialise AudioManager, WakeWordGate, and Feedback."""
         self.processes = ChildProcesses()
-        self.feedback = Feedback(self.cfg["runtime"]["tts"], processes=self.processes)
+        self.feedback = Feedback(self.cfg["runtime"]["tts"], processes=self.processes,
+                                 ui=self.ui)
         self.audio = AudioManager(self.cfg["audio"])
         self.wake_word = WakeWordGate(self.cfg["wake_word"])
 
@@ -81,6 +84,7 @@ class Alfred:
         config = self.cfg
         runtime = config["runtime"]
         self.tools = Tools(runtime, self.store, processes=self.processes)
+        self.tools.trace = self.ui.trace if self.ui is not None else None
         self.supervisor = LlamaSupervisor(config["qwen"], runtime["logs"])
         self.qwen = (
             Qwen(config["qwen"], self.supervisor, admission=self.admission)
@@ -90,6 +94,7 @@ class Alfred:
         self.system2 = System2(
             self.qwen, self.tools, self.store, runtime, admission=self.admission
         )
+        self.system2.ui = self.ui
 
         model = config["qwen"]["model"] or config["qwen"]["expected_model"]
         self.harness = LocalHarness(
@@ -133,6 +138,8 @@ class Alfred:
             tools=self.tools,
             cactus=self.cactus,
         )
+        self.tools.trace = self.ui.trace if self.ui is not None else None
+        self.router.ui = self.ui
         self.listener = WakeWordListener(
             cfg=self.cfg,
             audio=self.audio,
@@ -143,6 +150,7 @@ class Alfred:
             admission=self.admission,
             cactus=self.cactus,
             handle_text_fn=self.handle_text,
+            ui=self.ui,
         )
 
     # -----------------------------------------------------------------------

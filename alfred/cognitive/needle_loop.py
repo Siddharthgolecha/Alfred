@@ -125,7 +125,8 @@ class NeedleAgentLoop:
 
     def __init__(self, system2, feedback, ledger=None, task_id=None,
                  *, confidence_floor=0.7, max_decisions: int = Limits.NEEDLE_MAX_DECISIONS,
-                 max_tools: int = Limits.NEEDLE_MAX_TOOLS, cancelled=None):
+                 max_tools: int = Limits.NEEDLE_MAX_TOOLS, cancelled=None,
+                 trace=None):
         if type(max_decisions) is not int or not 1 <= max_decisions <= Limits.NEEDLE_MAX_DECISIONS:
             raise ValueError(f"needle decisions must be 1..{Limits.NEEDLE_MAX_DECISIONS}")
         if type(max_tools) is not int or not 1 <= max_tools <= Limits.NEEDLE_MAX_TOOLS:
@@ -141,10 +142,20 @@ class NeedleAgentLoop:
         self.max_decisions = max_decisions
         self.max_tools = max_tools
         self.cancelled = cancelled or (lambda: False)
+        self.trace = trace
 
     def _record(self, event):
         if self.ledger is not None:
             self.ledger.append(self.task_id, event)
+        if self.trace is not None:
+            try:
+                if isinstance(event, Decision):
+                    self.trace.record("System1 · Needle", "running",
+                                      f"Feedback route: {event.route}")
+                elif isinstance(event, Observation):
+                    self.trace.record("Needle feedback", event.outcome, event.tool)
+            except Exception:
+                pass
 
     def _stop(self, why, accepted, observed, outputs):
         words = {

@@ -36,6 +36,7 @@ class WakeWordListener:
         admission: InferenceAdmission,
         cactus: Cactus | None = None,
         handle_text_fn: Callable[[str], Any] | None = None,
+        ui=None,
     ) -> None:
         self.cfg = cfg
         self.audio = audio
@@ -46,6 +47,7 @@ class WakeWordListener:
         self.admission = admission
         self.cactus = cactus
         self.handle_text_fn = handle_text_fn or router.handle_text
+        self.ui = ui
 
     def listen(self) -> None:
         """Main audio listening loop for wake-word activation and command execution."""
@@ -104,9 +106,15 @@ class WakeWordListener:
                         )
                         is not None
                     ):
-                        transcript_display.update(hypothesis)
+                        if self.ui is not None:
+                            self.ui.preview(hypothesis)
+                        else:
+                            transcript_display.update(hypothesis)
 
                 self.admission.set_capture_active(True)
+                transcription_started = time.monotonic()
+                if self.ui is not None:
+                    self.ui.activity("Listening…")
                 try:
                     transcript = self.cactus.transcribe_stream(chunks, on_partial=show_partial)
                 finally:
@@ -117,9 +125,19 @@ class WakeWordListener:
                 )
                 if command is None:
                     transcript_display.discard()
+                    if self.ui is not None:
+                        self.ui.clear_preview()
                     continue
 
-                transcript_display.finish(transcript or wake_cfg["phrase"])
+                if self.ui is not None:
+                    self.ui.begin_request("voice")
+                    self.ui.clear_preview()
+                    self.ui.user(command or transcript or wake_cfg["phrase"])
+                    self.ui.record("Speech recognition", "complete", "Whistle",
+                                   max(0, int((time.monotonic() - transcription_started) * 1000)))
+                    self.ui.record("Wake authorization", "complete", "Authorized")
+                else:
+                    transcript_display.finish(transcript or wake_cfg["phrase"])
                 if command:
                     if re.fullmatch(
                         r"(?:close|exit|quit|stop listening|shut down|shutdown)[.!?]*",
@@ -135,7 +153,11 @@ class WakeWordListener:
                             task.task_id, Completion(outcome="completed", reason="shutdown")
                         )
                         LOG.info("Wake-authorized spoken shutdown")
-                        print("Stopping Alfred", flush=True)
+                        if self.ui is not None:
+                            self.ui.reply("Stopping Alfred.")
+                            self.ui.finish_request("complete")
+                        else:
+                            print("Stopping Alfred", flush=True)
                         break
 
                     LOG.info("Wake-authorized command received (%d characters)", len(command))
@@ -147,14 +169,21 @@ class WakeWordListener:
                         self.router._command_source = previous_source
                 else:
                     LOG.info("Wake word detected; awaiting follow-up command")
+                    if self.ui is not None:
+                        self.ui.finish_request("complete")
 
                 if self.feedback.tts:
                     self.audio.close()
             except (KeyboardInterrupt, AudioUnavailableError):
                 transcript_display.abort()
+                if self.ui is not None:
+                    self.ui.clear_preview()
                 raise
             except Exception as listener_error:
                 transcript_display.abort()
+                if self.ui is not None:
+                    self.ui.clear_preview()
+                    self.ui.activity("Recovering audio input…")
                 LOG.exception("Audio/transcription error, recovering: %s", listener_error)
                 self.audio.close()
                 if detector is not None:

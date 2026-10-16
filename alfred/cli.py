@@ -18,8 +18,129 @@ from .cognitive.harness_sdk import LocalHarness, HarnessUnavailable
 from .cognitive import Decision, Escalation, ApprovalReference, Completion
 from .app import Alfred
 from .platform_utils import IS_LINUX
+from .ui import TerminalUI
+from .output_capture import NativeOutputCapture
 
 LOG = logging.getLogger(__name__)
+
+
+class _UiLogHandler(logging.Handler):
+    def __init__(self, ui):
+        super().__init__(logging.DEBUG)
+        self.ui = ui
+
+    def emit(self, record):
+        self.ui.log(record)
+
+
+def _run_conversation(args, config, logs):
+    """Run voice/text/reason with isolated presentation and output capture."""
+    ui = TerminalUI(debug=args.debug)
+    root = logging.getLogger()
+    previous_level = root.level
+    previous_handlers = list(root.handlers)
+    for handler in previous_handlers:
+        root.removeHandler(handler)
+    root.setLevel(logging.DEBUG if args.debug else logging.CRITICAL)
+    root.addHandler(_UiLogHandler(ui) if args.debug else logging.NullHandler())
+    app = None
+    exit_code = 0
+    try:
+        ui.start()
+        with NativeOutputCapture(debug=args.debug):
+            try:
+                if args.reason:
+                    app = Alfred(config, load_models=False, ui=ui)
+                    ui.activity("Connecting to the local reasoning service…")
+                    app.require_cognitive_runtime()
+                    if args.resume_session:
+                        app.resume_session(args.resume_session)
+                    task = app._start_task("reason", len(args.reason))
+                    ui.begin_request("reason")
+                    ui.user(args.reason)
+                    app.sessions.append(task.task_id,
+                                        Decision(engine="local", route="delegate", call_count=0))
+                    app.sessions.append(task.task_id,
+                                        Escalation(source_model="local", target_model="qwen",
+                                                   reason="explicit_reason"))
+                    try:
+                        result = app.reason(args.reason)
+                        if result.get("status") == "incomplete":
+                            app.sessions.append(task.task_id,
+                                                Completion(outcome="failed", reason="invalid_plan"))
+                        elif "approval" in result:
+                            app.sessions.append(
+                                task.task_id,
+                                ApprovalReference(approval_id=result["approval"]["approval_id"]))
+                            app.sessions.append(task.task_id,
+                                                Completion(outcome="pending_approval",
+                                                           reason="needs_approval"))
+                        else:
+                            app.sessions.append(task.task_id, Completion(
+                                outcome="completed" if config["qwen"]["enabled"] else "failed",
+                                reason="no_action" if config["qwen"]["enabled"] else "disabled"))
+                        ui.present_reply(json.dumps(result, default=str))
+                        exit_code = 1 if result.get("status") == "incomplete" else 0
+                    except Exception:
+                        app.sessions.append(task.task_id,
+                                            Completion(outcome="failed", reason="exception"))
+                        ui.request_state = "failed"
+                        raise
+                    finally:
+                        ui.finish_request(ui.request_state)
+                else:
+                    if not args.text:
+                        mic = AudioManager(config["audio"])
+                        try:
+                            mic.ensure_input()
+                        except AudioUnavailableError:
+                            ui.reply("Microphone unavailable. Check the audio input and try again.")
+                            return 2
+                        finally:
+                            mic.close()
+                    control = ShutdownSocket(logs, "voice") if not args.text else nullcontext()
+                    with control:
+                        app = Alfred(config, ui=ui)
+                        ui.activity("Loading local models…")
+                        app.require_cognitive_runtime()
+                        if args.resume_session:
+                            app.resume_session(args.resume_session)
+                        app.start_services()
+                        if args.text:
+                            app.handle_text(args.text)
+                        else:
+                            ui.activity("Listening for wake word…")
+                            app.listen()
+            except KeyboardInterrupt:
+                LOG.info("Stopping Alfred")
+                if ui.trace_active:
+                    ui.finish_request("interrupted")
+            except AudioUnavailableError:
+                ui.request_state = "failed"
+                ui.reply("Microphone disconnected. Check the audio input and restart Alfred.")
+                exit_code = 2
+            except Exception as exc:
+                LOG.exception("Alfred request failed")
+                ui.request_state = "failed"
+                detail = "Run with --debug for details." if not args.debug else (
+                    f"{type(exc).__name__}. See the debug trace for details.")
+                ui.reply(f"Alfred couldn't complete startup or the request. {detail}")
+                exit_code = 2
+            finally:
+                if app is not None:
+                    try:
+                        app.close()
+                    except Exception:
+                        LOG.exception("Alfred shutdown failed")
+                        if exit_code == 0:
+                            exit_code = 2
+        if args.debug and (args.text or args.reason) and ui.interactive:
+            ui.browser()
+        return exit_code
+    finally:
+        ui.close()
+        root.handlers[:] = previous_handlers
+        root.setLevel(previous_level)
 
 
 def _diagnose_audio(cfg) -> bool:
@@ -125,6 +246,8 @@ def doctor(cfg) -> bool:
 def _main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Alfred Jetson voice automation agent")
     parser.add_argument("--config", default="config.json", help="Local JSON config")
+    parser.add_argument("--debug", action="store_true",
+                        help="Show diagnostic logs, live system stats, and request traces")
     parser.add_argument("--resume-session", metavar="SESSION_ID",
                         help="Explicitly reuse a prior local session ID; never replay interrupted tools")
     parser.add_argument("command", nargs="?", choices=["close"],
@@ -189,18 +312,22 @@ def _main(argv=None) -> int:
     args = parser.parse_args(argv)
     path = Path(args.config)
     config = load_config(path if path.exists() else None)
-    if not path.exists() and args.config == "config.json":
-        print(
-            "[alfred] No config.json found — using built-in defaults. "
-            "Run ./install.sh to customise.",
-            flush=True,
-        )
     logs = Path(config["runtime"]["logs"]).expanduser()
     logs.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=[logging.StreamHandler()])
+    if args.debug and not (args.text or args.reason or not any((
+            args.doctor, args.ensure_backend, args.scheduler_only, args.automations,
+            args.automation_tick, args.skills, args.memory_set is not None,
+            args.memory_list, args.memory_clear is not None, args.pending,
+            args.approve is not None, args.reject is not None, args.minutes,
+            args.workflow_draft, args.workflow_approve, args.workflow_list,
+            args.workflow_start, args.workflow_runs, args.workflow_status is not None,
+            args.workflow_cancel is not None, args.workflow_tick,
+            args.workflow_reconcile is not None, args.workflow_schedule,
+            args.workflow_triggers, args.workflow_trigger_pause is not None,
+            args.workflow_trigger_resume is not None,
+            args.workflow_trigger_cancel is not None, args.command))):
+        logging.basicConfig(level=logging.DEBUG,
+                            format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if args.command == "close":
         if args.resume_session:
             parser.error("'close' cannot resume a session")
@@ -365,77 +492,8 @@ def _main(argv=None) -> int:
             app.close()
         return 0
     if args.reason:
-        app = Alfred(config, load_models=False)
-        try:
-            app.require_cognitive_runtime()
-            if args.resume_session:
-                app.resume_session(args.resume_session)
-            task = app._start_task("reason", len(args.reason))
-            app.sessions.append(task.task_id,
-                                 Decision(engine="local", route="delegate", call_count=0))
-            app.sessions.append(task.task_id,
-                                 Escalation(source_model="local", target_model="qwen",
-                                            reason="explicit_reason"))
-            try:
-                result = app.reason(args.reason)
-                if result.get("status") == "incomplete":
-                    app.sessions.append(task.task_id,
-                                        Completion(outcome="failed", reason="invalid_plan"))
-                elif "approval" in result:
-                    app.sessions.append(
-                        task.task_id,
-                        ApprovalReference(approval_id=result["approval"]["approval_id"]))
-                    app.sessions.append(task.task_id,
-                                        Completion(outcome="pending_approval",
-                                                   reason="needs_approval"))
-                else:
-                    app.sessions.append(task.task_id, Completion(
-                        outcome="completed" if config["qwen"]["enabled"] else "failed",
-                        reason="no_action" if config["qwen"]["enabled"] else "disabled",
-                    ))
-                print(json.dumps(result, default=str, indent=2))
-            except Exception:
-                app.sessions.append(task.task_id,
-                                    Completion(outcome="failed", reason="exception"))
-                raise
-        finally:
-            app.close()
-        # Unsuccessful planning must propagate a failing CLI exit code.
-        return 1 if result.get("status") == "incomplete" else 0
-    if not args.text:
-        # Fail before loading native Whistle/Needle models or starting services.
-        # Merely seeing a Pulse "Built-in Audio" entry is not enough.
-        mic = AudioManager(config["audio"])
-        try:
-            selected = mic.ensure_input()
-            LOG.info("Audio preflight passed: %s", selected)
-        except AudioUnavailableError as exc:
-            LOG.error("MICROPHONE NOT CONNECTED / NOT USABLE: %s", exc)
-            return 2
-        finally:
-            mic.close()
-    # Only the persistent voice instance advertises 'alfred close'.
-    # One-shot text calls do not take over the voice control socket.
-    control = ShutdownSocket(logs, "voice") if not args.text else nullcontext()
-    with control:
-        app = Alfred(config)
-        try:
-            app.require_cognitive_runtime()
-            if args.resume_session:
-                app.resume_session(args.resume_session)
-            app.start_services()
-            if args.text:
-                app.handle_text(args.text)
-            else:
-                app.listen()
-        except KeyboardInterrupt:
-            LOG.info("Stopping Alfred")
-        except AudioUnavailableError as exc:
-            LOG.error("Microphone disconnected or capture failed: %s", exc)
-            return 2
-        finally:
-            app.close()
-    return 0
+        return _run_conversation(args, config, logs)
+    return _run_conversation(args, config, logs)
 
 
 def main(argv=None) -> int:

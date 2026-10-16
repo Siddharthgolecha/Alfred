@@ -16,6 +16,7 @@ With no operation flag, Alfred starts **voice mode**. Source:
 |---|---|
 | `--config PATH` | JSON config file. Default `config.json`. Optional: when omitted or when the file does not exist, Alfred uses built-in defaults. See [Configuration](configuration.md). |
 | `--resume-session SESSION_ID` | Reuse a prior local session ID. Interrupted tools are never replayed. Allowed only with voice mode, `--text` and `--reason`. |
+| `--debug` | Show diagnostic logs, live system stats, and a browsable request trace. Redirected runs print trace events and stats to stderr. |
 
 ## Operations
 
@@ -121,6 +122,9 @@ stopped. A previously installed handler is restored on exit.
 ## Examples
 
 ```bash
+# Run voice mode with live request tracing
+alfred --debug
+
 # Check the setup without loading models
 alfred --doctor
 
@@ -135,3 +139,8 @@ alfred --approve 7
 # Retain a preference (needs context persistence enabled)
 alfred --memory-set unit_preference=celsius
 ```
+
+In interactive debug mode, use ↑/↓ to select a request, Page Up/Page Down to scroll its
+trace, End to follow the newest request, and `?` for help. A completed one-shot `--text` or
+`--reason` run stays open until `q`; the browser retains up to 100 traces in memory for the
+current Alfred process.
