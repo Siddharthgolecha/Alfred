@@ -23,6 +23,48 @@ from alfred.platform_utils import IS_WINDOWS
 
 
 class InstallerUITests(unittest.TestCase):
+    def test_resume_prompts_for_lmstudio_model_when_saved_id_is_stale(self):
+        wizard = core.Wizard.__new__(core.Wizard)
+        wizard.args = SimpleNamespace(backend=None, auto=False, skip_models=True,
+                                      customize=False)
+        wizard.settings = {"backend": "lmstudio", "model": "missing/model",
+                           "skip_models": True}
+        wizard.config = {"qwen": {"backend": "lm_studio", "url": "http://127.0.0.1:1234",
+                                  "model": "missing/model"}}
+        wizard.original_config = json.loads(json.dumps(wizard.config))
+        wizard.state = SimpleNamespace(
+            saved_choices=lambda: {"values": {"model": "missing/model"},
+                                   "base_config_hash": "base"},
+            remember_choices=Mock())
+        wizard.ui = SimpleNamespace(header=Mock(), info=Mock(), warn=Mock(),
+                                    choose=Mock(return_value="model:qwen/qwen3.8-27b"))
+        wizard._restore_choices = True
+        with patch.object(wizard, "preflight"), \
+             patch.object(core, "_query_lmstudio_models",
+                          return_value=["qwen/qwen3.8-27b", "lightonocr-2-1b"]):
+            self.assertTrue(wizard.collect())
+        self.assertEqual(wizard.settings["model"], "qwen/qwen3.8-27b")
+        wizard.ui.choose.assert_called_once()
+        wizard.state.remember_choices.assert_called_once()
+
+    def test_auto_resume_rejects_stale_lmstudio_model_with_available_ids(self):
+        wizard = core.Wizard.__new__(core.Wizard)
+        wizard.args = SimpleNamespace(auto=True)
+        wizard.settings = {"backend": "lmstudio"}
+        wizard.config = {"qwen": {"model": "missing/model", "url": "http://127.0.0.1:1234"}}
+        with patch.object(core, "_query_lmstudio_models", return_value=["available/model"]):
+            with self.assertRaisesRegex(RuntimeError, "available models: available/model"):
+                wizard.choose_model(force=True)
+
+    def test_lmstudio_model_discovery_uses_local_cli_if_server_is_down(self):
+        body = json.dumps([{"type": "llm", "modelKey": "qwen/model"},
+                           {"type": "embedding", "modelKey": "embed/model"}])
+        result = subprocess.CompletedProcess([], 0, stdout=body, stderr="")
+        with patch.object(core, "_query_model_ids", return_value=[]), \
+             patch.object(core, "_find_lms", return_value="/fake/lms"), \
+             patch.object(core.subprocess, "run", return_value=result):
+            self.assertEqual(core._query_lmstudio_models("http://127.0.0.1:1234"), ["qwen/model"])
+
     def test_doctor_reports_missing_model_before_resource_gated_harness_audit(self):
         supervisor = SimpleNamespace(url="http://127.0.0.1:1234",
                                      model_id=Mock(side_effect=RuntimeError(

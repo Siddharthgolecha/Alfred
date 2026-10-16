@@ -260,6 +260,26 @@ def _find_lms():
                  if (root / name).is_file() and os.access(root / name, os.X_OK)), None)
 
 
+def _query_lmstudio_models(url):
+    """List local LM Studio LLMs, whether or not its API server is started."""
+    served = _query_model_ids(url)
+    if served:
+        return served
+    binary = _find_lms()
+    if not binary:
+        return []
+    try:
+        result = subprocess.run([binary, "ls", "--json"], capture_output=True,
+                                text=True, timeout=8, check=False)
+        rows = json.loads(result.stdout) if result.returncode == 0 else []
+        return list(dict.fromkeys(
+            str(row.get("modelKey") or row.get("indexedModelIdentifier"))
+            for row in rows if isinstance(row, dict) and row.get("type") == "llm"
+            and (row.get("modelKey") or row.get("indexedModelIdentifier"))))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return []
+
+
 def _query_ollama_models():
     try:
         with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=2) as response:
@@ -666,10 +686,11 @@ class Wizard:
                                                    default=default, back=True)
         return self.settings["backend"]
 
-    def choose_model(self):
+    def choose_model(self, *, force=False):
         backend = self.settings["backend"]
         saved = self.config.get("qwen", {}).get("model", "")
-        if backend in ("skip", "llamacpp") or self.settings.get("skip_models"):
+        self.settings["model_deferred"] = False
+        if backend in ("skip", "llamacpp"):
             self.settings["model"] = saved
         elif backend == "ollama":
             installed = _query_ollama_models()
@@ -698,19 +719,34 @@ class Wizard:
                 else:
                     self.settings["model"] = selected.split(":", 1)[1]
         elif backend == "lmstudio":
-            models = _query_model_ids("http://127.0.0.1:1234")
-            rows = [(f"model:{model}", model, "Currently served by LM Studio.") for model in models]
+            url = self.config.get("qwen", {}).get("url", "http://127.0.0.1:1234")
+            models = _query_lmstudio_models(url)
+            rows = [(f"model:{model}", model, "Available in LM Studio.") for model in models]
             rows.append(("later", "Configure the model later", "Load a model in LM Studio before starting Alfred."))
-            if self.args.auto or getattr(self, "quick", False):
+            saved_available = saved in models
+            if self.args.auto:
+                if not saved_available:
+                    available = ", ".join(models) if models else "none detected"
+                    requested = repr(saved) if saved else "no model is configured"
+                    raise RuntimeError(f"LM Studio has {requested}; available models: {available}. "
+                                       "Rerun interactively to choose one")
                 self.settings["model"] = saved
+                return
+            if getattr(self, "quick", False) and saved_available:
+                self.settings["model"] = saved
+                return
+            default = next((i for i, row in enumerate(rows)
+                            if row[0] == f"model:{saved}"), len(rows) - 1)
+            selected = self.ui.choose("Choose an available LM Studio model", _options(rows),
+                                      default=default, back=not force)
+            if selected == "__back__":
+                self.settings["model"] = "__back__"
+            elif selected == "later":
+                self.settings["model"] = ""
+                self.settings["model_deferred"] = True
             else:
-                selected = self.ui.choose("Choose a model loaded in LM Studio", _options(rows), back=True)
-                if selected == "__back__":
-                    self.settings["model"] = "__back__"
-                elif selected == "later":
-                    self.settings["model"] = ""
-                else:
-                    self.settings["model"] = selected.split(":", 1)[1]
+                self.settings["model"] = selected.split(":", 1)[1]
+                self.settings["model_deferred"] = False
         else:
             self.settings["model"] = saved
 
@@ -752,6 +788,21 @@ class Wizard:
                                              or self.args.skip_models
                                              or _read_env_bool("ALFRED_SKIP_MODELS"))
             self.ui.info("Resuming with the saved setup choices; completed steps will be verified and reused.")
+            if self.settings.get("backend") == "lmstudio":
+                url = self.config.get("qwen", {}).get("url", "http://127.0.0.1:1234")
+                saved_model = self.config.get("qwen", {}).get("model", "")
+                available = _query_lmstudio_models(url)
+                if saved_model not in available:
+                    self.ui.warn("Saved LM Studio model is not available: " + (saved_model or "(none selected)"))
+                    self.choose_model(force=True)
+                    if self.settings.get("model") == "__back__":
+                        self.settings["model"] = saved_model
+                    else:
+                        saved_choices = self.state.saved_choices() or {}
+                        self.state.remember_choices(
+                            self.settings,
+                            base_config_hash=saved_choices.get("base_config_hash",
+                                                              fingerprint(self.original_config)))
             return True
         if self.installed and not self.args.customize and not self.args.auto:
             flow = self.ui.choose("Welcome back. What would you like to do?", _options([
@@ -818,6 +869,8 @@ class Wizard:
                 qwen["url"] = defaults.get(configured_backend, "")
             if self.settings.get("model"):
                 qwen["model"] = self.settings["model"]
+        elif self.settings.get("model_deferred"):
+            qwen["model"] = ""
 
     def _step(self, name, inputs, check, action):
         receipt = self.state.data["steps"].get(name, {})

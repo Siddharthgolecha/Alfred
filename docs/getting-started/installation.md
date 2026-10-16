@@ -54,7 +54,9 @@ The installer uses Python's standard library for its terminal interface. It guid
 setup, checks the selected platform, and verifies the pinned Harness wheels before installation.
 When LM Studio is selected with a loopback URL, the installer starts its local API server on the
 configured port if it is not already running. It does not download or load a model implicitly;
-the setup summary reports when the configured model is not available from that server.
+it lists locally available models and asks you to select one when the saved model ID is stale. The
+starter config leaves the LM Studio model unset so setup can use the model IDs actually on your
+machine. Headless setup stops with the available IDs instead of silently selecting a different model.
 `--repair` rebuilds Alfred's Python environment while preserving the old one. It cannot repair a
 missing model or bypass runtime resource checks. The installer returns status 2 when installation
 completes but required readiness checks still fail; use the reported component diagnosis to resolve
