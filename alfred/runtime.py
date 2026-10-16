@@ -14,6 +14,7 @@ import threading
 import time
 
 from .constants import Limits, Timeouts, Truncation
+from .platform_utils import sample_resources as _platform_sample_resources, system_uptime_seconds
 
 LOG = logging.getLogger(__name__)
 
@@ -205,14 +206,11 @@ class Store:
         return events
 
 def meminfo():
+    """Return available and total memory in MiB; cross-platform."""
+    sample = _platform_sample_resources()
     out = {}
-    try:
-        for line in Path("/proc/meminfo").read_text().splitlines():
-            if line.startswith(("MemTotal:", "MemAvailable:")):
-                name, value = line.split(":",1)
-                out[name] = int(value.strip().split()[0]) // 1024
-    except (OSError, ValueError):
-        pass
+    if sample.get("available_mib") is not None:
+        out["MemAvailable"] = int(sample["available_mib"])
     return out
 
 def gpu_status():
@@ -223,6 +221,8 @@ def gpu_status():
     p = subprocess.Popen([binary,"--interval","1000"],stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL, text=True)
     try:
+        # select is available on all POSIX platforms (Linux, macOS); not on Windows.
+        # tegrastats only exists on Jetson (Linux), so this code path is Linux-only.
         import select
         ready,_,_ = select.select([p.stdout], [], [], Timeouts.TEGRASTATS_READ)
         line = p.stdout.readline().strip() if ready else ""
@@ -240,15 +240,14 @@ def gpu_status():
 
 def status():
     disk = shutil.disk_usage("/")
-    uptime = 0
     try:
-        uptime = round(float(Path("/proc/uptime").read_text().split()[0]))
-    except (OSError, ValueError, IndexError):
-        pass
-    return {"load_1_5_15":os.getloadavg(),
-            "memory_mib":meminfo(),
-            "root_free_gib":round(disk.free/1024**3,2),
-            "uptime_seconds":uptime}
+        load = os.getloadavg()
+    except (OSError, AttributeError):
+        load = (None, None, None)
+    return {"load_1_5_15": load,
+            "memory_mib": meminfo(),
+            "root_free_gib": round(disk.free / 1024**3, 2),
+            "uptime_seconds": system_uptime_seconds()}
 
 def _valid_name(name: str) -> bool:
     """Return True if *name* is a safe service or task name."""

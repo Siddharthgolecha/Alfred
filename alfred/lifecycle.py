@@ -10,8 +10,11 @@ import socket
 import stat
 import struct
 import subprocess
+import sys
 import threading
 import time
+
+from .platform_utils import HAS_AF_UNIX, IS_WINDOWS
 
 LOG = logging.getLogger(__name__)
 
@@ -21,8 +24,12 @@ def control_dir(logdir):
     path = Path(logdir).expanduser() / ".control"
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = path.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-        raise PermissionError(f"Unsafe Alfred control directory: {path} (must be owned by you, mode 0700)")
+    # Windows has no uid; skip the ownership/permission check there.
+    if not IS_WINDOWS:
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise PermissionError(
+                f"Unsafe Alfred control directory: {path} (must be owned by you, mode 0700)"
+            )
     return path
 
 
@@ -67,9 +74,10 @@ class ShutdownSocket:
         if bound_here or descriptor_bound:
             try:
                 info = self.path.lstat()
+                uid_ok = IS_WINDOWS or info.st_uid == os.getuid()
                 if (
                     stat.S_ISSOCK(info.st_mode)
-                    and info.st_uid == os.getuid()
+                    and uid_ok
                     and (self._inode is None or info.st_ino == self._inode)
                 ):
                     self.path.unlink()
@@ -77,12 +85,17 @@ class ShutdownSocket:
                 pass
 
     def __enter__(self):
+        if not HAS_AF_UNIX:
+            # Windows without AF_UNIX support: shutdown socket is unavailable;
+            # behave as a no-op context manager.
+            return self
         listener_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         bound_here = False
         try:
             if self.path.is_symlink() or self.path.exists():
                 info = self.path.lstat()
-                if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+                uid_mismatch = not IS_WINDOWS and info.st_uid != os.getuid()
+                if not stat.S_ISSOCK(info.st_mode) or uid_mismatch:
                     raise PermissionError(f"Unsafe Alfred control socket: {self.path}")
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
                     try:
@@ -145,13 +158,15 @@ class ShutdownSocket:
                     LOG.debug("Close request failed: %s", exc)
 
     def __exit__(self, exc_type, exc, tb):
+        if not HAS_AF_UNIX:
+            return  # No-op on platforms without AF_UNIX.
         self._stop.set()
         if self._socket is not None:
             self._socket.close()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=2)
         try:
-            if self.path.lstat().st_ino == self._inode:
+            if self._inode is not None and self.path.lstat().st_ino == self._inode:
                 self.path.unlink()
         except FileNotFoundError:
             pass
@@ -159,6 +174,8 @@ class ShutdownSocket:
 
 def request_close(logdir, role, wait_seconds=15):
     """Ask the live instance to stop; never send signals to a saved PID."""
+    if not HAS_AF_UNIX:
+        return False  # Shutdown socket not supported on this platform.
     path = _socket_path(logdir, role)
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(3)
@@ -202,11 +219,21 @@ class ChildProcesses:
         if process.poll() is not None:
             return
         try:
-            if os.getpgid(process.pid) == process.pid:
-                os.killpg(process.pid, sig)
+            if IS_WINDOWS:
+                # Windows has no process groups; terminate/kill the process directly.
+                if sig == signal.SIGTERM:
+                    process.terminate()
+                else:
+                    process.kill()
             else:
-                process.send_signal(sig)
-        except ProcessLookupError:
+                try:
+                    if os.getpgid(process.pid) == process.pid:
+                        os.killpg(process.pid, sig)
+                    else:
+                        process.send_signal(sig)
+                except ProcessLookupError:
+                    pass
+        except OSError:
             pass
 
     @classmethod
@@ -226,15 +253,20 @@ class ChildProcesses:
 
     def run(self, argv, *, timeout, capture_output=False, text=False, check=False):
         """A cancellable subset of subprocess.run for approved local commands."""
+        popen_kwargs: dict = dict(
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if capture_output else None,
+            stderr=subprocess.PIPE if capture_output else None,
+            text=text,
+        )
+        if IS_WINDOWS:
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
         with self._lock:
             if self._stopping.is_set():
                 raise RuntimeError("Alfred is shutting down; refusing new subprocess")
-            process = subprocess.Popen(
-                argv, stdin=subprocess.DEVNULL, start_new_session=True,
-                stdout=subprocess.PIPE if capture_output else None,
-                stderr=subprocess.PIPE if capture_output else None,
-                text=text,
-            )
+            process = subprocess.Popen(argv, **popen_kwargs)
             self._children.add(process)
         try:
             try:

@@ -14,6 +14,8 @@ from pathlib import Path
 import threading
 import time
 
+from .platform_utils import sample_resources as _platform_sample_resources
+
 
 @dataclass(frozen=True)
 class AdmissionConfig:
@@ -46,25 +48,12 @@ class AdmissionRejected(RuntimeError):
 
 
 def linux_resources():
-    """Best-effort local sample; never run tegrastats subprocess in audio path."""
-    info={}
-    try:
-        for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
-            name,_,rest=line.partition(":")
-            if name in ("MemAvailable","SwapTotal","SwapFree","MemTotal"):
-                info[name]=int(rest.strip().split()[0]) / 1024.0
-    except (OSError,ValueError,IndexError):
-        return {"available_mib":None,"swap_used_mib":None,
-                "cpu_load_per_core":None}
-    try:
-        count=os.cpu_count() or 1
-        load=os.getloadavg()[0]/max(1,count)
-    except OSError:
-        load=None
-    return {"available_mib":info.get("MemAvailable"),
-            "swap_used_mib":max(0,info["SwapTotal"]-info["SwapFree"])
-                            if "SwapTotal" in info and "SwapFree" in info else None,
-            "cpu_load_per_core":load}
+    """Best-effort local sample; never run tegrastats subprocess in audio path.
+
+    On non-Linux platforms this falls back to the cross-platform sampler in
+    :mod:`alfred.platform_utils`.  Kept for backward-compat (tests patch this).
+    """
+    return _platform_sample_resources()
 
 
 class InferenceAdmission:
@@ -88,7 +77,7 @@ class InferenceAdmission:
     def __init__(self, config: AdmissionConfig | None = None, *,
                  enabled=False, min_available_mib=512,
                  max_swap_used_mib=1024, max_cpu_load_per_core=3.0,
-                 max_wait_ms=200, sampler=linux_resources,
+                 max_wait_ms=200, sampler=_platform_sample_resources,
                  clock=time.monotonic):
         if config is not None:
             if not isinstance(config, AdmissionConfig):

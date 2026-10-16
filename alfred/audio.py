@@ -1,7 +1,10 @@
-"""PulseAudio/PipeWire capture with BlueZ headset profile negotiation.
+"""Audio capture backends for Alfred.
 
-Sony WI-C100 exposes its microphone using HFP/HSP, not A2DP.
-Never use a monitor source as a microphone.
+Linux:  PulseAudio/PipeWire via pactl/parec with BlueZ headset profile negotiation.
+        Sony WI-C100 exposes its microphone using HFP/HSP, not A2DP.
+        Never use a monitor source as a microphone.
+macOS:  CoreAudio via ``sox rec`` (recommended) or ``ffmpeg -f avfoundation``.
+        Install sox with ``brew install sox`` for the best experience.
 """
 from __future__ import annotations
 
@@ -13,9 +16,11 @@ import os
 import re
 import select
 import subprocess
+import sys
 import time
 
 from .exceptions import AlfredError
+from .platform_utils import IS_LINUX, IS_MACOS
 
 LOG = logging.getLogger(__name__)
 RATE = 16000
@@ -143,10 +148,209 @@ def source_status_explicit(source):
         return True, reason
     return True, "explicit direct source; must pass capture probe"
 
+# ---------------------------------------------------------------------------
+# macOS CoreAudio backend — must be defined before AudioManager references it.
+# ---------------------------------------------------------------------------
+
+def _macos_find_tool() -> str | None:
+    """Return the first available PCM capture tool name, or None."""
+    import shutil as _shutil
+    for tool in ("sox", "ffmpeg"):
+        if _shutil.which(tool):
+            return tool
+    return None
+
+
+def _macos_capture_command(tool: str, rate: int) -> list[str]:
+    """Build the subprocess argv for raw s16le mono capture."""
+    if tool == "sox":
+        # sox rec: read from default input device, output raw s16le to stdout.
+        return [
+            "sox", "-q", "-d",
+            "--type", "raw", "--rate", str(rate), "--channels", "1",
+            "--encoding", "signed-integer", "--bits", "16",
+            "-",
+        ]
+    # ffmpeg: AVFoundation input device on macOS, output raw s16le to stdout.
+    return [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-f", "avfoundation", "-i", ":default",
+        "-ar", str(rate), "-ac", "1",
+        "-f", "s16le", "-",
+    ]
+
+
+class MacAudioManager:
+    """Minimal CoreAudio capture using sox or ffmpeg.
+
+    Provides the same public interface as :class:`AudioManager` so the rest of
+    Alfred is unaware of the platform difference.
+    """
+
+    def __init__(self, cfg: dict) -> None:
+        self.config = cfg
+        self.process: subprocess.Popen | None = None
+        self.active_source: str | None = None
+        self._prefetched: bytes = b""
+        self._tool: str | None = None
+
+    # --- public interface (mirrors AudioManager) ---
+
+    def candidate_sources(self) -> list[str]:
+        tool = _macos_find_tool()
+        if tool is None:
+            return []
+        return ["default"]
+
+    def choose_source(self) -> str | None:
+        candidates = self.candidate_sources()
+        return candidates[0] if candidates else None
+
+    def diagnostics(self) -> list[dict]:
+        tool = _macos_find_tool()
+        if tool is None:
+            return [
+                {
+                    "name": "default",
+                    "description": "macOS default input",
+                    "eligible": False,
+                    "reason": "No capture tool found; install sox (brew install sox)",
+                }
+            ]
+        return [
+            {
+                "name": "default",
+                "description": "macOS default CoreAudio input",
+                "eligible": True,
+                "reason": f"CoreAudio via {tool}; must pass capture probe",
+            }
+        ]
+
+    def ensure_input(self) -> str:
+        """Open capture and verify live PCM delivery."""
+        tool = _macos_find_tool()
+        if tool is None:
+            raise AudioUnavailableError(
+                "No audio capture tool found on macOS. "
+                "Install sox with: brew install sox"
+            )
+        self.close()
+        self._open(tool)
+        # Probe: read ~100 ms to confirm PCM delivery.
+        probe_bytes = RATE // 10 * 2
+        timeout = float(self.config.get("probe_timeout_seconds", 5))
+        self._prefetched = self._read_pcm(probe_bytes, timeout)
+        self._tool = tool
+        LOG.info("Validated macOS microphone: %s (live PCM received)", tool)
+        return "default"
+
+    def close(self) -> None:
+        proc, self.process = self.process, None
+        self.active_source = None
+        self._prefetched = b""
+        if proc:
+            if proc.poll() is None:
+                proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+            if proc.stdout:
+                proc.stdout.close()
+
+    def frames(self):
+        """Produce PCM buffers or raise AudioUnavailableError."""
+        samples = RATE * int(self.config["frame_ms"]) // 1000
+        nbytes = samples * 2
+        if self.process is None:
+            self.ensure_input()
+        consecutive_failures = 0
+        while True:
+            try:
+                data = self._prefetched
+                self._prefetched = b""
+                if len(data) < nbytes:
+                    data += self._read_pcm(
+                        nbytes - len(data),
+                        float(self.config.get("read_timeout_seconds", 5)),
+                    )
+                if len(data) > nbytes:
+                    self._prefetched = data[nbytes:]
+                    data = data[:nbytes]
+            except AudioUnavailableError as exc:
+                consecutive_failures += 1
+                self.close()
+                if consecutive_failures >= 3:
+                    raise AudioUnavailableError(
+                        "Microphone capture repeatedly stopped delivering audio "
+                        "after 3 recovery attempts; stopping Alfred."
+                    ) from exc
+                self.ensure_input()
+                continue
+            consecutive_failures = 0
+            pcm = array("h")
+            pcm.frombytes(data)
+            yield [value / 32768.0 for value in pcm]
+
+    # --- private helpers ---
+
+    def _open(self, tool: str) -> None:
+        args = _macos_capture_command(tool, RATE)
+        try:
+            self.process = subprocess.Popen(
+                args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0
+            )
+        except OSError as exc:
+            raise AudioUnavailableError(
+                f"Cannot launch {tool} for CoreAudio capture: {exc}. "
+                "Install sox with: brew install sox"
+            ) from exc
+        self.active_source = "default"
+        LOG.info("Opening macOS microphone via %s (%d Hz)", tool, RATE)
+
+    def _read_pcm(self, nbytes: int, timeout: float) -> bytes:
+        if self.process is None or self.process.stdout is None:
+            raise AudioUnavailableError("Audio capture is not running")
+        end = time.monotonic() + timeout
+        buf = bytearray()
+        while len(buf) < nbytes:
+            if self.process.poll() is not None:
+                raise AudioUnavailableError(
+                    f"Capture process terminated (exit {self.process.returncode})"
+                )
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                raise AudioUnavailableError(
+                    f"No audio frames received within {timeout}s"
+                )
+            # select is available on macOS (POSIX); not on Windows.
+            import select as _select
+            readable, _, _ = _select.select([self.process.stdout], [], [], remaining)
+            if not readable:
+                continue
+            chunk = os.read(self.process.stdout.fileno(), nbytes - len(buf))
+            if not chunk:
+                raise AudioUnavailableError("Audio stream closed unexpectedly")
+            buf.extend(chunk)
+        return bytes(buf)
+
+
+# ---------------------------------------------------------------------------
+# Primary (Linux) AudioManager — delegates to MacAudioManager on macOS.
+# ---------------------------------------------------------------------------
+
 class AudioManager:
-    """Auto mode prefers WI-C100 HFP mic, then an approved direct microphone."""
+    """Cross-platform audio capture manager.
+
+    On Linux, drives PulseAudio/PipeWire directly via pactl/parec.
+    On macOS, delegates to :class:`MacAudioManager` (sox or ffmpeg).
+    """
+
     def __init__(self, cfg):
         self.config = cfg
+        # On macOS, delegate all I/O to MacAudioManager.
+        self._mac: MacAudioManager | None = MacAudioManager(cfg) if IS_MACOS else None
         self.active_source = None
         self.process = None
         self.last_check = 0
@@ -224,6 +428,8 @@ class AudioManager:
 
     def diagnostics(self):
         """All advertised inputs with rejection reasons; no false 'mic connected' claim."""
+        if self._mac is not None:
+            return self._mac.diagnostics()
         direct = self.config.get("direct_source")
         entries = []
         for src in pactl_json("sources"):
@@ -236,6 +442,8 @@ class AudioManager:
 
     def candidate_sources(self) -> list:
         """Return eligible source names ordered by preference."""
+        if self._mac is not None:
+            return self._mac.candidate_sources()
         mode=self.config["mode"]
         if mode!="direct":
             if self._headset_card() is None:
@@ -314,6 +522,10 @@ class AudioManager:
 
     def ensure_input(self):
         """Require an eligible source AND live PCM delivery before voice startup."""
+        if self._mac is not None:
+            result = self._mac.ensure_input()
+            self.active_source = self._mac.active_source
+            return result
         candidates=self.candidate_sources()
         if not candidates:
             self.close()
@@ -338,6 +550,10 @@ class AudioManager:
             ". Check Bluetooth HFP, the input ports, or permissions.")
 
     def close(self):
+        if self._mac is not None:
+            self._mac.close()
+            self.active_source = None
+            return
         proc, self.process = self.process, None
         self.active_source = None
         self._prefetched = b""
@@ -354,6 +570,9 @@ class AudioManager:
 
     def frames(self):
         """Produce PCM buffers or raise AudioUnavailableError; never retry forever."""
+        if self._mac is not None:
+            yield from self._mac.frames()
+            return
         samples=RATE*int(self.config["frame_ms"])//1000
         nbytes=samples*2
         if self.process is None:
@@ -431,3 +650,5 @@ class UtteranceStream:
                         quiet = 0
                 history.clear()
             yield segment()
+
+
