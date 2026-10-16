@@ -330,6 +330,8 @@ class IntegrationAdmissionTests(unittest.TestCase):
                 admission=app.admission)
         self.assertEqual(result["status"],"incomplete")
         self.assertEqual(result["results"],[])
+        self.assertIn("available memory 150 MiB is below 512 MiB",
+                      result["message"])
         start_qwen.assert_not_called()
         plan.assert_not_called()
 
@@ -374,32 +376,29 @@ class IntegrationAdmissionTests(unittest.TestCase):
             request.assert_not_called()
         self.assertEqual(self.app.system2.approvals.pending(),[])
 
-    def test_watchdog_during_capture_sleeps_and_stops_promptly(self):
-        # The scheduler starts independently; no real model/server is needed.
+    def test_watchdog_health_checks_never_compete_for_inference_slot(self):
+        # Health polling is read-only, even when voice capture is idle.
         self.app.cfg["qwen"]["enabled"]=True
         self.app.cfg["qwen"]["supervisor_poll_seconds"]=1
         self.app.scheduler.start=Mock()
         self.app.supervisor.ensure_running=Mock(return_value=True)
         self.app.supervisor.status=Mock(return_value={"health":"ready"})
-        self.app.admission.set_capture_active(True)
-        real_wait=self.app._watchdog_stop.wait
-        with patch.object(self.app._watchdog_stop,"wait",wraps=real_wait) as wait:
-            self.app.start_services()
-            time.sleep(.12)
-            self.assertTrue(self.app._watchdog_thread.is_alive())
-            self.assertGreaterEqual(wait.call_count,1)
-            self.assertLessEqual(wait.call_count,2,
-                                 "watchdog spun instead of deferring capture")
-            self.app.supervisor.ensure_running.assert_not_called()
-            self.app.admission.set_capture_active(False)
-            deadline=time.monotonic()+2
-            while self.app.supervisor.ensure_running.call_count==0 and time.monotonic()<deadline:
-                time.sleep(.02)
-            self.app.supervisor.ensure_running.assert_called_once()
-            stopped=time.monotonic()
-            self.app.close()
-            self.assertFalse(self.app._watchdog_thread.is_alive())
-            self.assertLess(time.monotonic()-stopped,.8)
+        with patch.object(self.app.admission,"claim",
+                          side_effect=AssertionError("watchdog must not claim inference")):
+            real_wait=self.app._watchdog_stop.wait
+            with patch.object(self.app._watchdog_stop,"wait",wraps=real_wait) as wait:
+                self.app.start_services()
+                time.sleep(.12)
+                self.assertTrue(self.app._watchdog_thread.is_alive())
+                self.assertGreaterEqual(wait.call_count,1)
+                self.assertLessEqual(wait.call_count,2,
+                                     "watchdog spun instead of polling")
+                self.app.supervisor.status.assert_called()
+                self.app.supervisor.ensure_running.assert_not_called()
+                stopped=time.monotonic()
+                self.app.close()
+                self.assertFalse(self.app._watchdog_thread.is_alive())
+                self.assertLess(time.monotonic()-stopped,.8)
 
     def test_no_second_managed_backend_spawn_under_admission(self):
         with patch.object(self.app.supervisor,"ensure_running",return_value=True) as ensure:

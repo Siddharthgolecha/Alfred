@@ -277,7 +277,7 @@ class Qwen:
         return answer[:Limits.QWEN_ANSWER_MAX]
 
 from .stt import STTEngineProtocol, WhistleSTTEngine
-from .system1 import Needle3Engine, System1RouterProtocol
+from .system1 import System1, System1RouterProtocol
 
 
 class Cactus:
@@ -291,7 +291,7 @@ class Cactus:
         stt_engine: STTEngineProtocol | None = None,
     ) -> None:
         self.admission = admission
-        self._router = router_engine or Needle3Engine(schemas, admission=admission)
+        self._router = router_engine or System1(schemas, admission=admission)
         self._stt = stt_engine or WhistleSTTEngine(admission=admission)
         self.agent = getattr(self._router, "agent", self._router)
         self.whistle = getattr(self._stt, "whistle", self._stt)
