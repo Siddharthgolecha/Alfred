@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 from alfred.audio import AudioManager, AudioUnavailableError, source_status
 from alfred.app import doctor, main
 from alfred.config import load_config
+from alfred.platform_utils import IS_LINUX
 
 BUILTIN = {
     "name":"alsa_input.platform-tegra-sound.stereo-fallback",
@@ -38,6 +39,7 @@ def fake_sources(items):
         raise ValueError(target)
     return probe
 
+@unittest.skipUnless(IS_LINUX, "Linux PulseAudio/PipeWire tests (skipped on non-Linux)")
 class SourceClassificationTests(unittest.TestCase):
     def setUp(self):
         self.cfg=load_config()["audio"]

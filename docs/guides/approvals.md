@@ -43,14 +43,14 @@ sequenceDiagram
 2. **Review.** List what is waiting:
 
    ```bash
-   alfred --config config.json --pending
+   alfred --pending
    ```
 
 3. **Decide.** Run it once, or discard it:
 
    ```bash
-   alfred --config config.json --approve 7
-   alfred --config config.json --reject 7
+   alfred --approve 7
+   alfred --reject 7
    ```
 
 `--pending`, `--approve` and `--reject` load no speech models and print JSON. `--reject` prints

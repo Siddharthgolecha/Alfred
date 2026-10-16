@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .constants import Limits, Patterns, Timeouts, TTL
+from .platform_utils import _default_data_dir, _default_state_dir
 
 DEFAULT = {
     "audio": {
@@ -31,8 +32,8 @@ DEFAULT = {
         "max_tokens": 500, "enabled": True, "supervisor_poll_seconds": 30
     },
     "runtime": {
-        "database": "~/.local/share/alfred/alfred.db",
-        "logs": "~/.local/state/alfred",
+        "database": str(Path(_default_data_dir()) / "alfred.db"),
+        "logs": _default_state_dir(),
         "allowed_services": [], "named_tasks": {},
         "needle_confidence_floor": 0.7, "max_plan_steps": 5,
         "approval_ttl_seconds": 180,
@@ -300,8 +301,8 @@ class RuntimeConfig(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    database: str = "~/.local/share/alfred/alfred.db"
-    logs: str = "~/.local/state/alfred"
+    database: str = str(Path(_default_data_dir()) / "alfred.db")
+    logs: str = _default_state_dir()
     allowed_services: list[str] = Field(default_factory=list)
     named_tasks: dict[str, Any] = Field(default_factory=dict)
     needle_confidence_floor: float = 0.7

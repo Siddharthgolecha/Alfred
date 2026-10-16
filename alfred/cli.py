@@ -17,6 +17,7 @@ from .lifecycle import ShutdownSocket, request_close
 from .cognitive.harness_sdk import LocalHarness, HarnessUnavailable
 from .cognitive import Decision, Escalation, ApprovalReference, Completion
 from .app import Alfred
+from .platform_utils import IS_LINUX
 
 LOG = logging.getLogger(__name__)
 
@@ -43,13 +44,14 @@ def _diagnose_audio(cfg) -> bool:
         print(f"MICROPHONE NOT CONNECTED / AUDIO SERVER FAILURE: {exc}")
     finally:
         manager.close()
-    try:
-        for card in pactl_json("cards"):
-            if str(card.get("name", "")).startswith("bluez_card"):
-                print("Bluetooth card:", card.get("name"),
-                      "profile:", card.get("active_profile"))
-    except (OSError, ValueError, RuntimeError) as exc:
-        print("Bluetooth profile detection unavailable:", exc)
+    if IS_LINUX:
+        try:
+            for card in pactl_json("cards"):
+                if str(card.get("name", "")).startswith("bluez_card"):
+                    print("Bluetooth card:", card.get("name"),
+                          "profile:", card.get("active_profile"))
+        except (OSError, ValueError, RuntimeError) as exc:
+            print("Bluetooth profile detection unavailable:", exc)
     return healthy
 
 
@@ -178,6 +180,12 @@ def _main(argv=None) -> int:
     args = parser.parse_args(argv)
     path = Path(args.config)
     config = load_config(path if path.exists() else None)
+    if not path.exists() and args.config == "config.json":
+        print(
+            "[alfred] No config.json found — using built-in defaults. "
+            "Run ./install.sh to customise.",
+            flush=True,
+        )
     logs = Path(config["runtime"]["logs"]).expanduser()
     logs.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
@@ -422,7 +430,9 @@ def _main(argv=None) -> int:
 
 
 def main(argv=None) -> int:
-    """Systemd SIGTERM and terminal Ctrl+C both unwind Python finally blocks."""
+    """Systemd/macOS SIGTERM and terminal Ctrl+C both unwind Python finally blocks."""
+    # SIGTERM is a real signal on POSIX (Linux, macOS); on Windows it is supported
+    # by Python's signal module but behaves identically to KeyboardInterrupt.
     previous = signal.getsignal(signal.SIGTERM)
 
     def on_term(signum, frame):

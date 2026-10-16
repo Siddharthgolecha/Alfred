@@ -14,7 +14,7 @@ With no operation flag, Alfred starts **voice mode**. Source:
 
 | Option | Meaning |
 |---|---|
-| `--config PATH` | JSON config file. Default `config.json`. If the file does not exist, built-in defaults are used. See [Configuration](configuration.md). |
+| `--config PATH` | JSON config file. Default `config.json`. Optional: when omitted or when the file does not exist, Alfred uses built-in defaults. See [Configuration](configuration.md). |
 | `--resume-session SESSION_ID` | Reuse a prior local session ID. Interrupted tools are never replayed. Allowed only with voice mode, `--text` and `--reason`. |
 
 ## Operations
@@ -122,16 +122,16 @@ stopped. A previously installed handler is restored on exit.
 
 ```bash
 # Check the setup without loading models
-alfred --config config.json --doctor
+alfred --doctor
 
 # One text command
-alfred --config config.json --text "show GPU status"
+alfred --text "show GPU status"
 
 # Plan without the microphone; review and approve locally
-alfred --config config.json --reason "Restart the scheduler"
-alfred --config config.json --pending
-alfred --config config.json --approve 7
+alfred --reason "Restart the scheduler"
+alfred --pending
+alfred --approve 7
 
 # Retain a preference (needs context persistence enabled)
-alfred --config config.json --memory-set unit_preference=celsius
+alfred --memory-set unit_preference=celsius
 ```

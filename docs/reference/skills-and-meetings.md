@@ -19,7 +19,7 @@ deletion or QR/OBEX delivery works on a Jetson. None of this is hardware-validat
 ## Skill registry
 
 ```bash
-alfred --config config.json --skills
+alfred --skills
 ```
 
 Prints a JSON list. No models, microphone or network are used. Each entry has `name`, `category`,
