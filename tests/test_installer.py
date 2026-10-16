@@ -9,8 +9,11 @@ import tempfile
 from types import SimpleNamespace
 import urllib.error
 import unittest
+from contextlib import nullcontext, redirect_stdout
 from unittest.mock import Mock, patch
 
+import alfred.app  # Load the composition root before its CLI compatibility re-export.
+from alfred import cli
 from scripts.installer import core
 from scripts.installer.state import InstallerLock, InstallerState
 from scripts.installer.ui import Terminal
@@ -20,6 +23,38 @@ from alfred.platform_utils import IS_WINDOWS
 
 
 class InstallerUITests(unittest.TestCase):
+    def test_doctor_reports_missing_model_before_resource_gated_harness_audit(self):
+        supervisor = SimpleNamespace(url="http://127.0.0.1:1234",
+                                     model_id=Mock(side_effect=RuntimeError(
+                                         "model 'wanted' is unavailable; served models: ['other']")))
+        cfg = {"qwen": {"enabled": True}, "runtime": {}}
+        output = io.StringIO()
+        with patch.object(cli, "LocalHarness") as harness, \
+             patch.object(cli, "InferenceAdmission") as admission, \
+             redirect_stdout(output):
+            ready = cli._diagnose_harness(
+                cfg, supervisor, {"health": "ready", "model": None})
+        self.assertFalse(ready)
+        self.assertIn("served models: ['other']", output.getvalue())
+        self.assertIn("configured Qwen model is not served", output.getvalue())
+        harness.assert_not_called()
+        admission.assert_not_called()
+
+    def test_installer_returns_two_when_doctor_reports_unready(self):
+        wizard = Mock()
+        wizard.collect.return_value = True
+        wizard.settings = {"service": False}
+        wizard.config_path = Path("config.json")
+        wizard.install.return_value = Path(".venv/bin/python")
+        ui = SimpleNamespace(warn=Mock(), info=Mock(), error=Mock(), section=Mock(),
+                             ok=Mock(), header=Mock())
+        result = subprocess.CompletedProcess([], 2)
+        with patch.object(core, "Terminal", return_value=ui), \
+             patch.object(core, "InstallerLock", return_value=nullcontext()), \
+             patch.object(core, "Wizard", return_value=wizard), \
+             patch.object(core.subprocess, "run", return_value=result):
+            self.assertEqual(core.main(["--auto"]), 2)
+
     def test_lm_studio_setup_starts_local_server_on_configured_port(self):
         wizard = core.Wizard.__new__(core.Wizard)
         wizard.system = "Darwin"

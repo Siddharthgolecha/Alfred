@@ -55,6 +55,10 @@ setup, checks the selected platform, and verifies the pinned Harness wheels befo
 When LM Studio is selected with a loopback URL, the installer starts its local API server on the
 configured port if it is not already running. It does not download or load a model implicitly;
 the setup summary reports when the configured model is not available from that server.
+`--repair` rebuilds Alfred's Python environment while preserving the old one. It cannot repair a
+missing model or bypass runtime resource checks. The installer returns status 2 when installation
+completes but required readiness checks still fail; use the reported component diagnosis to resolve
+the remaining local setup issue.
 Windows voice capture requires FFmpeg with DirectShow; Alfred offers `winget` setup when it is
 available. Allow microphone access in Windows Privacy settings. Installers do not claim voice
 readiness until `alfred --doctor` verifies a live microphone stream.

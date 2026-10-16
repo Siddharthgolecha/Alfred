@@ -1244,9 +1244,9 @@ def main(argv=None):
             ui.ok("Alfred is ready. Open a new terminal and run: alfred")
             return 0
         ui.warn("Setup complete, but a readiness check needs attention")
-        ui.info("Run `alfred --doctor` after setting up a microphone and local model server")
+        ui.info("Run `alfred --doctor` to see which readiness component needs attention")
         ui.info("Installer log: " + str(log_path()))
-        return 0
+        return 2
     except KeyboardInterrupt:
         ui.warn("Setup interrupted. Completed steps are safe to reuse; rerun the installer to continue.")
         return 130
