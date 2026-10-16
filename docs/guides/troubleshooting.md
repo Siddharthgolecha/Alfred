@@ -64,7 +64,9 @@ Tune `audio.speech_rms`. See [Hardware setup](../getting-started/hardware-setup.
 | Alfred ignores your command | The phrase must start the utterance. Say "Alfred, ..." or "Hey Alfred, ...". |
 | Follow-up not accepted | The window is `wake_word.followup_seconds` (default 8) and covers one utterance. |
 | `wake_word.mode=openwakeword requires a local custom model` | Set `wake_word.model_path` to an existing ONNX file. |
-| `Acoustic wake detection requires: pip install '.[wakeword]'` | Install the extra: `pip install -e '.[wakeword]'`. |
+| `Acoustic wake detection requires: pip install '.[wakeword]'` | On Linux use `uv sync --extra wakeword` (or `uv sync --active --extra wakeword` for an activated external venv). On Python 3.10/3.11, pip also works. |
+| `tflite-runtime==2.14.0` has no wheel for `cp312` | Optional `openwakeword` pulls TFLite metadata on Linux even though Alfred uses ONNX. Use `uv sync --extra wakeword` (or `--active`); do not use `pip install -e '.[wakeword]'` on Python 3.12+. |
+| `VIRTUAL_ENV=...` does not match `.venv` | uv intentionally targets the project venv. Use `uv sync --active --extra wakeword` if you want the already activated external environment. |
 | Everything is processed, no wake word needed | `wake_word.enabled` is `false`. |
 
 See [Wake word](wake-word.md).

@@ -12,7 +12,7 @@ below as the intended procedure and verify each one on your board. See the
 
 | Requirement | Detail |
 |---|---|
-| Python | 3.10 or newer. CI runs 3.10 and 3.12. |
+| Python | 3.10 or newer for Alfred core. CI runs 3.10 and 3.12. For Linux acoustic wake-word installs on Python 3.12+, use `uv sync` as described below. |
 | Bluetooth | A working adapter with BlueZ, if you use a Bluetooth headset. |
 | Audio server | PulseAudio, or PipeWire with `pipewire-pulse`. Alfred records with `parec` and inspects devices with `pactl`. |
 | Inference backend | One of llama.cpp, Ollama or LM Studio, serving a Qwen 3.5 model on loopback. See [Inference backends](../guides/inference-backends.md). |
@@ -43,9 +43,36 @@ Optional extras:
 
 | Extra | Command | Purpose |
 |---|---|---|
-| `wakeword` | `pip install -e '.[wakeword]'` | `openwakeword` and `numpy`, for [acoustic wake-word gating](../guides/wake-word.md#acoustic-gating). |
+| `wakeword` | `uv sync --extra wakeword` (Linux, recommended), or `pip install -e '.[wakeword]'` (Python 3.10/3.11 only) | ONNX `openwakeword` and `numpy`, for [acoustic wake-word gating](../guides/wake-word.md#acoustic-gating). |
 | `test` | `pip install -e '.[test]'` | `pytest`, an optional runner. CI and these docs use `python -m unittest`. |
 | `docs` | `pip install -e '.[docs]'` | Sphinx toolchain, to [build these docs](../development/documentation.md). |
+
+### Acoustic wake-word dependency on Linux (Python 3.12+)
+
+Alfred selects openWakeWord's **ONNX** inference engine, so it does not use TensorFlow Lite.
+Upstream `openwakeword==0.6.0` nevertheless declares `tflite-runtime` on Linux, and
+`tflite-runtime==2.14.0` publishes wheels only for CPython 3.10 and 3.11.
+On Python 3.12+, `pip install -e '.[wakeword]'` can therefore fail even though ONNX works.
+The repository's `[tool.uv]` setting deliberately excludes this unused transitive package
+from **uv project syncs**; it does not change how `pip` resolves requirements.
+
+For the project's default `.venv`:
+
+```bash
+uv sync --extra wakeword
+```
+
+For an already activated environment outside the project (for example
+`/home/intrinsic/.venvs/alfred/`), explicitly target it:
+
+```bash
+uv sync --active --extra wakeword
+```
+
+Without `--active`, uv uses the project's `.venv` and warns that the other
+`VIRTUAL_ENV` is being ignored. Make sure `python -V` and `uv run python -V`
+refer to the environment you intended. For Python 3.10/3.11, the `pip` command
+in the optional-extras table remains available.
 
 ### Offline or checksum-verified Harness install
 

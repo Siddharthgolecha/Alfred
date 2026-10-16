@@ -21,8 +21,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install offline-unit-test Python requirements
+        run: python -m pip install 'pydantic>=2.12,<3' 'pytest>=8'
       - name: Install optional offline PDF and QR dependencies
-        run: python -m pip install "reportlab>=4" "qrcode[pil]>=7.4"
+        run: python -m pip install 'reportlab>=4' 'qrcode[pil]>=7.4'
       - name: Check Python syntax
         run: python -m compileall -q alfred tests
       - name: Unit tests (native Cactus engine not required)
@@ -42,6 +44,29 @@ jobs:
           retention-days: 30
       - name: Scoped context overhead P50/P95 (mock inference, paired baseline)
         run: PYTHONPATH=. python tests/bench_context_fastpath.py
+
+  wakeword-dependency-resolution:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v6
+      - name: Resolve Linux ONNX acoustic-wakeword extra
+        run: |
+          uv sync --dry-run --extra wakeword --python "${{ matrix.python-version }}"
+          uv tree --python-version "${{ matrix.python-version }}" --python-platform x86_64-unknown-linux-gnu > /tmp/wakeword-deps.txt
+          grep -qi 'openwakeword' /tmp/wakeword-deps.txt
+          grep -qi 'onnxruntime' /tmp/wakeword-deps.txt
+          if grep -qi 'tflite-runtime' /tmp/wakeword-deps.txt; then
+            echo 'Unexpected TFLite dependency in ONNX-only wakeword install' >&2
+            exit 1
+          fi
 
   docs:
     runs-on: ubuntu-latest
