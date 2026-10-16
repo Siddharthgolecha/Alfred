@@ -4,12 +4,18 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 from types import SimpleNamespace
+import urllib.error
 import unittest
+from contextlib import nullcontext, redirect_stdout
 from unittest.mock import Mock, patch
 
+import alfred.app  # Load the composition root before its CLI compatibility re-export.
+from alfred import cli
 from scripts.installer import core
+from scripts.installer.state import InstallerLock, InstallerState
 from scripts.installer.ui import Terminal
 from alfred.audio import AudioManager, WindowsAudioManager, _windows_capture_command
 from alfred.feedback import _tts_argv
@@ -17,6 +23,113 @@ from alfred.platform_utils import IS_WINDOWS
 
 
 class InstallerUITests(unittest.TestCase):
+    def test_resume_prompts_for_lmstudio_model_when_saved_id_is_stale(self):
+        wizard = core.Wizard.__new__(core.Wizard)
+        wizard.args = SimpleNamespace(backend=None, auto=False, skip_models=True,
+                                      customize=False)
+        wizard.settings = {"backend": "lmstudio", "model": "missing/model",
+                           "skip_models": True}
+        wizard.config = {"qwen": {"backend": "lm_studio", "url": "http://127.0.0.1:1234",
+                                  "model": "missing/model"}}
+        wizard.original_config = json.loads(json.dumps(wizard.config))
+        wizard.state = SimpleNamespace(
+            saved_choices=lambda: {"values": {"model": "missing/model"},
+                                   "base_config_hash": "base"},
+            remember_choices=Mock())
+        wizard.ui = SimpleNamespace(header=Mock(), info=Mock(), warn=Mock(),
+                                    choose=Mock(return_value="model:qwen/qwen3.8-27b"))
+        wizard._restore_choices = True
+        with patch.object(wizard, "preflight"), \
+             patch.object(core, "_query_lmstudio_models",
+                          return_value=["qwen/qwen3.8-27b", "lightonocr-2-1b"]):
+            self.assertTrue(wizard.collect())
+        self.assertEqual(wizard.settings["model"], "qwen/qwen3.8-27b")
+        wizard.ui.choose.assert_called_once()
+        wizard.state.remember_choices.assert_called_once()
+
+    def test_auto_resume_rejects_stale_lmstudio_model_with_available_ids(self):
+        wizard = core.Wizard.__new__(core.Wizard)
+        wizard.args = SimpleNamespace(auto=True)
+        wizard.settings = {"backend": "lmstudio"}
+        wizard.config = {"qwen": {"model": "missing/model", "url": "http://127.0.0.1:1234"}}
+        with patch.object(core, "_query_lmstudio_models", return_value=["available/model"]):
+            with self.assertRaisesRegex(RuntimeError, "available models: available/model"):
+                wizard.choose_model(force=True)
+
+    def test_lmstudio_model_discovery_uses_local_cli_if_server_is_down(self):
+        body = json.dumps([{"type": "llm", "modelKey": "qwen/model"},
+                           {"type": "embedding", "modelKey": "embed/model"}])
+        result = subprocess.CompletedProcess([], 0, stdout=body, stderr="")
+        with patch.object(core, "_query_model_ids", return_value=[]), \
+             patch.object(core, "_find_lms", return_value="/fake/lms"), \
+             patch.object(core.subprocess, "run", return_value=result):
+            self.assertEqual(core._query_lmstudio_models("http://127.0.0.1:1234"), ["qwen/model"])
+
+    def test_doctor_reports_missing_model_before_resource_gated_harness_audit(self):
+        supervisor = SimpleNamespace(url="http://127.0.0.1:1234",
+                                     model_id=Mock(side_effect=RuntimeError(
+                                         "model 'wanted' is unavailable; served models: ['other']")))
+        cfg = {"qwen": {"enabled": True}, "runtime": {}}
+        output = io.StringIO()
+        with patch.object(cli, "LocalHarness") as harness, \
+             patch.object(cli, "InferenceAdmission") as admission, \
+             redirect_stdout(output):
+            ready = cli._diagnose_harness(
+                cfg, supervisor, {"health": "ready", "model": None})
+        self.assertFalse(ready)
+        self.assertIn("served models: ['other']", output.getvalue())
+        self.assertIn("configured Qwen model is not served", output.getvalue())
+        harness.assert_not_called()
+        admission.assert_not_called()
+
+    def test_installer_returns_two_when_doctor_reports_unready(self):
+        wizard = Mock()
+        wizard.collect.return_value = True
+        wizard.settings = {"service": False}
+        wizard.config_path = Path("config.json")
+        wizard.install.return_value = Path(".venv/bin/python")
+        ui = SimpleNamespace(warn=Mock(), info=Mock(), error=Mock(), section=Mock(),
+                             ok=Mock(), header=Mock())
+        result = subprocess.CompletedProcess([], 2)
+        with patch.object(core, "Terminal", return_value=ui), \
+             patch.object(core, "InstallerLock", return_value=nullcontext()), \
+             patch.object(core, "Wizard", return_value=wizard), \
+             patch.object(core.subprocess, "run", return_value=result):
+            self.assertEqual(core.main(["--auto"]), 2)
+
+    def test_lm_studio_setup_starts_local_server_on_configured_port(self):
+        wizard = core.Wizard.__new__(core.Wizard)
+        wizard.system = "Darwin"
+        wizard.settings = {"backend": "lmstudio"}
+        wizard.config = {"qwen": {"url": "http://127.0.0.1:12345", "model": "qwen-local"}}
+        wizard.ui = SimpleNamespace(ok=Mock(), info=Mock(), warn=Mock())
+        with patch.object(core, "_endpoint_ready", side_effect=[False, True]), \
+             patch.object(core, "_find_lms", return_value="/fake/lms"), \
+             patch.object(core, "_query_model_ids", return_value=["qwen-local"]), \
+             patch.object(core, "_call") as call, \
+             patch.object(core.time, "sleep"):
+            status = wizard._backend("uv", Path("python"), {}, Path("installer.log"))
+        self.assertEqual(status, {"server_ready": True})
+        self.assertEqual(call.call_args.args[0],
+                         ["/fake/lms", "server", "start", "--port", "12345", "--bind", "127.0.0.1"])
+
+    def test_lm_studio_does_not_start_remote_backend(self):
+        wizard = core.Wizard.__new__(core.Wizard)
+        wizard.system = "Darwin"
+        wizard.settings = {"backend": "lmstudio"}
+        wizard.config = {"qwen": {"url": "https://models.example.test:1234"}}
+        wizard.ui = SimpleNamespace(ok=Mock(), info=Mock(), warn=Mock())
+        with patch.object(core, "_call") as call:
+            wizard._backend("uv", Path("python"), {}, Path("installer.log"))
+        call.assert_not_called()
+        wizard.ui.info.assert_called_once()
+
+    def test_lm_studio_loopback_detection_preserves_ipv6_binding(self):
+        self.assertTrue(core._loopback_url("http://[::1]:1234"))
+        self.assertTrue(core._loopback_url("http://localhost:1234"))
+        self.assertFalse(core._loopback_url("https://models.example.test:1234"))
+        self.assertEqual(core._loopback_bind("http://[::1]:1234"), "::1")
+
     def test_numbered_prompt_uses_default_and_stable_value(self):
         out = io.StringIO()
         ui = Terminal(stream=out, input_stream=io.StringIO("\n"), plain=True)
@@ -54,6 +167,18 @@ class InstallerUITests(unittest.TestCase):
 
 
 class ConfigPersistenceTests(unittest.TestCase):
+    def test_project_verification_reads_installed_metadata_outside_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "checkout"
+            root.mkdir()
+            expected = {"version": "0.1.0", "direct": json.dumps({
+                "url": root.resolve().as_uri(), "dir_info": {"editable": True}})}
+            result = subprocess.CompletedProcess([], 0, stdout=json.dumps(expected), stderr="")
+            with patch.object(core, "ROOT", root), \
+                 patch.object(core.subprocess, "run", return_value=result) as run_probe:
+                self.assertTrue(core.Wizard.__new__(core.Wizard)._project_ready(Path("python")))
+            self.assertEqual(run_probe.call_args.kwargs["cwd"], root.parent)
+
     def test_config_is_atomic_preserves_unrelated_keys_and_keeps_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "folder with spaces" / "config.json"
@@ -102,6 +227,215 @@ class ConfigPersistenceTests(unittest.TestCase):
                  patch.dict(os.environ, {"ALFRED_BACKEND": "llamacpp"}):
                 wizard = core.Wizard(args, ui)
                 self.assertEqual(wizard.choose_backend(), "lmstudio")
+
+    def test_quick_setup_preserves_custom_backend_url_and_missing_bluetooth_device(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "coordination").mkdir()
+            (root / "config.example.json").write_text(json.dumps({
+                "audio": {"mode": "bluetooth", "bluetooth_address": "AA:BB:CC:DD:EE:FF",
+                          "direct_source": "bluez_input.AA_BB_CC_DD_EE_FF.0"},
+                "qwen": {"backend": "ollama", "url": "http://127.0.0.1:22434",
+                         "model": "custom:latest"}}))
+            args = SimpleNamespace(backend=None, auto=False, customize=False,
+                                   skip_models=True, service=False, wheelhouse=None)
+            ui = Terminal(stream=io.StringIO(), input_stream=io.StringIO(), plain=True)
+            with patch.object(core, "ROOT", root), patch.object(core, "_detect_audio", return_value=[]), \
+                 patch.object(core, "_detect_backend", return_value=[]):
+                wizard = core.Wizard(args, ui)
+                wizard.quick = True
+                wizard.choose_audio()
+                wizard.settings.update(backend="ollama", model="custom:latest")
+                self.assertEqual(wizard.settings["audio"], "saved")
+                wizard._configure()
+                self.assertEqual(wizard.config["audio"]["bluetooth_address"], "AA:BB:CC:DD:EE:FF")
+                self.assertEqual(wizard.config["audio"]["direct_source"],
+                                 "bluez_input.AA_BB_CC_DD_EE_FF.0")
+                self.assertEqual(wizard.config["qwen"]["url"], "http://127.0.0.1:22434")
+
+    def test_installer_state_is_atomic_and_scoped_to_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_home = root / "state"
+            with patch("scripts.installer.state.state_root", return_value=state_home):
+                state = InstallerState(root / "checkout")
+                inputs = {"python": "3.12", "lock": "abc"}
+                state.complete("runtime", inputs, output={"pydantic": "2.12.0"})
+                state.remember_choices({"backend": "ollama"}, base_config_hash="base")
+                loaded = InstallerState(root / "checkout")
+                self.assertTrue(loaded.matches("runtime", inputs))
+                self.assertEqual(loaded.data["steps"]["runtime"]["output"],
+                                 {"pydantic": "2.12.0"})
+                self.assertEqual(loaded.saved_choices()["values"], {"backend": "ollama"})
+                self.assertFalse(loaded.matches("runtime", {**inputs, "python": "3.10"}))
+                self.assertNotEqual(loaded.path, InstallerState(root / "other-checkout").path)
+                self.assertEqual(list(loaded.path.parent.glob("*.tmp")), [])
+
+    def test_checkout_lock_rejects_concurrent_installers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch("scripts.installer.state.state_root", return_value=root / "state"):
+                with InstallerLock(root / "checkout"):
+                    with self.assertRaisesRegex(RuntimeError, "Another Alfred installer"):
+                        with InstallerLock(root / "checkout"):
+                            pass
+
+    def test_unchanged_second_install_reuses_environment_packages_and_harness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "coordination").mkdir()
+            (root / "pyproject.toml").write_text("[project]\nname='alfred-jetson'\nversion='0.1.0'\n")
+            (root / "uv.lock").write_text("locked packages")
+            sdk_data, runtime_data = b"verified sdk wheel", b"verified runtime wheel"
+            sdk_sha, runtime_sha = (hashlib.sha256(sdk_data).hexdigest(),
+                                    hashlib.sha256(runtime_data).hexdigest())
+            lock = {"version": core.RUNTIME,
+                    "sdk": {"filename": "sdk.whl", "sha256": sdk_sha},
+                    "runtime": {"linux_x86_64": {"filename": "runtime.whl",
+                                                    "sha256": runtime_sha}}}
+            (root / "coordination" / "deepseek-harness-lock.json").write_text(json.dumps(lock))
+            wheels = [root / "sdk.whl", root / "runtime.whl"]
+            wheels[0].write_bytes(sdk_data)
+            wheels[1].write_bytes(runtime_data)
+            state_dir = root / "state"
+            packages = {"cactus-needle": "3.2.2", "pydantic": "2.14.1",
+                        "alfred-jetson": "0.1.0"}
+            ui = SimpleNamespace(ok=Mock(), info=Mock(), warn=Mock(), section=Mock(),
+                                 out=io.StringIO())
+            args = SimpleNamespace(auto=True, repair=False, wheelhouse=None)
+            with patch.object(core, "ROOT", root), \
+                 patch.object(core, "state_root", return_value=state_dir), \
+                 patch("scripts.installer.state.state_root", return_value=state_dir), \
+                 patch.object(core, "_install_uv", return_value="/tools/uv"), \
+                 patch.object(core, "_ensure_system_tools"), \
+                 patch.object(core, "_detect_backend", return_value=[]), \
+                 patch.object(core, "_detect_audio", return_value=[]), \
+                 patch.object(core, "_package_snapshot", side_effect=lambda *_args: dict(packages)), \
+                 patch.object(core, "_download_verified_wheels", return_value=wheels) as download, \
+                 patch.object(core, "_call") as call, \
+                 patch.object(core.Wizard, "_environment_ready", return_value=True), \
+                 patch.object(core.Wizard, "_project_ready", return_value=True), \
+                 patch("pathlib.Path.home", return_value=root / "home"), \
+                 patch.object(core.Wizard, "_install_launcher") as launcher:
+                wizard = core.Wizard.__new__(core.Wizard)
+                wizard.args, wizard.ui, wizard.system = args, ui, "Linux"
+                wizard.config_path = root / "config.json"
+                wizard.config = {"audio": {"mode": "auto", "direct_source": ""},
+                                 "qwen": {"backend": "auto", "url": "", "model": ""}}
+                wizard.original_config = json.loads(json.dumps(wizard.config))
+                wizard.installed = False
+                wizard.settings = {"runtime_target": "linux_x86_64", "backend": "skip",
+                                   "model": "", "audio": "saved", "skip_models": True,
+                                   "service": False, "auto": True}
+                wizard.state = InstallerState(root)
+                wizard.existing_backends, wizard.existing_audio = [], []
+                def install_command(argv, _ui, label, **_kwargs):
+                    if label == "Installing verified DeepSeek Harness":
+                        packages.update({"deepseek-harness-sdk": core.RUNTIME,
+                                         "deepseek-harness-runtime-bin": core.RUNTIME})
+                    return subprocess.CompletedProcess(argv, 0)
+                call.side_effect = install_command
+                def write_launcher(_python):
+                    path = Path.home() / ".local" / "bin" / "alfred"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("#!/bin/sh\nexec " + str(root / ".venv" / "bin" / "python") +
+                                    " -m alfred --config " + str(root / "config.json") +
+                                    ' "$@"\n', encoding="utf-8")
+                    path.chmod(0o755)
+                launcher.side_effect = write_launcher
+                wizard.install()
+                first_run_commands = call.call_count
+                first_run_downloads = download.call_count
+                # --repair should recover a damaged environment, but it must
+                # not discard receipts when the existing environment verifies.
+                (root / ".venv").mkdir()
+                args.repair = True
+                wizard.install()
+                self.assertGreater(first_run_commands, 0)
+                self.assertEqual(call.call_count, first_run_commands)
+                self.assertEqual(download.call_count, first_run_downloads)
+                self.assertEqual(first_run_downloads, 1)
+                self.assertEqual(launcher.call_count, 1)
+                self.assertTrue((root / ".venv").is_dir())
+                self.assertTrue(ui.info.called)
+
+    def test_harness_download_resumes_partial_wheel_and_reuses_verified_sibling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "coordination").mkdir()
+            sdk, runtime = b"pinned sdk bytes", b"pinned runtime bytes for range resume"
+            lock = {"version": core.RUNTIME,
+                    "sdk": {"filename": "sdk.whl", "sha256": hashlib.sha256(sdk).hexdigest(),
+                            "url": "https://example.invalid/sdk.whl"},
+                    "runtime": {"linux_x86_64": {
+                        "filename": "runtime.whl", "sha256": hashlib.sha256(runtime).hexdigest(),
+                        "url": "https://example.invalid/runtime.whl"}}}
+            (root / "coordination" / "deepseek-harness-lock.json").write_text(json.dumps(lock))
+            cache = root / "cache"
+            cache.mkdir()
+            (cache / "sdk.whl").write_bytes(sdk)
+            partial = cache / "runtime.whl.part"
+            partial.write_bytes(runtime[:5])
+
+            class Response(io.BytesIO):
+                def __init__(self, data, start, *, fail_after=None):
+                    super().__init__(data)
+                    self.status = 206
+                    self.headers = {"Content-Range": f"bytes {start}-{start + len(data) - 1}/{len(runtime)}",
+                                    "Content-Length": str(len(data))}
+                    self.fail_after = fail_after
+                    self.read_count = 0
+                def getcode(self):
+                    return self.status
+                def read(self, size=-1):
+                    self.read_count += 1
+                    if self.fail_after and self.read_count > self.fail_after:
+                        raise urllib.error.URLError("connection reset")
+                    return super().read(size)
+
+            from urllib.request import Request
+            seen_ranges = []
+            def open_range(request, timeout):
+                offset = int(request.get_header("Range").split("=")[1].split("-")[0])
+                seen_ranges.append(offset)
+                if len(seen_ranges) == 1:
+                    return Response(runtime[offset:offset + 8], offset, fail_after=1)
+                return Response(runtime[offset:], offset)
+
+            ui = SimpleNamespace(ok=Mock(), info=Mock(), warn=Mock(),
+                                 download_progress=Mock(), finish_download=Mock())
+            with patch.object(core, "ROOT", root), \
+                 patch("urllib.request.urlopen", side_effect=open_range), \
+                 patch.object(core.time, "sleep"):
+                wheels = core._download_verified_wheels(cache, "linux_x86_64", ui)
+            self.assertEqual(seen_ranges, [5, 13])
+            self.assertEqual(wheels[0].read_bytes(), sdk)
+            self.assertEqual(wheels[1].read_bytes(), runtime)
+            self.assertFalse(partial.exists())
+            self.assertTrue(any("verified" in call.args[0].lower()
+                                for call in ui.ok.call_args_list))
+
+    @unittest.skipIf(IS_WINDOWS, "systemd user services are Linux-only")
+    def test_systemd_service_quotes_paths_and_includes_selected_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            service_root = home / "Alfred project"
+            config = service_root / "config file.json"
+            ui = SimpleNamespace(ok=Mock(), warn=Mock())
+            calls = []
+            def systemctl(argv, **_kwargs):
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0)
+            with patch.object(core.platform, "system", return_value="Linux"), \
+                 patch.object(core, "_has", return_value=True), \
+                 patch("scripts.installer.core.Path.home", return_value=home), \
+                 patch.object(core.subprocess, "run", side_effect=systemctl):
+                self.assertTrue(core._service(ui, Path("/venvs/my python"), service_root, config))
+            unit = (home / ".config" / "systemd" / "user" / "alfred.service").read_text()
+            self.assertIn('WorkingDirectory="' + str(service_root) + '"', unit)
+            self.assertIn('ExecStart="/venvs/my python" "-m" "alfred" "--config" "' +
+                          str(config) + '"', unit)
+            self.assertEqual(len(calls), 3)
 
     def test_auto_requires_a_backend_when_config_is_still_auto(self):
         with tempfile.TemporaryDirectory() as tmp:

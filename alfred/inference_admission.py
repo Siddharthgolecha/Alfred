@@ -14,7 +14,7 @@ from pathlib import Path
 import threading
 import time
 
-from .platform_utils import sample_resources as _platform_sample_resources
+from .platform_utils import IS_MACOS, sample_resources as _platform_sample_resources
 
 
 @dataclass(frozen=True)
@@ -106,6 +106,7 @@ class InferenceAdmission:
         self._counts={"granted":0,"rejected":0,"pressure":0,"queued":0}
         self._latencies=[]
         self._sampled=None
+        self._pressure_reasons=[]
 
     def set_capture_active(self, active):
         if type(active) is not bool:
@@ -134,11 +135,21 @@ class InferenceAdmission:
             ("available_mib","swap_used_mib","cpu_load_per_core"),vals)}
         # Whistle during active voice capture takes priority over optional
         # model turns, but still refuses truly critical memory exhaustion.
-        if vals[0]<self.min_available_mib or vals[1]>self.max_swap_used_mib:
-            return True
+        reasons=[]
+        if vals[0]<self.min_available_mib:
+            reasons.append(f"available memory {vals[0]:.0f} MiB is below "
+                           f"{self.min_available_mib} MiB")
+        # macOS retains swapped-out pages after pressure has passed. Current
+        # available memory is a better admission signal there; swap remains
+        # recorded for diagnostics, but swap use alone must not block work.
+        if not IS_MACOS and vals[1]>self.max_swap_used_mib:
+            reasons.append(f"swap use {vals[1]:.0f} MiB exceeds "
+                           f"{self.max_swap_used_mib} MiB")
         if kind!="whistle" and vals[2]>self.max_cpu_load_per_core:
-            return True
-        return False
+            reasons.append(f"CPU load per core {vals[2]:.2f} exceeds "
+                           f"{self.max_cpu_load_per_core:.2f}")
+        self._pressure_reasons=reasons
+        return bool(reasons)
 
     def _queue_is_full(self, kind):
         # Fixed per-priority admission slots. A burst of simultaneous
@@ -197,7 +208,8 @@ class InferenceAdmission:
                             raise
                         if pressure:
                             self._counts["pressure"]+=1
-                            raise AdmissionRejected("Inference refused due to resource pressure")
+                            raise AdmissionRejected("Inference refused: "
+                                                    + "; ".join(self._pressure_reasons))
                         self._owner=ticket
                         self._counts["granted"]+=1
                         self._latencies.append(min(10000.,max(0.,(self.clock()-start)*1000.)))

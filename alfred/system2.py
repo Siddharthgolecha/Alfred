@@ -1,4 +1,4 @@
-"""System 2 policy: stage sensitive plans; perform no tool side effect before approval.
+"""System2 policy: stage sensitive plans; perform no tool side effect before approval.
 
 An approval is a local, one-time CLI action, *not* an open-microphone "yes".
 The same policy applies to Needle direct calls and Qwen-generated plans.
@@ -12,9 +12,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from .constants import Limits, Patterns, Truncation, TTL
-
+from .inference_admission import AdmissionRejected
 from .models import QwenPlanResponseError
 from .runtime import TOOL_SCHEMAS, validate_plan
+from .system import System
 
 LOG = logging.getLogger(__name__)
 
@@ -177,9 +178,10 @@ class VerifiedRead:
     output: object
 
 
-class System2:
-    """Single entry for Qwen plans, with explicit read-only fallback."""
-    def __init__(self, qwen, tools, store, cfg):
+class System2(System):
+    """Local planner and policy gateway with explicit read-only fallback."""
+    def __init__(self, qwen, tools, store, cfg, admission=None):
+        super().__init__(admission)
         self.qwen=qwen
         self.tools=tools
         self.store=store
@@ -270,7 +272,7 @@ class System2:
             return {"status":"incomplete", "message":"No remaining tool budget.",
                     "results":completed, "partial":bool(completed)}
         if not self.qwen.cfg.get("enabled", True):
-            return {"status":"incomplete", "message":"Qwen is disabled; request remains incomplete.",
+            return {"status":"incomplete", "message":"System2 is disabled; request remains incomplete.",
                     "results":completed, "partial":bool(completed)}
         from .cognitive.escalation import READS
         catalog = [
@@ -305,12 +307,24 @@ class System2:
             return {**self._incomplete_plan(), "results":completed,
                     "partial":bool(completed)}
         except QwenPlanResponseError as exc:
-            LOG.warning("Qwen handoff plan invalid: %s", exc)
+            LOG.warning("System2 handoff plan invalid: %s", exc)
             return {**self._incomplete_plan(), "results":completed,
                     "partial":bool(completed)}
-        except (OSError, ValueError, RuntimeError, TimeoutError, ConnectionError):
+        except (OSError, ValueError, RuntimeError, TimeoutError, ConnectionError) as exc:
+            # Admission errors are generated locally and carry actionable
+            # reasons. Backend/SDK exception text can contain endpoint or
+            # response data, so log only its class for those failures.
+            detail = (str(exc) if isinstance(exc, AdmissionRejected)
+                      else "backend request failed")
+            LOG.warning("System2 unavailable during Harness handoff (%s): %s",
+                        type(exc).__name__, detail)
+            if isinstance(exc, AdmissionRejected):
+                message = (f"System2 could not accept this request ({detail}); "
+                           "no follow-up action executed. Retry shortly.")
+            else:
+                message = "System2 unavailable; no follow-up action executed."
             return {"status":"incomplete",
-                    "message":"Local reasoner unavailable; no follow-up action executed.",
+                    "message":message,
                     "results":completed, "partial":bool(completed)}
         # Never catch validation/execution failures as a signal to re-plan:
         # once delegated tool execution begins it cannot safely be replayed.
@@ -323,7 +337,7 @@ class System2:
         except (ValueError, PermissionError) as exc:
             # Reject unknown tools, duplicates, replay and privilege escalation;
             # never replan or lose previously completed read-only telemetry.
-            LOG.warning("Qwen handoff rejected before execution: %s", exc)
+            LOG.warning("System2 handoff rejected before execution: %s", exc)
             return {**self._incomplete_plan(), "results":completed,
                     "partial":bool(completed)}
         result = self.execute_or_stage(
@@ -360,13 +374,13 @@ class System2:
         except QwenPlanResponseError as exc:
             # Generation retries never confer authorization; a failed
             # structured response is a failed, non-executed plan.
-            LOG.warning("System 2 plan unavailable: %s", exc)
+            LOG.warning("System2 plan unavailable: %s", exc)
             return self._incomplete_plan()
         try:
             message,steps,save_as=parse_plan(plan,utterance,self.tools,
                                             self.cfg.get("max_plan_steps",5))
         except (ValueError, PermissionError) as exc:
-            LOG.warning("System 2 plan rejected by preflight: %s", exc)
+            LOG.warning("System2 plan rejected by preflight: %s", exc)
             return self._incomplete_plan()
         outcome = self.execute_or_stage(steps,message,save_as,allow_actions)
         # Only a completed, read-only plan may generate a second explanation.

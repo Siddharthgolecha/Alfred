@@ -87,7 +87,9 @@ class Alfred:
             if self.admission.enabled
             else Qwen(config["qwen"], self.supervisor)
         )
-        self.system2 = System2(self.qwen, self.tools, self.store, runtime)
+        self.system2 = System2(
+            self.qwen, self.tools, self.store, runtime, admission=self.admission
+        )
 
         model = config["qwen"]["model"] or config["qwen"]["expected_model"]
         self.harness = LocalHarness(
